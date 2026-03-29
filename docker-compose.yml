@@ -1,0 +1,24 @@
+services:
+  transcoder:
+    build:
+      context: .
+      # CPU default. Use --build-arg BASE=gpu for GPU.
+      args:
+        BASE: ${TRANSCODER_BASE:-cpu}
+    container_name: video-transcoder
+    restart: unless-stopped
+    env_file: .env
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.transcoder.rule=Host(`${TRANSCODER_DOMAIN:-transcoder.lms}`)"
+      - "traefik.http.routers.transcoder.entrypoints=${TRAEFIK_ENTRYPOINTS:-web}"
+      - "traefik.http.services.transcoder.loadbalancer.server.port=8000"
+      - "${TRAEFIK_TLS_LABEL:-traefik.enable=true}"
+    extra_hosts:
+      - "${VIDEOHUB_DOMAIN:-videohub.lms}:host-gateway"
+    networks:
+      lms-reverse-proxy:
+
+networks:
+  lms-reverse-proxy:
+    external: true
