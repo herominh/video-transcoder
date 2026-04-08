@@ -10,7 +10,7 @@ from pydantic import BaseModel, ValidationError
 from core.callback import send_callback, send_progress
 from core.config import Settings, _detected_encoder, _detected_preset, resolve_encoder
 from core.signing import verify_request
-from core.storage import download_source, upload_results
+from core.storage import download_source, upload_original, upload_results
 from core.transcoder import cleanup, transcode_to_hls
 
 logger = logging.getLogger(__name__)
@@ -25,8 +25,9 @@ class TranscodeRequest(BaseModel):
     encryption_key_hex: str | None = None
     segment_duration: int = 6
     callback_url: str
-    r2_bucket: str
-    r2_path_prefix: str
+    s3_bucket: str
+    s3_path_prefix: str
+    s3_original_path: str
     encoder: str | None = None
     preset: str | None = None
 
@@ -62,10 +63,10 @@ async def transcode(raw_request: Request, background_tasks: BackgroundTasks):
     settings = Settings(
         ffmpeg_encoder=actual_encoder,
         ffmpeg_preset=actual_preset,
-        r2_access_key_id=settings.r2_access_key_id,
-        r2_secret_access_key=settings.r2_secret_access_key,
-        r2_endpoint=settings.r2_endpoint,
-        r2_region=settings.r2_region,
+        s3_access_key_id=settings.s3_access_key_id,
+        s3_secret_access_key=settings.s3_secret_access_key,
+        s3_endpoint=settings.s3_endpoint,
+        s3_region=settings.s3_region,
         webhook_secret=settings.webhook_secret,
     )
 
@@ -89,10 +90,26 @@ def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
         send_progress(request.callback_url, settings.webhook_secret, request.uuid, stage, pct, msg)
 
     try:
-        # 1. Download source from presigned R2 URL.
+        # 1. Download source.
         logger.info("Starting transcode for %s", request.uuid)
         _progress("downloading", 0, "Downloading source")
         download_source(request.source_url, input_path)
+
+        # 1b. Upload original to S3 if source is external (not already in S3).
+        # PC upload: original already at s3_original_path via presigned PUT — skip.
+        # URL import: original is external — Transcoder uploads it.
+        source_is_s3 = bool(settings.s3_endpoint) and request.source_url.startswith(settings.s3_endpoint)
+        if not source_is_s3:
+            _progress("backing_up", 0, "Uploading original to storage")
+            upload_original(
+                settings=settings,
+                local_path=input_path,
+                bucket=request.s3_bucket,
+                s3_path=request.s3_original_path,
+            )
+
+        # 1c. Get source file size for callback.
+        source_filesize = os.path.getsize(input_path)
 
         # 2. Transcode to HLS.
         _progress("transcoding", 0, "Starting transcode")
@@ -106,13 +123,13 @@ def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
             progress_callback=lambda pct, msg: _progress("transcoding", pct, msg),
         )
 
-        # 3. Upload results to R2.
+        # 3. Upload results to S3.
         _progress("uploading", 0, "Uploading files")
         upload_results(
             settings=settings,
             output_dir=output_dir,
-            bucket=request.r2_bucket,
-            path_prefix=request.r2_path_prefix,
+            bucket=request.s3_bucket,
+            path_prefix=request.s3_path_prefix,
         )
 
         # 4. Send success callback.
@@ -127,6 +144,7 @@ def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
             thumbnail=result["thumbnail"],
             encoder=settings.ffmpeg_encoder,
             preset=settings.ffmpeg_preset,
+            source_filesize=source_filesize,
         )
 
         logger.info("Transcode completed for %s", request.uuid)

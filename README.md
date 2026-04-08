@@ -1,6 +1,6 @@
 # Video Transcoder
 
-Serverless video transcoding service. Receives jobs from Video Hub, transcodes with FFmpeg (GPU or CPU), uploads HLS segments to R2, sends callback on completion.
+Serverless video transcoding service. Receives jobs from Video Hub, transcodes with FFmpeg (GPU or CPU), uploads HLS segments to S3, sends callback on completion.
 
 ## Architecture
 
@@ -8,14 +8,14 @@ Serverless video transcoding service. Receives jobs from Video Hub, transcodes w
 Video Hub (Laravel)                    Video Transcoder (Python)
   │                                      │
   │  POST /transcode                     │  FastAPI receives webhook
-  │  (source_url, uuid, qualities, ...)  │  Downloads source from R2
+  │  (source_url, uuid, qualities, ...)  │  Downloads source from S3
   │                                      │  FFmpeg: h264_nvenc (GPU) or libx264 (CPU)
-  │                                      │  Uploads HLS to R2
+  │                                      │  Uploads HLS to S3
   │  ◄── POST callback ────────────────  │  Sends result back
   │  Updates DB: status=ready            │  Container dies (stateless)
 ```
 
-- `core/` — provider-agnostic: FFmpeg logic, R2 upload, callback, FastAPI app
+- `core/` — provider-agnostic: FFmpeg logic, S3 upload, callback, FastAPI app
 - `wrappers/` — one file per deployment target (Modal, Docker)
 - Stateless — no database, all job tracking lives in Video Hub
 
@@ -44,11 +44,11 @@ FFMPEG_ENCODER=libx264
 FFMPEG_PRESET=medium
 WEBHOOK_SECRET=test-secret
 
-# R2 credentials (optional for local testing)
-R2_ACCESS_KEY_ID=
-R2_SECRET_ACCESS_KEY=
-R2_ENDPOINT=
-R2_REGION=auto
+# S3 credentials (optional for local testing)
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_ENDPOINT=
+S3_REGION=auto
 ```
 
 ### 3. Run the server
@@ -116,16 +116,16 @@ curl -X POST http://localhost:8000/transcode \
     "segment_duration": 6,
     "callback_url": "http://host.docker.internal:9999/fake",
     "callback_token": "fake",
-    "r2_bucket": "fake-bucket",
-    "r2_path_prefix": "test/test-0001"
+    "s3_bucket": "fake-bucket",
+    "s3_path_prefix": "test/test-0001"
   }'
 ```
 
 > `host.docker.internal` lets the container reach your Mac's localhost.
 
-**Expected result:** Download and transcode succeed (check Docker logs). R2 upload and callback will fail without real credentials — that's fine for testing FFmpeg.
+**Expected result:** Download and transcode succeed (check Docker logs). S3 upload and callback will fail without real credentials — that's fine for testing FFmpeg.
 
-Fill in R2 credentials in `.env` and restart to test the full pipeline.
+Fill in S3 credentials in `.env` and restart to test the full pipeline.
 
 ## Environment Configuration
 
@@ -141,11 +141,11 @@ FFMPEG_ENCODER=libx264
 FFMPEG_PRESET=medium
 WEBHOOK_SECRET=test-secret
 
-# R2 (optional — leave empty to test transcoding only)
-R2_ACCESS_KEY_ID=
-R2_SECRET_ACCESS_KEY=
-R2_ENDPOINT=
-R2_REGION=auto
+# S3 (optional — leave empty to test transcoding only)
+S3_ACCESS_KEY_ID=
+S3_SECRET_ACCESS_KEY=
+S3_ENDPOINT=
+S3_REGION=auto
 
 # Docker Compose (not needed if using `docker run`)
 TRANSCODER_DOMAIN=transcoder.lms
@@ -168,11 +168,11 @@ FFMPEG_ENCODER=libx264          # or h264_nvenc if VPS has GPU
 FFMPEG_PRESET=medium            # or p4 for NVENC
 WEBHOOK_SECRET=<generate-a-strong-secret>
 
-# R2
-R2_ACCESS_KEY_ID=<your-key>
-R2_SECRET_ACCESS_KEY=<your-secret>
-R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
-R2_REGION=auto
+# S3
+S3_ACCESS_KEY_ID=<your-key>
+S3_SECRET_ACCESS_KEY=<your-secret>
+S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+S3_REGION=auto
 
 # Docker Compose — Traefik with TLS
 TRANSCODER_DOMAIN=transcoder.yourdomain.com
@@ -195,10 +195,10 @@ No Docker, no Traefik, no VPS. Modal handles everything. Config lives in Modal s
 modal secret create video-transcoder-secrets \
   FFMPEG_ENCODER=h264_nvenc \
   FFMPEG_PRESET=p4 \
-  R2_ACCESS_KEY_ID=<your-key> \
-  R2_SECRET_ACCESS_KEY=<your-secret> \
-  R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com \
-  R2_REGION=auto \
+  S3_ACCESS_KEY_ID=<your-key> \
+  S3_SECRET_ACCESS_KEY=<your-secret> \
+  S3_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com \
+  S3_REGION=auto \
   WEBHOOK_SECRET=<generate-a-strong-secret>
 ```
 
@@ -215,7 +215,7 @@ Video Hub reaches transcoder at: `https://your-org--video-transcoder.modal.run`
 | `FFMPEG_ENCODER` | `libx264` | `libx264` or `h264_nvenc` | `h264_nvenc` |
 | `FFMPEG_PRESET` | `medium` | `medium` or `p4` | `p4` |
 | `WEBHOOK_SECRET` | `test-secret` | strong random | strong random |
-| R2 creds | optional | required | required |
+| S3 creds | optional | required | required |
 | `TRANSCODER_DOMAIN` | `transcoder.lms` | `transcoder.yourdomain.com` | n/a (Modal URL) |
 | `TRANSCODER_BASE` | `cpu` | `cpu` or `gpu` | n/a |
 | `TRAEFIK_ENTRYPOINTS` | `web` | `websecure` | n/a |
@@ -237,10 +237,10 @@ modal setup              # one-time auth
 modal secret create video-transcoder-secrets \
   FFMPEG_ENCODER=h264_nvenc \
   FFMPEG_PRESET=p4 \
-  R2_ACCESS_KEY_ID=xxx \
-  R2_SECRET_ACCESS_KEY=xxx \
-  R2_ENDPOINT=https://xxx.r2.cloudflarestorage.com \
-  R2_REGION=auto \
+  S3_ACCESS_KEY_ID=xxx \
+  S3_SECRET_ACCESS_KEY=xxx \
+  S3_ENDPOINT=https://xxx.r2.cloudflarestorage.com \
+  S3_REGION=auto \
   WEBHOOK_SECRET=your-secret
 ```
 
@@ -277,8 +277,8 @@ Starts a transcode job. Auth via `Authorization: Bearer <WEBHOOK_SECRET>`.
   "segment_duration": 6,
   "callback_url": "https://videohub.example.com/api/transcode/callback",
   "callback_token": "bearer-token",
-  "r2_bucket": "videohub-myorg",
-  "r2_path_prefix": "videos/550e8400-..."
+  "s3_bucket": "videohub-myorg",
+  "s3_path_prefix": "videos/550e8400-..."
 }
 ```
 
@@ -291,8 +291,8 @@ Starts a transcode job. Auth via `Authorization: Bearer <WEBHOOK_SECRET>`.
 | `segment_duration` | no | HLS segment length in seconds (default: 6) |
 | `callback_url` | yes | URL to POST results to |
 | `callback_token` | yes | Bearer token for callback auth |
-| `r2_bucket` | yes | R2 bucket name |
-| `r2_path_prefix` | yes | R2 path prefix for uploaded files |
+| `s3_bucket` | yes | S3 bucket name |
+| `s3_path_prefix` | yes | S3 path prefix for uploaded files |
 
 **Callback (success):**
 ```json

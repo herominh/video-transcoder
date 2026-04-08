@@ -208,10 +208,10 @@ def resolve_encoder(
 class Settings:
     ffmpeg_encoder: str = "h264_nvenc"
     ffmpeg_preset: str = "p4"
-    r2_access_key_id: str = ""
-    r2_secret_access_key: str = ""
-    r2_endpoint: str = ""
-    r2_region: str = "auto"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: str = ""
+    s3_endpoint: str = ""
+    s3_region: str = "auto"
     webhook_secret: str = ""
 
     @classmethod
@@ -222,9 +222,9 @@ class Settings:
         return cls(
             ffmpeg_encoder=encoder,
             ffmpeg_preset=preset,
-            r2_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
-            r2_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
-            r2_endpoint=os.environ.get("R2_ENDPOINT", ""),
-            r2_region=os.environ.get("R2_REGION", "auto"),
+            s3_access_key_id=os.environ.get("S3_ACCESS_KEY_ID", ""),
+            s3_secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY", ""),
+            s3_endpoint=os.environ.get("S3_ENDPOINT", ""),
+            s3_region=os.environ.get("S3_REGION", "auto"),
             webhook_secret=os.environ.get("WEBHOOK_SECRET", ""),
         )

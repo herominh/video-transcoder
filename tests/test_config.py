@@ -81,8 +81,8 @@ class TestSettings:
         # Clear relevant env vars to test auto-detection fallback.
         env_keys = [
             "FFMPEG_ENCODER", "FFMPEG_PRESET",
-            "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
-            "R2_ENDPOINT", "R2_REGION", "WEBHOOK_SECRET",
+            "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY",
+            "S3_ENDPOINT", "S3_REGION", "WEBHOOK_SECRET",
         ]
         saved = {k: os.environ.pop(k, None) for k in env_keys}
 
@@ -90,7 +90,7 @@ class TestSettings:
             s = Settings.from_env()
             assert s.ffmpeg_encoder == _detected_encoder
             assert s.ffmpeg_preset == _detected_preset
-            assert s.r2_region == "auto"
+            assert s.s3_region == "auto"
         finally:
             for k, v in saved.items():
                 if v is not None:

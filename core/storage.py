@@ -19,12 +19,12 @@ CONTENT_TYPES = {
     ".json": "application/json",
 }
 
-# Files to skip during upload — keys are served from Video Hub DB, not R2.
+# Files to skip during upload — keys are served from Video Hub DB, not S3.
 SKIP_SUFFIXES = (".keyinfo", "enc.key")
 
 
 def download_source(presigned_url: str, dest_path: str) -> None:
-    """Download source video from a presigned R2 URL using requests streaming."""
+    """Download source video from a presigned S3 URL using requests streaming."""
     logger.info("Downloading source to %s", dest_path)
 
     with requests.get(presigned_url, stream=True, timeout=(30, 3600)) as response:
@@ -37,13 +37,35 @@ def download_source(presigned_url: str, dest_path: str) -> None:
     logger.info("Download complete: %.1f MB", size_mb)
 
 
+def upload_original(
+    settings: Settings,
+    local_path: str,
+    bucket: str,
+    s3_path: str,
+) -> None:
+    """Upload the original source file to S3."""
+    client = _create_s3_client(settings)
+    content_type = _get_content_type(os.path.basename(local_path))
+
+    logger.info("Uploading original to %s/%s", bucket, s3_path)
+    client.upload_file(
+        local_path,
+        bucket,
+        s3_path,
+        ExtraArgs={"ContentType": content_type},
+    )
+
+    size_mb = os.path.getsize(local_path) / (1024 * 1024)
+    logger.info("Original uploaded: %.1f MB", size_mb)
+
+
 def upload_results(
     settings: Settings,
     output_dir: str,
     bucket: str,
     path_prefix: str,
 ) -> int:
-    """Upload transcoded files to R2. Returns count of uploaded files.
+    """Upload transcoded files to S3. Returns count of uploaded files.
 
     Skips .keyinfo and enc.key files (encryption keys are served from DB).
     """
@@ -58,29 +80,29 @@ def upload_results(
             if any(relative_path.endswith(s) for s in SKIP_SUFFIXES):
                 continue
 
-            r2_key = f"{path_prefix}/{relative_path}"
+            s3_key = f"{path_prefix}/{relative_path}"
             content_type = _get_content_type(filename)
 
             client.upload_file(
                 local_path,
                 bucket,
-                r2_key,
+                s3_key,
                 ExtraArgs={"ContentType": content_type},
             )
             uploaded += 1
 
-    logger.info("Uploaded %d files to R2 bucket %s", uploaded, bucket)
+    logger.info("Uploaded %d files to S3 bucket %s", uploaded, bucket)
     return uploaded
 
 
 def _create_s3_client(settings: Settings):
-    """Create a boto3 S3 client configured for R2."""
+    """Create a boto3 S3 client configured for S3-compatible storage."""
     return boto3.client(
         "s3",
-        region_name=settings.r2_region,
-        endpoint_url=settings.r2_endpoint,
-        aws_access_key_id=settings.r2_access_key_id,
-        aws_secret_access_key=settings.r2_secret_access_key,
+        region_name=settings.s3_region,
+        endpoint_url=settings.s3_endpoint,
+        aws_access_key_id=settings.s3_access_key_id,
+        aws_secret_access_key=settings.s3_secret_access_key,
     )
 
 

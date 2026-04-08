@@ -70,6 +70,7 @@ def send_callback(
     error_message: str | None = None,
     encoder: str | None = None,
     preset: str | None = None,
+    source_filesize: int | None = None,
 ) -> None:
     """POST transcode result back to Video Hub."""
     payload: dict = {
@@ -86,6 +87,8 @@ def send_callback(
             payload["encoder"] = encoder
         if preset:
             payload["preset"] = preset
+        if source_filesize is not None:
+            payload["source_filesize"] = source_filesize
     elif status == "failed":
         payload["error_message"] = error_message
 

@@ -1,8 +1,15 @@
-"""Modal wrapper — mounts the shared FastAPI app on a GPU container."""
+"""Modal wrapper — CPU web endpoint + GPU worker with independent lifecycle.
+
+The web endpoint validates HMAC and returns 202 immediately.
+The GPU worker runs in its own container with full timeout, fixing the
+background task killing issue from the previous single-function approach.
+"""
 
 import modal
 
 app = modal.App("video-transcoder")
+
+_secrets = [modal.Secret.from_name("video-transcoder-secrets")]
 
 image = (
     modal.Image.from_registry(
@@ -32,17 +39,86 @@ image = (
 
 @app.function(
     image=image,
-    gpu="T4",
+    gpu="L4",
     timeout=3600,
-    allow_concurrent_inputs=1,
-    secrets=[modal.Secret.from_name("video-transcoder-secrets")],
+    secrets=_secrets,
+)
+def process_transcode(request_dict: dict) -> None:
+    """GPU worker — own container, own lifecycle.
+
+    Runs _process_transcode synchronously. Sends its own callbacks to Video Hub.
+    """
+    import sys
+    sys.path.insert(0, "/app")
+
+    from core.api import TranscodeRequest, _process_transcode
+    from core.config import Settings, resolve_encoder
+
+    request = TranscodeRequest.model_validate(request_dict)
+    base_settings = Settings.from_env()
+
+    actual_encoder, actual_preset = resolve_encoder(request.encoder, request.preset)
+    settings = Settings(
+        ffmpeg_encoder=actual_encoder,
+        ffmpeg_preset=actual_preset,
+        r2_access_key_id=base_settings.r2_access_key_id,
+        r2_secret_access_key=base_settings.r2_secret_access_key,
+        r2_endpoint=base_settings.r2_endpoint,
+        r2_region=base_settings.r2_region,
+        webhook_secret=base_settings.webhook_secret,
+    )
+
+    _process_transcode(request, settings)
+
+
+@app.function(
+    image=image,
+    secrets=_secrets,
+    allow_concurrent_inputs=100,
 )
 @modal.asgi_app()
 def web():
+    """CPU web endpoint — validates HMAC, spawns GPU worker."""
     import sys
-
     sys.path.insert(0, "/app")
 
-    from core.api import app as fastapi_app
+    from fastapi import FastAPI, HTTPException, Request
+    from pydantic import ValidationError
+
+    from core.api import TranscodeRequest
+    from core.config import Settings, _detected_encoder, _detected_preset
+    from core.signing import verify_request
+
+    fastapi_app = FastAPI(title="Video Transcoder (Modal)", version="1.0.0")
+
+    @fastapi_app.get("/health")
+    def health():
+        return {
+            "status": "ok",
+            "runtime": "modal",
+            "encoder": _detected_encoder,
+            "preset": _detected_preset,
+        }
+
+    @fastapi_app.post("/transcode", status_code=202)
+    async def transcode(raw_request: Request):
+        settings = Settings.from_env()
+
+        body = await raw_request.body()
+        sig = raw_request.headers.get("X-Signature")
+        ts = raw_request.headers.get("X-Timestamp")
+
+        if not verify_request(body, sig, ts, settings.webhook_secret):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+
+        try:
+            request = TranscodeRequest.model_validate_json(body)
+        except ValidationError as e:
+            raise HTTPException(status_code=422, detail=e.errors())
+
+        # Fire-and-forget: GPU worker sends its own callbacks.
+        process_transcode.spawn(request.model_dump())
+
+        return {"status": "accepted", "uuid": request.uuid}
 
     return fastapi_app
