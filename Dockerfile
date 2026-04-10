@@ -7,8 +7,14 @@ ARG BASE=cpu
 # ---- GPU base ----
 FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04 AS base-gpu
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common gnupg curl python3.12 python3.12-venv python3-pip \
+    software-properties-common gnupg curl \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 python3.12-venv python3-pip \
     && curl -fsSL https://repo.jellyfin.org/jellyfin_team.gpg.key \
        | gpg --dearmor -o /usr/share/keyrings/jellyfin.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/jellyfin.gpg] https://repo.jellyfin.org/ubuntu jammy main" \

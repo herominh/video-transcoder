@@ -23,11 +23,11 @@ CONTENT_TYPES = {
 SKIP_SUFFIXES = (".keyinfo", "enc.key")
 
 
-def download_source(presigned_url: str, dest_path: str) -> None:
-    """Download source video from a presigned S3 URL using requests streaming."""
+def download_source(url: str, dest_path: str) -> None:
+    """Download source video from a URL (presigned or plain) using requests streaming."""
     logger.info("Downloading source to %s", dest_path)
 
-    with requests.get(presigned_url, stream=True, timeout=(30, 3600)) as response:
+    with requests.get(url, stream=True, timeout=(30, 3600)) as response:
         response.raise_for_status()
         with open(dest_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
@@ -35,6 +35,17 @@ def download_source(presigned_url: str, dest_path: str) -> None:
 
     size_mb = os.path.getsize(dest_path) / (1024 * 1024)
     logger.info("Download complete: %.1f MB", size_mb)
+
+
+def download_from_s3(settings: Settings, bucket: str, key: str, dest_path: str) -> None:
+    """Download source video directly from S3 using transcoder's own credentials."""
+    logger.info("Downloading from S3: %s/%s", bucket, key)
+
+    client = _create_s3_client(settings)
+    client.download_file(bucket, key, dest_path)
+
+    size_mb = os.path.getsize(dest_path) / (1024 * 1024)
+    logger.info("S3 download complete: %.1f MB", size_mb)
 
 
 def upload_original(

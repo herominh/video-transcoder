@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from core.config import QUALITY_PRESETS, Settings, parse_bitrate, select_qualities
@@ -222,18 +223,17 @@ def transcode_to_hls(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Transcode each quality.
+    # Transcode qualities in parallel (up to max_parallel concurrent FFmpeg processes).
+    # NVENC GPUs have multiple encode units (RTX 5090: 3, RTX 4090: 2, RTX 3090: 1).
+    # CPU encoding also benefits from parallel processes on multi-core machines.
+    max_parallel = int(os.environ.get("TRANSCODE_PARALLEL", 3))
     quality_info: dict[str, dict] = {}
     quality_names = list(selected.keys())
     total = len(quality_names)
+    completed_count = 0
 
-    for i, name in enumerate(quality_names):
+    def _transcode_one(name: str) -> tuple[str, dict]:
         preset = selected[name]
-
-        if progress_callback:
-            pct = int((i / total) * 100)
-            progress_callback(pct, f"Transcoding {name} ({i + 1}/{total})")
-
         quality_dir = os.path.join(output_dir, name)
         os.makedirs(quality_dir, exist_ok=True)
 
@@ -252,13 +252,28 @@ def transcode_to_hls(
             segment_duration,
         )
 
-        quality_info[name] = {
+        return name, {
             "name": name,
             "width": preset["width"],
             "height": preset["height"],
             "bitrate": parse_bitrate(preset["bitrate"]),
             "playlist": f"{name}/playlist.m3u8",
         }
+
+    if progress_callback:
+        progress_callback(0, f"Transcoding {total} qualities (parallel={min(max_parallel, total)})")
+
+    with ThreadPoolExecutor(max_workers=max_parallel) as pool:
+        futures = {pool.submit(_transcode_one, name): name for name in quality_names}
+
+        for future in as_completed(futures):
+            name, info = future.result()
+            quality_info[name] = info
+            completed_count += 1
+
+            if progress_callback:
+                pct = int((completed_count / total) * 100)
+                progress_callback(pct, f"Done {name} ({completed_count}/{total})")
 
     if progress_callback:
         progress_callback(100, "Transcode complete")

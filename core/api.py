@@ -10,7 +10,7 @@ from pydantic import BaseModel, ValidationError
 from core.callback import send_callback, send_progress
 from core.config import Settings, _detected_encoder, _detected_preset, resolve_encoder
 from core.signing import verify_request
-from core.storage import download_source, upload_original, upload_results
+from core.storage import download_from_s3, download_source, upload_original, upload_results
 from core.transcoder import cleanup, transcode_to_hls
 
 logger = logging.getLogger(__name__)
@@ -93,12 +93,24 @@ def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
         # 1. Download source.
         logger.info("Starting transcode for %s", request.uuid)
         _progress("downloading", 0, "Downloading source")
-        download_source(request.source_url, input_path)
+
+        # Try S3 direct download first (no URL expiry), fall back to source_url.
+        source_is_s3 = False
+        if request.s3_original_path and settings.s3_access_key_id:
+            try:
+                download_from_s3(settings, request.s3_bucket, request.s3_original_path, input_path)
+                source_is_s3 = True
+            except Exception as e:
+                logger.warning("S3 direct download failed, falling back to source_url: %s", e)
+                download_source(request.source_url, input_path)
+        else:
+            download_source(request.source_url, input_path)
 
         # 1b. Upload original to S3 if source is external (not already in S3).
         # PC upload: original already at s3_original_path via presigned PUT — skip.
         # URL import: original is external — Transcoder uploads it.
-        source_is_s3 = bool(settings.s3_endpoint) and request.source_url.startswith(settings.s3_endpoint)
+        if not source_is_s3:
+            source_is_s3 = bool(settings.s3_endpoint) and request.source_url.startswith(settings.s3_endpoint)
         if not source_is_s3:
             _progress("backing_up", 0, "Uploading original to storage")
             upload_original(

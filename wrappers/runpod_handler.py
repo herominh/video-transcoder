@@ -37,10 +37,10 @@ def handler(job: dict) -> dict:
     settings = Settings(
         ffmpeg_encoder=actual_encoder,
         ffmpeg_preset=actual_preset,
-        r2_access_key_id=base_settings.r2_access_key_id,
-        r2_secret_access_key=base_settings.r2_secret_access_key,
-        r2_endpoint=base_settings.r2_endpoint,
-        r2_region=base_settings.r2_region,
+        s3_access_key_id=base_settings.s3_access_key_id,
+        s3_secret_access_key=base_settings.s3_secret_access_key,
+        s3_endpoint=base_settings.s3_endpoint,
+        s3_region=base_settings.s3_region,
         webhook_secret=base_settings.webhook_secret,
     )
 
