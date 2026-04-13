@@ -114,6 +114,13 @@ ENCODER_PRIORITY = [
     ("libx264", "medium"),      # CPU fallback
 ]
 
+# Level 1-7 maps to encoder-specific presets.
+LEVEL_PRESETS = {
+    "h264_nvenc": ["p1", "p2", "p3", "p4", "p5", "p6", "p7"],
+    "libx264":    ["ultrafast", "superfast", "veryfast", "fast", "medium", "slow", "veryslow"],
+    "h264_vaapi": ["", "", "", "", "", "", ""],  # VA-API has no presets
+}
+
 
 def detect_encoder() -> tuple[str, str]:
     """Detect the best available H.264 encoder.
@@ -175,23 +182,30 @@ def _check_encoder_available(encoder: str) -> bool:
     return available
 
 
+def _preset_from_level(encoder: str, level: int) -> str:
+    """Map quality level (1-7) to encoder-specific preset."""
+    level = max(1, min(7, level))
+    presets = LEVEL_PRESETS.get(encoder, LEVEL_PRESETS["libx264"])
+    return presets[level - 1]
+
+
 def resolve_encoder(
     requested_encoder: str | None,
     requested_preset: str | None,
+    preset_level: int | None = None,
 ) -> tuple[str, str]:
     """Resolve requested encoder/preset with fallback.
 
     If requested encoder is available, use it.
     Otherwise fall back to the auto-detected encoder.
-    Preset defaults per encoder if not specified.
+    preset_level (1-7) is translated to encoder-specific preset.
+    Explicit preset overrides preset_level.
     """
     # Default presets per encoder.
     default_presets = {e: p for e, p in ENCODER_PRIORITY}
 
     if requested_encoder and _check_encoder_available(requested_encoder):
         encoder = requested_encoder
-        preset = requested_preset or default_presets.get(encoder, "")
-        logger.info("Using requested encoder: %s (preset: %s)", encoder, preset)
     else:
         if requested_encoder:
             logger.warning(
@@ -199,8 +213,16 @@ def resolve_encoder(
                 requested_encoder, _detected_encoder,
             )
         encoder = _detected_encoder
-        preset = requested_preset or _detected_preset
 
+    # Resolve preset: explicit > level > default.
+    if requested_preset:
+        preset = requested_preset
+    elif preset_level is not None:
+        preset = _preset_from_level(encoder, preset_level)
+    else:
+        preset = default_presets.get(encoder, "")
+
+    logger.info("Using encoder: %s (preset: %s)", encoder, preset)
     return encoder, preset
 
 

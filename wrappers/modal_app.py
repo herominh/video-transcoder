@@ -57,7 +57,9 @@ def process_transcode(request_dict: dict) -> None:
     request = TranscodeRequest.model_validate(request_dict)
     base_settings = Settings.from_env()
 
-    actual_encoder, actual_preset = resolve_encoder(request.encoder, request.preset)
+    actual_encoder, actual_preset = resolve_encoder(
+        request.encoder, request.preset, request.preset_level,
+    )
     settings = Settings(
         ffmpeg_encoder=actual_encoder,
         ffmpeg_preset=actual_preset,

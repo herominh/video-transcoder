@@ -32,7 +32,9 @@ def handler(job: dict) -> dict:
 
     base_settings = Settings.from_env()
 
-    actual_encoder, actual_preset = resolve_encoder(request.encoder, request.preset)
+    actual_encoder, actual_preset = resolve_encoder(
+        request.encoder, request.preset, request.preset_level,
+    )
 
     settings = Settings(
         ffmpeg_encoder=actual_encoder,
@@ -45,8 +47,8 @@ def handler(job: dict) -> dict:
     )
 
     logger.info(
-        "RunPod transcode %s: requested=%s/%s, using=%s/%s",
-        request.uuid, request.encoder, request.preset,
+        "RunPod transcode %s: requested=%s/%s level=%s, using=%s/%s",
+        request.uuid, request.encoder, request.preset, request.preset_level,
         actual_encoder, actual_preset,
     )
 

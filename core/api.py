@@ -30,6 +30,7 @@ class TranscodeRequest(BaseModel):
     s3_original_path: str
     encoder: str | None = None
     preset: str | None = None
+    preset_level: int | None = None
 
 
 @app.get("/health")
@@ -59,7 +60,9 @@ async def transcode(raw_request: Request, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=422, detail=e.errors())
 
     # Resolve encoder: use requested if available, fallback to detected.
-    actual_encoder, actual_preset = resolve_encoder(request.encoder, request.preset)
+    actual_encoder, actual_preset = resolve_encoder(
+        request.encoder, request.preset, request.preset_level,
+    )
     settings = Settings(
         ffmpeg_encoder=actual_encoder,
         ffmpeg_preset=actual_preset,
@@ -71,8 +74,8 @@ async def transcode(raw_request: Request, background_tasks: BackgroundTasks):
     )
 
     logger.info(
-        "Transcode %s: requested=%s/%s, using=%s/%s",
-        request.uuid, request.encoder, request.preset,
+        "Transcode %s: requested=%s/%s level=%s, using=%s/%s",
+        request.uuid, request.encoder, request.preset, request.preset_level,
         actual_encoder, actual_preset,
     )
 
