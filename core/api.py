@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import uuid as uuid_lib
+from time import monotonic
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 
-from core.callback import send_callback, send_progress
+from core.callback import build_result_payload, send_progress, send_result
 from core.config import Settings, _detected_encoder, _detected_preset, resolve_encoder
 from core.signing import verify_request
 from core.storage import download_from_s3, download_source, upload_original, upload_results
@@ -31,6 +33,19 @@ class TranscodeRequest(BaseModel):
     encoder: str | None = None
     preset: str | None = None
     preset_level: int | None = None
+
+    @field_validator("uuid")
+    @classmethod
+    def _validate_uuid(cls, value: str) -> str:
+        # uuid flows into filesystem paths and S3 keys — reject anything that
+        # isn't a canonical UUID (blocks traversal like "../../etc").
+        try:
+            parsed = uuid_lib.UUID(value)
+        except (ValueError, TypeError):
+            raise ValueError("uuid must be a valid UUID")
+        if str(parsed) != value.lower():
+            raise ValueError("uuid must be in canonical UUID form")
+        return value
 
 
 @app.get("/health")
@@ -57,7 +72,7 @@ async def transcode(raw_request: Request, background_tasks: BackgroundTasks):
     try:
         request = TranscodeRequest.model_validate_json(body)
     except ValidationError as e:
-        raise HTTPException(status_code=422, detail=e.errors())
+        raise HTTPException(status_code=422, detail=e.errors(include_context=False))
 
     # Resolve encoder: use requested if available, fallback to detected.
     actual_encoder, actual_preset = resolve_encoder(
@@ -84,13 +99,32 @@ async def transcode(raw_request: Request, background_tasks: BackgroundTasks):
     return {"status": "accepted", "uuid": request.uuid}
 
 
-def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
+def _process_transcode(request: TranscodeRequest, settings: Settings) -> dict:
+    """Run the full transcode pipeline and return the result payload.
+
+    The returned payload (status "ready" or "failed") is exactly what Video
+    Hub's callback endpoint expects. Delivery to callback_url is attempted but
+    NON-fatal: serverless deployments (RunPod) return this payload as the job
+    output, which Video Hub polls as a fallback when the worker cannot reach
+    the hub directly (e.g. hub on a local/private network).
+    """
     work_dir = tempfile.mkdtemp(prefix=f"transcode-{request.uuid}-")
     input_path = os.path.join(work_dir, f"source-{request.uuid}.mp4")
     output_dir = os.path.join(work_dir, "output")
 
+    # Back off failed progress delivery without permanently losing heartbeats
+    # when the hub recovers. Skip events during backoff instead of sleeping.
+    progress_retry_at = 0.0
+
     def _progress(stage: str, pct: int, msg: str = "") -> None:
-        send_progress(request.callback_url, settings.webhook_secret, request.uuid, stage, pct, msg)
+        nonlocal progress_retry_at
+        if monotonic() < progress_retry_at:
+            return
+        if not send_progress(
+            request.callback_url, settings.webhook_secret,
+            request.uuid, stage, pct, msg,
+        ):
+            progress_retry_at = monotonic() + 30
 
     try:
         # 1. Download source.
@@ -147,10 +181,7 @@ def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
             path_prefix=request.s3_path_prefix,
         )
 
-        # 4. Send success callback.
-        send_callback(
-            url=request.callback_url,
-            secret=settings.webhook_secret,
+        payload = build_result_payload(
             uuid=request.uuid,
             status="ready",
             duration=result["duration"],
@@ -161,23 +192,31 @@ def _process_transcode(request: TranscodeRequest, settings: Settings) -> None:
             preset=settings.ffmpeg_preset,
             source_filesize=source_filesize,
         )
-
         logger.info("Transcode completed for %s", request.uuid)
 
     except Exception as e:
         logger.exception("Transcode failed for %s", request.uuid)
-
-        # Send failure callback.
-        try:
-            send_callback(
-                url=request.callback_url,
-                secret=settings.webhook_secret,
-                uuid=request.uuid,
-                status="failed",
-                error_message=str(e)[:1000],
-            )
-        except Exception:
-            logger.exception("Failed to send failure callback for %s", request.uuid)
+        payload = build_result_payload(
+            uuid=request.uuid,
+            status="failed",
+            error_message=str(e)[:1000],
+        )
 
     finally:
-        cleanup(work_dir)
+        try:
+            cleanup(work_dir)
+        except Exception:
+            logger.exception("Cleanup failed for %s; preserving transcode result", request.uuid)
+
+    # Single delivery point AFTER the outcome is decided: a delivery hiccup can
+    # no longer flip a successful transcode into a "failed" report.
+    try:
+        send_result(request.callback_url, settings.webhook_secret, payload)
+    except Exception:
+        logger.exception(
+            "Result delivery failed for %s (status=%s) — Video Hub can still "
+            "reconcile via job-status polling",
+            request.uuid, payload["status"],
+        )
+
+    return payload

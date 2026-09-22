@@ -106,19 +106,17 @@ python3 -m http.server 9000
 3. Send a transcode request (separate terminal):
 
 ```bash
+# Auth is HMAC-SHA256 over "{timestamp}.{raw_body}" with WEBHOOK_SECRET.
+# uuid must be a canonical UUID (validated — blocks path traversal).
+BODY='{"uuid":"550e8400-e29b-41d4-a716-446655440000","source_url":"http://host.docker.internal:9000/sample.mp4","qualities":["480p","360p"],"segment_duration":6,"callback_url":"http://host.docker.internal:9999/fake","s3_bucket":"fake-bucket","s3_path_prefix":"videos/550e8400-e29b-41d4-a716-446655440000","s3_original_path":"original-videos/550e8400-e29b-41d4-a716-446655440000/original.mp4"}'
+TS=$(date +%s)
+SIG=$(BODY="$BODY" TS="$TS" python3 -c "import hmac,hashlib,os;print(hmac.new(b'test-secret',(os.environ['TS']+'.'+os.environ['BODY']).encode(),hashlib.sha256).hexdigest())")
+
 curl -X POST http://localhost:8000/transcode \
-  -H "Authorization: Bearer test-secret" \
+  -H "X-Signature: sha256=$SIG" \
+  -H "X-Timestamp: $TS" \
   -H "Content-Type: application/json" \
-  -d '{
-    "uuid": "test-0001",
-    "source_url": "http://host.docker.internal:9000/sample.mp4",
-    "qualities": ["480p", "360p"],
-    "segment_duration": 6,
-    "callback_url": "http://host.docker.internal:9999/fake",
-    "callback_token": "fake",
-    "s3_bucket": "fake-bucket",
-    "s3_path_prefix": "test/test-0001"
-  }'
+  -d "$BODY"
 ```
 
 > `host.docker.internal` lets the container reach your Mac's localhost.
@@ -265,7 +263,7 @@ Returns `{"status": "ok"}`.
 
 ### `POST /transcode`
 
-Starts a transcode job. Auth via `Authorization: Bearer <WEBHOOK_SECRET>`.
+Starts a transcode job. Auth: HMAC-SHA256 over `"{timestamp}.{raw_body}"` with the shared `WEBHOOK_SECRET` — headers `X-Signature: sha256=<hex>` + `X-Timestamp: <epoch>` (5-minute tolerance). Callbacks to Video Hub are signed the same way.
 
 **Request:**
 ```json
@@ -276,23 +274,24 @@ Starts a transcode job. Auth via `Authorization: Bearer <WEBHOOK_SECRET>`.
   "encryption_key_hex": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
   "segment_duration": 6,
   "callback_url": "https://videohub.example.com/api/transcode/callback",
-  "callback_token": "bearer-token",
   "s3_bucket": "videohub-myorg",
-  "s3_path_prefix": "videos/550e8400-..."
+  "s3_path_prefix": "videos/550e8400-...",
+  "s3_original_path": "original-videos/550e8400-.../original.mp4"
 }
 ```
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `uuid` | yes | Video UUID |
+| `uuid` | yes | Video UUID (canonical form — validated) |
 | `source_url` | yes | Presigned URL to download source video |
 | `qualities` | yes | Quality names: `2160p`, `1440p`, `1080p`, `720p`, `480p`, `360p`, `240p` |
 | `encryption_key_hex` | no | AES-128 key as hex (32 chars). Omit to skip encryption |
 | `segment_duration` | no | HLS segment length in seconds (default: 6) |
-| `callback_url` | yes | URL to POST results to |
-| `callback_token` | yes | Bearer token for callback auth |
+| `callback_url` | yes | URL to POST progress + result callbacks to (HMAC-signed) |
 | `s3_bucket` | yes | S3 bucket name |
-| `s3_path_prefix` | yes | S3 path prefix for uploaded files |
+| `s3_path_prefix` | yes | S3 path prefix for uploaded HLS files |
+| `s3_original_path` | yes | S3 key of the original; downloaded directly when present, uploaded here when the source is external |
+| `encoder` / `preset` / `preset_level` | no | Encoder override (`h264_nvenc`, `libx264`, …) and preset/level 1-7 |
 
 **Callback (success):**
 ```json

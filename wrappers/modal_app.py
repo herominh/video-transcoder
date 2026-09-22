@@ -116,7 +116,7 @@ def web():
         try:
             request = TranscodeRequest.model_validate_json(body)
         except ValidationError as e:
-            raise HTTPException(status_code=422, detail=e.errors())
+            raise HTTPException(status_code=422, detail=e.errors(include_context=False))
 
         # Fire-and-forget: GPU worker sends its own callbacks.
         process_transcode.spawn(request.model_dump())

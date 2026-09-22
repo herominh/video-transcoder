@@ -29,7 +29,9 @@ modal deploy wrappers/modal_app.py
 
 ## Webhook Contract
 
-POST /transcode with JSON body (see core/api.py for schema). Auth via `Authorization: Bearer <WEBHOOK_SECRET>`.
+POST /transcode with JSON body (see core/api.py for schema). Auth: HMAC-SHA256 over `"{timestamp}.{raw_body}"` with the shared `WEBHOOK_SECRET` — headers `X-Signature: sha256=<hex>` + `X-Timestamp: <epoch>` (5-min tolerance). The RunPod wrapper skips inbound HMAC (RunPod API key gates dispatch) but still signs outbound callbacks.
+
+`_process_transcode` returns the result payload (status `ready`|`failed`); callback delivery is attempted but non-fatal. The RunPod handler returns that payload as the job output (and raises on failure so RunPod marks the job FAILED) — Video Hub polls job status as the reliable path.
 
 ## Key Conventions
 

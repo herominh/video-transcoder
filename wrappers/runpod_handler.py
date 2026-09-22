@@ -52,9 +52,17 @@ def handler(job: dict) -> dict:
         actual_encoder, actual_preset,
     )
 
-    _process_transcode(request, settings)
+    payload = _process_transcode(request, settings)
 
-    return {"status": "completed", "uuid": request.uuid}
+    if payload.get("status") != "ready":
+        # Raise so RunPod marks the job FAILED and Video Hub's poller surfaces
+        # the real error — returning normally would record a failed transcode
+        # as COMPLETED (and the poller would have to guess).
+        raise RuntimeError(payload.get("error_message") or "Transcode failed")
+
+    # Full result payload becomes the job output — Video Hub's poller applies
+    # it exactly like a callback when the direct callback can't get through.
+    return payload
 
 
 if __name__ == "__main__":

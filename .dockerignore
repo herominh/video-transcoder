@@ -1,0 +1,15 @@
+# Never let secrets or repo noise into any image build context.
+.env
+.env.*
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+tests/
+.pytest_cache
+*.mp4
+*.ts
+*.m3u8
+README.md
+CLAUDE.md
