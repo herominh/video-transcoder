@@ -1,0 +1,506 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/common.schema.json",
+  "title": "Transcode contract v2: shared definitions",
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36,
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "timestamp": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "version": {
+      "type": "string",
+      "maxLength": 20,
+      "pattern": "^(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})\\.(0|[1-9][0-9]{0,3})(-draft)?$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "key_id": {
+      "type": "string",
+      "maxLength": 48,
+      "pattern": "^[a-z0-9][a-z0-9-]{2,47}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "cell_id": {
+      "type": "string",
+      "maxLength": 40,
+      "pattern": "^[a-z][a-z0-9-]{1,39}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "audience": {
+      "type": "string",
+      "maxLength": 47,
+      "pattern": "^(hub|worker):[a-z][a-z0-9-]{1,39}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "fence_positive": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "rendition_name": {
+      "type": "string",
+      "enum": [
+        "2160p",
+        "1440p",
+        "1080p",
+        "720p",
+        "480p",
+        "360p",
+        "240p"
+      ]
+    },
+    "rel_path": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}(/[a-z0-9][a-z0-9_.-]{0,63}){0,3}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "object_key": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          }
+        }
+      ]
+    },
+    "etag": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "ascii_text_64": {
+      "type": "string",
+      "maxLength": 64,
+      "not": {
+        "pattern": "[^\\x20-\\x7e]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "://"
+          }
+        }
+      ]
+    },
+    "ascii_text_200": {
+      "type": "string",
+      "maxLength": 200,
+      "not": {
+        "pattern": "[^\\x20-\\x7e]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "://"
+          }
+        }
+      ]
+    },
+    "ascii_text_1000": {
+      "type": "string",
+      "maxLength": 1000,
+      "not": {
+        "pattern": "[^\\x20-\\x7e]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "://"
+          }
+        }
+      ]
+    },
+    "diagnostic_code": {
+      "type": "string",
+      "maxLength": 48,
+      "pattern": "^[a-z][a-z0-9_]{2,47}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "detail"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "common.schema.json#/$defs/diagnostic_code"
+        },
+        "detail": {
+          "$ref": "common.schema.json#/$defs/ascii_text_200"
+        }
+      }
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "$ref": "common.schema.json#/$defs/diagnostic"
+      }
+    },
+    "ext": {
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {
+        "type": "string",
+        "maxLength": 32,
+        "pattern": "^x_[a-z0-9_]{1,30}$",
+        "not": {
+          "pattern": "[\\x00-\\x1f\\x7f]"
+        }
+      },
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "common.schema.json#/$defs/ascii_text_64"
+          },
+          {
+            "type": "integer",
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          {
+            "type": "boolean"
+          }
+        ]
+      }
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "downloading",
+        "probing",
+        "transcoding",
+        "uploading",
+        "finalizing"
+      ]
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "sha256"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[a-z][a-z0-9_-]{1,31}$",
+          "not": {
+            "pattern": "[\\x00-\\x1f\\x7f]"
+          }
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "sha256": {
+          "$ref": "common.schema.json#/$defs/sha256"
+        }
+      }
+    },
+    "encryption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "aes-128",
+            "none"
+          ]
+        },
+        "media_key_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        }
+      },
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "aes-128"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "required": [
+          "media_key_id"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "media_key_id"
+          ]
+        }
+      }
+    },
+    "media": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "duration_ms",
+        "max_width",
+        "max_height",
+        "has_audio",
+        "rendition_count"
+      ],
+      "properties": {
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 21600000
+        },
+        "max_width": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3840
+        },
+        "max_height": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3840
+        },
+        "has_audio": {
+          "type": "boolean"
+        },
+        "rendition_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7
+        }
+      }
+    },
+    "encoder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "image_digest",
+        "ffmpeg_version",
+        "video_encoder",
+        "preset"
+      ],
+      "properties": {
+        "image_digest": {
+          "type": "string",
+          "maxLength": 71,
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "not": {
+            "pattern": "[\\x00-\\x1f\\x7f]"
+          }
+        },
+        "ffmpeg_version": {
+          "$ref": "common.schema.json#/$defs/ascii_text_64"
+        },
+        "video_encoder": {
+          "type": "string",
+          "enum": [
+            "libx264",
+            "h264_nvenc",
+            "h264_vaapi"
+          ]
+        },
+        "preset": {
+          "type": "string",
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_-]{1,32}$",
+          "not": {
+            "pattern": "[\\x00-\\x1f\\x7f]"
+          }
+        }
+      }
+    },
+    "source_read": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "bytes_read",
+        "etag_observed"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "bytes_read": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 32212254720
+        },
+        "etag_observed": {
+          "$ref": "common.schema.json#/$defs/etag"
+        }
+      }
+    },
+    "identity_dispatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org_uuid",
+        "video_uuid",
+        "owning_cell_id",
+        "placement_epoch",
+        "lifecycle_revision",
+        "attempt_id",
+        "dispatch_id"
+      ],
+      "properties": {
+        "org_uuid": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "video_uuid": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "owning_cell_id": {
+          "$ref": "common.schema.json#/$defs/cell_id"
+        },
+        "placement_epoch": {
+          "$ref": "common.schema.json#/$defs/fence_positive"
+        },
+        "lifecycle_revision": {
+          "$ref": "common.schema.json#/$defs/revision"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "dispatch_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        }
+      }
+    },
+    "identity_execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org_uuid",
+        "video_uuid",
+        "owning_cell_id",
+        "placement_epoch",
+        "lifecycle_revision",
+        "attempt_id",
+        "dispatch_id",
+        "execution_id",
+        "execution_fence"
+      ],
+      "properties": {
+        "org_uuid": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "video_uuid": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "owning_cell_id": {
+          "$ref": "common.schema.json#/$defs/cell_id"
+        },
+        "placement_epoch": {
+          "$ref": "common.schema.json#/$defs/fence_positive"
+        },
+        "lifecycle_revision": {
+          "$ref": "common.schema.json#/$defs/revision"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "dispatch_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "execution_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "execution_fence": {
+          "$ref": "common.schema.json#/$defs/fence_positive"
+        }
+      }
+    },
+    "identity_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "org_uuid",
+        "video_uuid",
+        "source_id",
+        "attempt_id",
+        "dispatch_id",
+        "execution_id"
+      ],
+      "properties": {
+        "org_uuid": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "video_uuid": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "attempt_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "dispatch_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "execution_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        }
+      }
+    }
+  }
+}

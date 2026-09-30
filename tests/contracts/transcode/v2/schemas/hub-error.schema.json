@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/hub-error.schema.json",
+  "title": "Transcode contract v2: hub.error (Hub endpoint refusal, unsigned)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "error"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "hub.error"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "payload_too_large",
+            "malformed_json",
+            "unsupported_version",
+            "unknown_message_kind",
+            "unexpected_message_kind",
+            "schema_violation",
+            "invalid_timestamp",
+            "audience_mismatch",
+            "unknown_key_id",
+            "timestamp_in_future",
+            "timestamp_out_of_tolerance",
+            "dispatch_expired",
+            "identity_aliases_video_uuid",
+            "generation_execution_mismatch",
+            "org_mismatch",
+            "video_mismatch",
+            "cell_mismatch",
+            "attempt_mismatch",
+            "dispatch_mismatch",
+            "execution_mismatch",
+            "source_mismatch",
+            "storage_location_mismatch",
+            "profile_mismatch",
+            "encryption_mismatch",
+            "stale_placement_epoch",
+            "stale_lifecycle_revision",
+            "stale_execution_fence",
+            "placement_epoch_ahead",
+            "lifecycle_revision_ahead",
+            "stale_event_sequence",
+            "duplicate_artifact_path",
+            "artifact_inventory_mismatch",
+            "dangling_reference",
+            "thumbnail_diagnostic_missing",
+            "rendition_not_requested",
+            "limit_exceeded",
+            "invalid_signature",
+            "duplicate_message",
+            "conflicting_terminal_result",
+            "manifest_digest_mismatch",
+            "internal_error",
+            "service_unavailable"
+          ]
+        },
+        "message": {
+          "$ref": "common.schema.json#/$defs/ascii_text_200"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "retry_after_s": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "pointer": {
+          "type": "string",
+          "maxLength": 256,
+          "pattern": "^(/[A-Za-z0-9_~.-]{0,64}){0,16}$",
+          "not": {
+            "pattern": "[\\x00-\\x1f\\x7f]"
+          }
+        }
+      }
+    },
+    "request_message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "supported_versions": {
+      "type": "array",
+      "maxItems": 8,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "common.schema.json#/$defs/version"
+      }
+    }
+  }
+}

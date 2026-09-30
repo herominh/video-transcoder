@@ -1,0 +1,341 @@
+{
+  "reason_codes_version": 1,
+  "reason_codes": [
+    {
+      "code": "payload_too_large",
+      "layer": "size",
+      "http_status": 413,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "malformed_json",
+      "layer": "parse",
+      "http_status": 400,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "unsupported_version",
+      "layer": "version",
+      "http_status": 400,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "unknown_message_kind",
+      "layer": "version",
+      "http_status": 400,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "unexpected_message_kind",
+      "layer": "version",
+      "http_status": 400,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "schema_violation",
+      "layer": "schema",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "invalid_timestamp",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "audience_mismatch",
+      "layer": "semantic",
+      "http_status": 403,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "unknown_key_id",
+      "layer": "semantic",
+      "http_status": 401,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "timestamp_in_future",
+      "layer": "semantic",
+      "http_status": 401,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "timestamp_out_of_tolerance",
+      "layer": "semantic",
+      "http_status": 401,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "dispatch_expired",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B08"
+    },
+    {
+      "code": "identity_aliases_video_uuid",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "generation_execution_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "org_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "video_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "cell_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "attempt_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "dispatch_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "execution_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "source_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "storage_location_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "profile_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "encryption_mismatch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "stale_placement_epoch",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "stale_lifecycle_revision",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "stale_execution_fence",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "placement_epoch_ahead",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "lifecycle_revision_ahead",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "stale_event_sequence",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "duplicate_artifact_path",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B10"
+    },
+    {
+      "code": "artifact_inventory_mismatch",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B10"
+    },
+    {
+      "code": "dangling_reference",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B10"
+    },
+    {
+      "code": "thumbnail_diagnostic_missing",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B10"
+    },
+    {
+      "code": "rendition_not_requested",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B10"
+    },
+    {
+      "code": "limit_exceeded",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B10"
+    },
+    {
+      "code": "invalid_signature",
+      "layer": "auth",
+      "http_status": 401,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "duplicate_message",
+      "layer": "dedupe",
+      "http_status": 200,
+      "retryable": null,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "conflicting_terminal_result",
+      "layer": "dedupe",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "manifest_digest_mismatch",
+      "layer": "fetch",
+      "http_status": null,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "B10"
+    },
+    {
+      "code": "internal_error",
+      "layer": null,
+      "http_status": 500,
+      "retryable": true,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "service_unavailable",
+      "layer": null,
+      "http_status": 503,
+      "retryable": true,
+      "reserved": true,
+      "first_unit": "B07"
+    }
+  ]
+}

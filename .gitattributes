@@ -1,0 +1,2 @@
+# The transcode contract copy is compared byte for byte (SHA256SUMS, fixtures of exact bytes): never normalize it.
+tests/contracts/** -text

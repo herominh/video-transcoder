@@ -1,0 +1,18 @@
+{
+  "context_version": 1,
+  "role": "worker_receiver",
+  "channel": "dispatch",
+  "now": "2030-01-01T00:00:00.000Z",
+  "clock_skew_s": 300,
+  "accepted_protocol_versions": [
+    "2.0.0-draft"
+  ],
+  "accepted_message_kinds": [
+    "transcode.request"
+  ],
+  "expected_audience": "worker:runpod-test",
+  "known_key_ids": [
+    "test-hub2wk-k1"
+  ],
+  "expect": null
+}

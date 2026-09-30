@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/carriers/runpod-input.schema.json",
+  "title": "Transcode contract v2: value of the RunPod job `input` object",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "vh_message",
+    "vh_signature"
+  ],
+  "properties": {
+    "vh_message": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 4096,
+      "not": {
+        "pattern": "[^\\x09\\x0a\\x0d\\x20-\\x7e]"
+      }
+    },
+    "vh_signature": {
+      "type": "string",
+      "minLength": 76,
+      "maxLength": 76,
+      "pattern": "^hmac-sha256=[0-9a-f]{64}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    }
+  }
+}

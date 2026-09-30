@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/transcode-result-completed.schema.json",
+  "title": "Transcode contract v2: transcode.result.completed (worker to Hub)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "generation_id",
+    "manifest",
+    "source",
+    "profile",
+    "media",
+    "encoder"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "transcode.result.completed"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "generation_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location_id",
+        "path",
+        "sha256",
+        "size_bytes",
+        "artifact_count",
+        "total_bytes"
+      ],
+      "properties": {
+        "location_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "path": {
+          "$ref": "common.schema.json#/$defs/rel_path"
+        },
+        "sha256": {
+          "$ref": "common.schema.json#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8388608
+        },
+        "artifact_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 25209
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1099511627776
+        }
+      }
+    },
+    "source": {
+      "$ref": "common.schema.json#/$defs/source_read"
+    },
+    "profile": {
+      "$ref": "common.schema.json#/$defs/profile"
+    },
+    "media": {
+      "$ref": "common.schema.json#/$defs/media"
+    },
+    "encoder": {
+      "$ref": "common.schema.json#/$defs/encoder"
+    },
+    "diagnostics": {
+      "$ref": "common.schema.json#/$defs/diagnostics"
+    },
+    "ext": {
+      "$ref": "common.schema.json#/$defs/ext"
+    }
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/transcode-progress.schema.json",
+  "title": "Transcode contract v2: transcode.progress (worker to Hub)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "event_seq",
+    "stage",
+    "stage_progress_pct"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "transcode.progress"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "event_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "stage": {
+      "$ref": "common.schema.json#/$defs/stage"
+    },
+    "stage_progress_pct": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "message": {
+      "$ref": "common.schema.json#/$defs/ascii_text_200"
+    },
+    "counters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "renditions_total",
+        "renditions_done",
+        "bytes_downloaded",
+        "bytes_uploaded"
+      ],
+      "properties": {
+        "renditions_total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "renditions_done": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 7
+        },
+        "bytes_downloaded": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "bytes_uploaded": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "ext": {
+      "$ref": "common.schema.json#/$defs/ext"
+    }
+  }
+}
