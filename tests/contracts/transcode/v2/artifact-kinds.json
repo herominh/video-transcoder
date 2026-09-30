@@ -1,0 +1,18 @@
+{
+  "manifest_versions": {
+    "1.0.0-draft": {
+      "active": [
+        "hls_master_playlist",
+        "hls_media_playlist",
+        "hls_segment",
+        "thumbnail"
+      ],
+      "reserved": [
+        "captions",
+        "transcript",
+        "chapters",
+        "storyboard"
+      ]
+    }
+  }
+}

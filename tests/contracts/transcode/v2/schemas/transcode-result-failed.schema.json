@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/transcode-result-failed.schema.json",
+  "title": "Transcode contract v2: transcode.result.failed (worker to Hub)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "error"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "transcode.result.failed"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "code",
+        "retryable",
+        "stage",
+        "detail"
+      ],
+      "properties": {
+        "class": {
+          "type": "string",
+          "enum": [
+            "source_unavailable",
+            "source_integrity_mismatch",
+            "input_invalid",
+            "input_limits_exceeded",
+            "encoder_failed",
+            "output_write_failed",
+            "resource_exhausted",
+            "deadline_exceeded",
+            "authority_refused",
+            "cancelled",
+            "configuration_error",
+            "internal_error"
+          ]
+        },
+        "code": {
+          "$ref": "common.schema.json#/$defs/diagnostic_code"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "stage": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "common.schema.json#/$defs/stage"
+            }
+          ]
+        },
+        "detail": {
+          "$ref": "common.schema.json#/$defs/ascii_text_1000"
+        }
+      },
+      "if": {
+        "properties": {
+          "class": {
+            "enum": [
+              "source_integrity_mismatch",
+              "input_invalid",
+              "input_limits_exceeded",
+              "authority_refused",
+              "cancelled",
+              "configuration_error"
+            ]
+          }
+        },
+        "required": [
+          "class"
+        ]
+      },
+      "then": {
+        "properties": {
+          "retryable": {
+            "const": false
+          }
+        }
+      }
+    },
+    "source": {
+      "$ref": "common.schema.json#/$defs/source_read"
+    },
+    "encoder": {
+      "$ref": "common.schema.json#/$defs/encoder"
+    },
+    "diagnostics": {
+      "$ref": "common.schema.json#/$defs/diagnostics"
+    },
+    "ext": {
+      "$ref": "common.schema.json#/$defs/ext"
+    }
+  }
+}

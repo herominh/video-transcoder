@@ -1,0 +1,11 @@
+{
+  "context_version": 1,
+  "role": "worker_receiver",
+  "channel": "push",
+  "accepted_protocol_versions": [
+    "2.0.0-draft"
+  ],
+  "accepted_message_kinds": [
+    "hub.error"
+  ]
+}

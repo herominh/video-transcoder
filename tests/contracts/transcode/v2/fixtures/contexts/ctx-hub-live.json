@@ -1,0 +1,48 @@
+{
+  "context_version": 1,
+  "role": "hub_receiver",
+  "channel": "push",
+  "now": "2030-01-01T00:00:00.000Z",
+  "clock_skew_s": 300,
+  "accepted_protocol_versions": [],
+  "accepted_message_kinds": [
+    "transcode.progress",
+    "transcode.result.completed",
+    "transcode.result.failed"
+  ],
+  "expected_audience": "hub:cell-test-a",
+  "known_key_ids": [
+    "test-wk2hub-k1",
+    "test-wk2hub-k2"
+  ],
+  "expect": {
+    "org_uuid": "11111111-1111-7111-8111-111111111111",
+    "video_uuid": "22222222-2222-7222-8222-222222222222",
+    "owning_cell_id": "cell-test-a",
+    "placement_epoch": 7,
+    "lifecycle_revision": 3,
+    "attempt_id": "33333333-3333-7333-8333-333333333333",
+    "dispatch_id": "44444444-4444-7444-8444-444444444444",
+    "execution_id": "55555555-5555-7555-8555-555555555555",
+    "execution_fence": 2,
+    "source_id": "66666666-6666-7666-8666-666666666666",
+    "source_location_id": "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa",
+    "output_location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
+    "profile": {
+      "id": "test-h264-sdr",
+      "version": 1,
+      "sha256": "abababababababababababababababababababababababababababababababab"
+    },
+    "encryption": {
+      "mode": "aes-128",
+      "media_key_id": "77777777-7777-7777-8777-777777777777"
+    },
+    "renditions": [
+      "720p",
+      "480p",
+      "360p"
+    ],
+    "max_artifact_count": 25209
+  },
+  "last_event_seq": 4
+}

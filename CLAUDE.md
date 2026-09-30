@@ -18,8 +18,13 @@ FFMPEG_ENCODER=libx264 FFMPEG_PRESET=medium WEBHOOK_SECRET=test python wrappers/
 ## Running Tests
 
 ```bash
+pip install -r requirements-dev.txt   # requirements.txt plus the test-only jsonschema pin
 pytest tests/ -v
 ```
+
+## Contract v2 (draft)
+
+`tests/contracts/transcode/v2/` is a byte-identical copy of the Hub's canonical tree (`laravel/resources/contracts/transcode/v2/` in Video Hub): schemas, limits, reason codes, the paired fixture catalog and signing vectors. Its `README.md` is the normative rule text. The test-only Python validator lives in `tests/contract/` (install `requirements-dev.txt` for the pinned `jsonschema`); `pytest tests/contract` checks the copy against `SHA256SUMS`, runs every fixture and the signing vectors. Nothing at run time uses either yet: the live wire format is still v1 (below), and B08 moves the validator into `core/`. Never edit the copy by hand: copy the Hub tree, and any change moves `EXPECTED_CONTRACT_DIGEST` (`tests/contract/files.py`) and the Hub's `ContractFiles::EXPECTED_DIGEST` together.
 
 ## Deploying to Modal
 

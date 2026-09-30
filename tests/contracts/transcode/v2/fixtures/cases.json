@@ -1,0 +1,1895 @@
+{
+  "catalog_version": 1,
+  "cases": [
+    {
+      "id": "P01",
+      "payload": "fixtures/request/P01-encrypted-three-renditions.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C15, schema",
+      "purpose": "Full dispatch body, sent 10 minutes before now, claim valid for 1 h",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P02",
+      "payload": "fixtures/request/P02-unencrypted.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "1.3 encryption",
+      "purpose": "Unencrypted dispatch: mode none without media_key_id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P03",
+      "payload": "fixtures/request/P01-encrypted-three-renditions.json",
+      "context": "fixtures/contexts/ctx-hub-sender.json",
+      "rule": "S8-S20",
+      "purpose": "The Hub self-checks its own dispatch against its records",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P04",
+      "payload": "fixtures/progress/P04-downloading.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S22",
+      "purpose": "Minimal progress, event_seq 5 after 4",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P05",
+      "payload": "fixtures/progress/P05-counters-and-unknown-ext-member.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C7",
+      "purpose": "Counters plus an ext member no receiver knows; ext is ignored",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P06",
+      "payload": "fixtures/progress/P06-sent-exactly-300s-ago.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C13",
+      "purpose": "Push tolerance boundary is inclusive: sent exactly 300 s before now",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P07",
+      "payload": "fixtures/result-completed/P07-full.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "schema, S1-S21",
+      "purpose": "Completed result with every optional block present",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P08",
+      "payload": "fixtures/result-completed/P08-thumbnail-unavailable-diagnostic.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "protocol:101",
+      "purpose": "Success with a thumbnail_unavailable diagnostic",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P09",
+      "payload": "fixtures/result-completed/P09-polled-three-hours-late.json",
+      "context": "fixtures/contexts/ctx-hub-poll.json",
+      "rule": "C14",
+      "purpose": "Sent 3 h before now and read from provider output: no past bound on poll",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P10",
+      "payload": "fixtures/result-failed/P10-source-unavailable-retryable.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.6",
+      "purpose": "Retryable failure class with retryable true",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P11",
+      "payload": "fixtures/result-failed/P11-minimal-stage-null.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.6",
+      "purpose": "Failure without optional blocks, stage null, non-retryable class",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P12",
+      "payload": "fixtures/hub-error/P12-schema-violation-with-pointer.json",
+      "context": "fixtures/contexts/ctx-worker-error.json",
+      "rule": "1.8",
+      "purpose": "Hub error with pointer and request_message_id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P13",
+      "payload": "fixtures/hub-error/P13-unsupported-version-lists-supported.json",
+      "context": "fixtures/contexts/ctx-worker-error.json",
+      "rule": "1.8",
+      "purpose": "Hub error listing the supported versions",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P14",
+      "payload": "fixtures/manifest/P14-encrypted-three-renditions.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "section 4, S21-S28",
+      "purpose": "3 renditions x 2 segments with a thumbnail",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P15",
+      "payload": "fixtures/manifest/P15-no-audio-no-thumbnail.json",
+      "context": "fixtures/contexts/ctx-hub-storage-unencrypted.json",
+      "rule": "S26",
+      "purpose": "thumbnail_path null with its diagnostic, video-only codecs, mode none",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P16",
+      "payload": "fixtures/manifest/P16-segment-number-past-999.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "rel_path",
+      "purpose": "720p/segment_1000.ts: FFmpeg's %03d numbering rolls over",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P18",
+      "payload": "fixtures/request/P18-object-key-512-chars.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "1.0 object_key",
+      "purpose": "object_key exactly at maxLength 512",
+      "context_needed": false,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P19",
+      "payload": "fixtures/progress/P19-sent-exactly-300s-ahead.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S4, C13",
+      "purpose": "Future bound is inclusive: sent exactly 300 s after now",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P20",
+      "payload": "fixtures/request/P20-claim-expired-exactly-300s-ago.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S6, C15",
+      "purpose": "Claim expiry bound is inclusive: expired exactly 300 s before now",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P21",
+      "payload": "fixtures/manifest/P21-rendition-with-3600-segments.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S28",
+      "purpose": "One rendition holds exactly the 3,600 segments allowed",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P22",
+      "payload": "fixtures/request/P01-encrypted-three-renditions.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch-empty-expect.json",
+      "rule": "9.3",
+      "purpose": "A worker receiver needs no recorded identity: expect {} is accepted",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N01",
+      "payload": "fixtures/progress/N01-oversized-by-whitespace.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C12",
+      "purpose": "Schema-valid progress padded to 4,097 bytes: under the context's largest limit, over its kind's (L0 b)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "size",
+        "reason": "payload_too_large",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N02",
+      "payload": "fixtures/manifest/N02-truncated.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "L1",
+      "purpose": "Manifest JSON cut mid-array",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N03",
+      "payload": "fixtures/progress/N03-nesting-depth-33.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "3.1 depth",
+      "purpose": "Deepest container at nesting 33 (root = 1, ext = 2, 31 arrays)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N04",
+      "payload": "fixtures/progress/N04-utf8-bom.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "3.1 BOM",
+      "purpose": "P04 bytes preceded by EF BB BF",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N05",
+      "payload": "fixtures/progress/N05-nan-literal.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "3.1 NaN",
+      "purpose": "stage_progress_pct: NaN",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N06",
+      "payload": "fixtures/request/N06-major-3.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C1, C2",
+      "purpose": "protocol_version 3.0.0",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unsupported_version",
+        "instance_path": "/protocol_version"
+      }
+    },
+    {
+      "id": "N07",
+      "payload": "fixtures/request/N07-release-without-draft.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C3",
+      "purpose": "2.0.0 against 2.0.0-draft: drafts match by exact string",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unsupported_version",
+        "instance_path": "/protocol_version"
+      }
+    },
+    {
+      "id": "N08",
+      "payload": "fixtures/progress/P04-downloading.json",
+      "context": "fixtures/contexts/ctx-hub-live.json",
+      "rule": "C4",
+      "purpose": "A valid draft message under the live context (no live version yet)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unsupported_version",
+        "instance_path": "/protocol_version"
+      }
+    },
+    {
+      "id": "N09",
+      "payload": "fixtures/manifest/N09-manifest-version-2.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "C1, C2",
+      "purpose": "manifest_version 2.0.0",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unsupported_version",
+        "instance_path": "/manifest_version"
+      }
+    },
+    {
+      "id": "N10",
+      "payload": "fixtures/progress/N10-unknown-kind-heartbeat.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "L2",
+      "purpose": "message_kind transcode.heartbeat",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unknown_message_kind",
+        "instance_path": "/message_kind"
+      }
+    },
+    {
+      "id": "N11",
+      "payload": "fixtures/request/P01-encrypted-three-renditions.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "L2",
+      "purpose": "A dispatch body posted to the Hub callback",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unexpected_message_kind",
+        "instance_path": "/message_kind"
+      }
+    },
+    {
+      "id": "N12",
+      "payload": "fixtures/request/N12-extra-property-callback-url.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C6",
+      "purpose": "Today's callback_url sent at the root",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": ""
+      }
+    },
+    {
+      "id": "N13",
+      "payload": "fixtures/request/N13-media-key-material.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C6, no media key",
+      "purpose": "encryption.key_hex present",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/encryption"
+      }
+    },
+    {
+      "id": "N14",
+      "payload": "fixtures/request/N14-presigned-source-url.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C6, no presigned URL",
+      "purpose": "source.url present",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/source"
+      }
+    },
+    {
+      "id": "N15",
+      "payload": "fixtures/result-completed/N15-extra-property-in-identity.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C6",
+      "purpose": "identity.bucket present",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity"
+      }
+    },
+    {
+      "id": "N16",
+      "payload": "fixtures/progress/N16-message-201-chars.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.4",
+      "purpose": "message one character over maxLength 200",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/message"
+      }
+    },
+    {
+      "id": "N17",
+      "payload": "fixtures/result-failed/N17-detail-1001-chars.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.6",
+      "purpose": "error.detail one character over maxLength 1000",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/error/detail"
+      }
+    },
+    {
+      "id": "N18",
+      "payload": "fixtures/request/N18-empty-renditions.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "1.3 minItems",
+      "purpose": "Empty requested-rendition list",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/renditions"
+      }
+    },
+    {
+      "id": "N19",
+      "payload": "fixtures/request/N19-unknown-rendition-4320p.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C11",
+      "purpose": "Rendition 4320p is not in the enum",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/renditions/0"
+      }
+    },
+    {
+      "id": "N20",
+      "payload": "fixtures/progress/N20-negative-epoch.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.2 minimum",
+      "purpose": "placement_epoch -1",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity/placement_epoch"
+      }
+    },
+    {
+      "id": "N21",
+      "payload": "fixtures/progress/N21-fractional-percentage.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C10, 4 integer literals",
+      "purpose": "stage_progress_pct 42.5: a fraction never passes L1",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N22",
+      "payload": "fixtures/progress/N22-epoch-as-string.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C10",
+      "purpose": "placement_epoch \"7\": no coercion",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity/placement_epoch"
+      }
+    },
+    {
+      "id": "N23",
+      "payload": "fixtures/result-completed/N23-null-execution-id.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C8, C10",
+      "purpose": "execution_id null",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity/execution_id"
+      }
+    },
+    {
+      "id": "N24",
+      "payload": "fixtures/result-completed/N24-missing-org-uuid.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C8",
+      "purpose": "identity without org_uuid",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity"
+      }
+    },
+    {
+      "id": "N25",
+      "payload": "fixtures/progress/N25-uppercase-video-uuid.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.0 uuid",
+      "purpose": "UUID with uppercase hex digits (not canonical lowercase)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity/video_uuid"
+      }
+    },
+    {
+      "id": "N26",
+      "payload": "fixtures/progress/N26-timestamp-without-millis.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.0 timestamp",
+      "purpose": "sent_at without milliseconds",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/sent_at"
+      }
+    },
+    {
+      "id": "N27",
+      "payload": "fixtures/manifest/N27-path-escapes-generation.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "1.0 rel_path",
+      "purpose": "Artifact path climbs out of the generation",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/artifacts/0/path"
+      }
+    },
+    {
+      "id": "N28",
+      "payload": "fixtures/manifest/N28-absolute-path.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "1.0 rel_path",
+      "purpose": "Absolute artifact path",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/artifacts/0/path"
+      }
+    },
+    {
+      "id": "N29",
+      "payload": "fixtures/manifest/N29-path-trailing-newline.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "3.1 control characters",
+      "purpose": "Artifact path with a trailing newline (passes a bare ^...$)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/artifacts/1/path"
+      }
+    },
+    {
+      "id": "N30",
+      "payload": "fixtures/manifest/N30-unknown-kind-dash-manifest.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "section 4",
+      "purpose": "Unknown artifact kind dash_manifest",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/artifacts/0/kind"
+      }
+    },
+    {
+      "id": "N31",
+      "payload": "fixtures/manifest/N31-reserved-kind-captions.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "section 4",
+      "purpose": "Reserved kind captions appended after P14's 11 artifacts (counts kept consistent)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/artifacts/11/kind"
+      }
+    },
+    {
+      "id": "N32",
+      "payload": "fixtures/request/N32-none-with-media-key-id.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "1.3 if/then",
+      "purpose": "mode none plus a media key id",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/encryption"
+      }
+    },
+    {
+      "id": "N33",
+      "payload": "fixtures/request/N33-aes-without-media-key-id.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "1.3 if/then",
+      "purpose": "mode aes-128 without a media key id",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/encryption"
+      }
+    },
+    {
+      "id": "N34",
+      "payload": "fixtures/result-failed/N34-input-invalid-marked-retryable.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "1.6 if/then",
+      "purpose": "Class input_invalid with retryable true",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/error/retryable"
+      }
+    },
+    {
+      "id": "N35",
+      "payload": "fixtures/progress/N35-ext-as-array.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C7, 3.1 objects",
+      "purpose": "ext is an array",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/ext"
+      }
+    },
+    {
+      "id": "N36",
+      "payload": "fixtures/progress/N36-ext-member-without-x-prefix.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C7",
+      "purpose": "ext member name without the x_ prefix",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/ext"
+      }
+    },
+    {
+      "id": "N37",
+      "payload": "fixtures/progress/N37-stage-backing-up.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C11",
+      "purpose": "v1 stage backing_up",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/stage"
+      }
+    },
+    {
+      "id": "N38",
+      "payload": "fixtures/progress/N38-invalid-calendar-date.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S1",
+      "purpose": "sent_at 2030-02-30 passes the pattern but is no calendar date",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "invalid_timestamp",
+        "instance_path": "/sent_at"
+      }
+    },
+    {
+      "id": "N39",
+      "payload": "fixtures/progress/N39-wrong-audience.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S2",
+      "purpose": "Audience of another cell",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "audience_mismatch",
+        "instance_path": "/audience"
+      }
+    },
+    {
+      "id": "N40",
+      "payload": "fixtures/progress/N40-unknown-key-id.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S3, C9",
+      "purpose": "Key id outside the known set",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "unknown_key_id",
+        "instance_path": "/key_id"
+      }
+    },
+    {
+      "id": "N41",
+      "payload": "fixtures/progress/N41-hub-to-worker-key-on-worker-message.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S3, C9",
+      "purpose": "A Hub-to-worker key id on a worker-to-Hub message",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "unknown_key_id",
+        "instance_path": "/key_id"
+      }
+    },
+    {
+      "id": "N42",
+      "payload": "fixtures/progress/N42-sent-301s-ago.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S5, C13",
+      "purpose": "Sent one second past the push tolerance",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "timestamp_out_of_tolerance",
+        "instance_path": "/sent_at"
+      }
+    },
+    {
+      "id": "N43",
+      "payload": "fixtures/progress/N43-sent-301s-ahead.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S4",
+      "purpose": "Sent one second beyond the future bound",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "timestamp_in_future",
+        "instance_path": "/sent_at"
+      }
+    },
+    {
+      "id": "N44",
+      "payload": "fixtures/request/N44-claim-expired.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S6, C15",
+      "purpose": "claim.expires_at 301 s before now",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dispatch_expired",
+        "instance_path": "/claim/expires_at"
+      }
+    },
+    {
+      "id": "N45",
+      "payload": "fixtures/result-completed/N45-attempt-id-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S7, C8",
+      "purpose": "The writer defaulted attempt_id from the video UUID",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/identity/attempt_id"
+      }
+    },
+    {
+      "id": "N46",
+      "payload": "fixtures/result-completed/N46-wrong-org.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S8",
+      "purpose": "Result names another organization",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "org_mismatch",
+        "instance_path": "/identity/org_uuid"
+      }
+    },
+    {
+      "id": "N47",
+      "payload": "fixtures/result-failed/N47-wrong-video.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S9",
+      "purpose": "Another video of the same organization",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "video_mismatch",
+        "instance_path": "/identity/video_uuid"
+      }
+    },
+    {
+      "id": "N48",
+      "payload": "fixtures/progress/N48-wrong-cell.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S10",
+      "purpose": "Owning cell cell-test-b",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "cell_mismatch",
+        "instance_path": "/identity/owning_cell_id"
+      }
+    },
+    {
+      "id": "N49",
+      "payload": "fixtures/progress/N49-stale-epoch.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S11",
+      "purpose": "Placement epoch 6 < 7",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "stale_placement_epoch",
+        "instance_path": "/identity/placement_epoch"
+      }
+    },
+    {
+      "id": "N50",
+      "payload": "fixtures/progress/N50-epoch-ahead.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S11",
+      "purpose": "Placement epoch 8 > 7",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "placement_epoch_ahead",
+        "instance_path": "/identity/placement_epoch"
+      }
+    },
+    {
+      "id": "N51",
+      "payload": "fixtures/result-completed/N51-stale-lifecycle-revision.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S12",
+      "purpose": "Lifecycle revision 2 < 3 (video deleted or superseded meanwhile)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "stale_lifecycle_revision",
+        "instance_path": "/identity/lifecycle_revision"
+      }
+    },
+    {
+      "id": "N52",
+      "payload": "fixtures/progress/N52-lifecycle-revision-ahead.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S12",
+      "purpose": "Lifecycle revision 4 > 3",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "lifecycle_revision_ahead",
+        "instance_path": "/identity/lifecycle_revision"
+      }
+    },
+    {
+      "id": "N53",
+      "payload": "fixtures/result-failed/N53-wrong-attempt.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S13",
+      "purpose": "Another attempt id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "attempt_mismatch",
+        "instance_path": "/identity/attempt_id"
+      }
+    },
+    {
+      "id": "N54",
+      "payload": "fixtures/progress/N54-wrong-dispatch.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S14",
+      "purpose": "Another dispatch id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dispatch_mismatch",
+        "instance_path": "/identity/dispatch_id"
+      }
+    },
+    {
+      "id": "N55",
+      "payload": "fixtures/result-completed/N55-wrong-execution.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S15",
+      "purpose": "A second execution of the same attempt (generation id equal to its own execution id)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "execution_mismatch",
+        "instance_path": "/identity/execution_id"
+      }
+    },
+    {
+      "id": "N56",
+      "payload": "fixtures/result-completed/N56-stale-execution-fence.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S16",
+      "purpose": "Execution fence 1 < 2 (lease superseded)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "stale_execution_fence",
+        "instance_path": "/identity/execution_fence"
+      }
+    },
+    {
+      "id": "N57",
+      "payload": "fixtures/result-completed/N57-wrong-source-id.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S17",
+      "purpose": "Encoded another source",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "source_mismatch",
+        "instance_path": "/source/source_id"
+      }
+    },
+    {
+      "id": "N58",
+      "payload": "fixtures/result-completed/N58-manifest-in-wrong-location.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S18",
+      "purpose": "manifest.location_id differs from the recorded output location",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "storage_location_mismatch",
+        "instance_path": "/manifest/location_id"
+      }
+    },
+    {
+      "id": "N59",
+      "payload": "fixtures/request/N59-wrong-source-location.json",
+      "context": "fixtures/contexts/ctx-hub-sender.json",
+      "rule": "S18",
+      "purpose": "The dispatch builder picked another source location record",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "storage_location_mismatch",
+        "instance_path": "/source/location_id"
+      }
+    },
+    {
+      "id": "N60",
+      "payload": "fixtures/result-completed/N60-generation-not-execution.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S21",
+      "purpose": "generation_id differs from identity.execution_id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "generation_execution_mismatch",
+        "instance_path": "/generation_id"
+      }
+    },
+    {
+      "id": "N61",
+      "payload": "fixtures/progress/N61-repeated-event-seq.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S22",
+      "purpose": "event_seq 4 equals the last accepted sequence",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "stale_event_sequence",
+        "instance_path": "/event_seq"
+      }
+    },
+    {
+      "id": "N62",
+      "payload": "fixtures/manifest/N62-wrong-profile-digest.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S19",
+      "purpose": "Profile sha256 differs",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "profile_mismatch",
+        "instance_path": "/profile"
+      }
+    },
+    {
+      "id": "N63",
+      "payload": "fixtures/manifest/N63-wrong-media-key-id.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S20",
+      "purpose": "Encrypted with another media key id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/encryption"
+      }
+    },
+    {
+      "id": "N64",
+      "payload": "fixtures/manifest/N64-duplicate-artifact-path.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S23",
+      "purpose": "The same segment path twice with different sizes (uniqueItems cannot see it)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "duplicate_artifact_path",
+        "instance_path": "/artifacts/3/path"
+      }
+    },
+    {
+      "id": "N65",
+      "payload": "fixtures/manifest/N65-artifact-count-mismatch.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24",
+      "purpose": "artifact_count 12, list of 11",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/artifact_count"
+      }
+    },
+    {
+      "id": "N66",
+      "payload": "fixtures/manifest/N66-dangling-playlist-reference.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S25",
+      "purpose": "The 480p playlist path names no artifact",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dangling_reference",
+        "instance_path": "/renditions/1/playlist_path"
+      }
+    },
+    {
+      "id": "N67",
+      "payload": "fixtures/manifest/N67-thumbnail-null-without-diagnostic.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S26",
+      "purpose": "thumbnail_path null and no thumbnail_unavailable diagnostic",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "thumbnail_diagnostic_missing",
+        "instance_path": "/thumbnail_path"
+      }
+    },
+    {
+      "id": "N68",
+      "payload": "fixtures/manifest/N68-rendition-not-requested.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S27",
+      "purpose": "1080p produced but not requested",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "rendition_not_requested",
+        "instance_path": "/renditions/0/name"
+      }
+    },
+    {
+      "id": "N69",
+      "payload": "fixtures/manifest/N69-eleven-artifacts-over-limit-10.json",
+      "context": "fixtures/contexts/ctx-hub-storage-limit-10.json",
+      "rule": "S28",
+      "purpose": "An inventory of 11 artifacts against a dispatched limit of 10",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "limit_exceeded",
+        "instance_path": "/artifact_count"
+      }
+    },
+    {
+      "id": "N70",
+      "payload": "fixtures/progress/N70-nesting-depth-32.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "3.1 depth",
+      "purpose": "Deepest container at nesting exactly 32: L1 accepts it, the ext value schema refuses the array",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/ext/x_deep"
+      }
+    },
+    {
+      "id": "N71",
+      "payload": "fixtures/request/N71-source-over-30-gib.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "A2 bounds",
+      "purpose": "source.size_bytes one byte over 30 GiB",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/source/size_bytes"
+      }
+    },
+    {
+      "id": "N72",
+      "payload": "fixtures/result-completed/N72-duration-over-6-hours.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "A2 bounds",
+      "purpose": "media.duration_ms one millisecond over 6 h",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/media/duration_ms"
+      }
+    },
+    {
+      "id": "N73",
+      "payload": "fixtures/request/N73-segment-duration-field.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "A1",
+      "purpose": "The removed segment_duration_s field",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": ""
+      }
+    },
+    {
+      "id": "N74",
+      "payload": "fixtures/progress/N74-integer-above-2-53.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "3.1 integers",
+      "purpose": "placement_epoch 2^53, one above the interoperable ceiling",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity/placement_epoch"
+      }
+    },
+    {
+      "id": "N75",
+      "payload": "fixtures/progress/N75-invalid-utf8.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "L1 UTF-8",
+      "purpose": "P04 plus a message holding the byte 0xFF (invalid UTF-8)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N76",
+      "payload": "fixtures/progress/N76-integer-valued-float.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 integer literals",
+      "purpose": "stage_progress_pct written 50.0: every number literal is an integer literal",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N77",
+      "payload": "fixtures/progress/N77-unpaired-surrogate-in-overwritten-member.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 whole text",
+      "purpose": "An unpaired surrogate escape in a member a later duplicate overwrites",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N78",
+      "payload": "fixtures/progress/N78-nesting-33-in-overwritten-member.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 whole text",
+      "purpose": "Nesting 33 inside a member a later duplicate overwrites",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N79",
+      "payload": "fixtures/progress/N79-nul-leading-name-in-overwritten-member.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 whole text",
+      "purpose": "A member name led by U+0000 inside an object a later duplicate overwrites",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N80",
+      "payload": "fixtures/progress/N80-non-ascii-in-overwritten-member.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 ASCII",
+      "purpose": "The UTF-8 bytes C3 A9 inside a member a later duplicate overwrites",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N81",
+      "payload": "fixtures/progress/N81-fence-rounding-to-an-integer.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 integer literals",
+      "purpose": "execution_fence 1.9999999999999999, which a float parser rounds to 2",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N82",
+      "payload": "fixtures/progress/N82-exponent-in-integer-field.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "4 integer literals",
+      "purpose": "stage_progress_pct written 1e2",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "parse",
+        "reason": "malformed_json",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N83",
+      "payload": "fixtures/progress/N83-over-the-largest-accepted-limit.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C12, L0 a",
+      "purpose": "16,385 bytes, one over the push context's largest limit, refused before parsing",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "size",
+        "reason": "payload_too_large",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N84",
+      "payload": "fixtures/manifest/N84-one-token-over-the-budget.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "4 token budget",
+      "purpose": "A manifest-shaped text one token over max_tokens, far under the byte limit",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "size",
+        "reason": "payload_too_large",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N85",
+      "payload": "fixtures/result-failed/N85-presigned-url-in-error-detail.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "7 free text",
+      "purpose": "A presigned-URL-like string in error.detail",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/error/detail"
+      }
+    },
+    {
+      "id": "N86",
+      "payload": "fixtures/progress/N86-url-in-ext-string.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "C7, 7 free text",
+      "purpose": "A URL as an ext string value",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/ext/x_callback"
+      }
+    },
+    {
+      "id": "N87",
+      "payload": "fixtures/request/N87-claim-expiry-invalid-calendar-date.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S1",
+      "purpose": "claim.expires_at 2030-02-30 names no calendar date",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "invalid_timestamp",
+        "instance_path": "/claim/expires_at"
+      }
+    },
+    {
+      "id": "N88",
+      "payload": "fixtures/manifest/N88-created-at-invalid-calendar-date.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S1",
+      "purpose": "created_at 2029-02-29 in a common year",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "invalid_timestamp",
+        "instance_path": "/created_at"
+      }
+    },
+    {
+      "id": "N89",
+      "payload": "fixtures/request/N89-claim-expires-when-sent.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S6",
+      "purpose": "claim.expires_at equal to sent_at, 60 s before now: the claim never had a window",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dispatch_expired",
+        "instance_path": "/claim/expires_at"
+      }
+    },
+    {
+      "id": "N90",
+      "payload": "fixtures/request/N90-dispatch-id-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S7",
+      "purpose": "dispatch_id defaulted from the video UUID",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/identity/dispatch_id"
+      }
+    },
+    {
+      "id": "N91",
+      "payload": "fixtures/progress/N91-execution-id-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S7",
+      "purpose": "execution_id defaulted from the video UUID",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/identity/execution_id"
+      }
+    },
+    {
+      "id": "N92",
+      "payload": "fixtures/request/N92-source-id-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S7",
+      "purpose": "source_id defaulted from the video UUID",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/source/source_id"
+      }
+    },
+    {
+      "id": "N93",
+      "payload": "fixtures/request/N93-org-uuid-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "S7",
+      "purpose": "org_uuid defaulted from the video UUID",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/identity/org_uuid"
+      }
+    },
+    {
+      "id": "N94",
+      "payload": "fixtures/progress/N94-execution-fence-ahead.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S16",
+      "purpose": "Execution fence 3 > 2: a lease the Hub never granted",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "execution_mismatch",
+        "instance_path": "/identity/execution_fence"
+      }
+    },
+    {
+      "id": "N95",
+      "payload": "fixtures/manifest/N95-wrong-source-id.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S17",
+      "purpose": "The manifest names another source",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "source_mismatch",
+        "instance_path": "/identity/source_id"
+      }
+    },
+    {
+      "id": "N96",
+      "payload": "fixtures/request/N96-wrong-output-location.json",
+      "context": "fixtures/contexts/ctx-hub-sender.json",
+      "rule": "S18",
+      "purpose": "The dispatch builder picked another output location record",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "storage_location_mismatch",
+        "instance_path": "/output/location_id"
+      }
+    },
+    {
+      "id": "N97",
+      "payload": "fixtures/result-completed/N97-wrong-profile-id.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "S19",
+      "purpose": "Result applied another profile",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "profile_mismatch",
+        "instance_path": "/profile"
+      }
+    },
+    {
+      "id": "N98",
+      "payload": "fixtures/request/N98-wrong-profile-version.json",
+      "context": "fixtures/contexts/ctx-hub-sender.json",
+      "rule": "S19",
+      "purpose": "Dispatch names profile version 2 where 1 is recorded",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "profile_mismatch",
+        "instance_path": "/profile"
+      }
+    },
+    {
+      "id": "N99",
+      "payload": "fixtures/request/N99-unencrypted-where-encryption-recorded.json",
+      "context": "fixtures/contexts/ctx-hub-sender.json",
+      "rule": "S20",
+      "purpose": "Dispatch mode none where aes-128 is recorded",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/encryption"
+      }
+    },
+    {
+      "id": "N100",
+      "payload": "fixtures/manifest/N100-generation-not-execution.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S21",
+      "purpose": "Manifest generation_id differs from identity.execution_id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "generation_execution_mismatch",
+        "instance_path": "/generation_id"
+      }
+    },
+    {
+      "id": "N101",
+      "payload": "fixtures/manifest/N101-total-bytes-mismatch.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24 b",
+      "purpose": "total_bytes one more than the sum of artifact sizes",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/total_bytes"
+      }
+    },
+    {
+      "id": "N102",
+      "payload": "fixtures/manifest/N102-rendition-count-mismatch.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24 c",
+      "purpose": "media.rendition_count 2 for 3 renditions",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/media/rendition_count"
+      }
+    },
+    {
+      "id": "N103",
+      "payload": "fixtures/manifest/N103-duplicate-rendition-entry.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24 d",
+      "purpose": "The 480p rendition listed twice (counts kept consistent)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/renditions/3/name"
+      }
+    },
+    {
+      "id": "N104",
+      "payload": "fixtures/manifest/N104-two-master-playlists.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24 e",
+      "purpose": "A second hls_master_playlist artifact",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/artifacts"
+      }
+    },
+    {
+      "id": "N105",
+      "payload": "fixtures/manifest/N105-rendition-without-segments.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24 f",
+      "purpose": "The 480p rendition has a playlist but no segment",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/renditions/1"
+      }
+    },
+    {
+      "id": "N106",
+      "payload": "fixtures/manifest/N106-master-path-names-a-segment.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S25 a",
+      "purpose": "master_playlist_path names a segment",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dangling_reference",
+        "instance_path": "/master_playlist_path"
+      }
+    },
+    {
+      "id": "N107",
+      "payload": "fixtures/manifest/N107-playlist-of-another-rendition.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S25 b",
+      "purpose": "The 720p entry names the 480p playlist",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dangling_reference",
+        "instance_path": "/renditions/0/playlist_path"
+      }
+    },
+    {
+      "id": "N108",
+      "payload": "fixtures/manifest/N108-thumbnail-path-names-a-segment.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S25 c",
+      "purpose": "thumbnail_path names a segment",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dangling_reference",
+        "instance_path": "/thumbnail_path"
+      }
+    },
+    {
+      "id": "N109",
+      "payload": "fixtures/manifest/N109-artifact-of-an-unlisted-rendition.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S25 d",
+      "purpose": "A segment of 1080p, which renditions does not list",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dangling_reference",
+        "instance_path": "/artifacts/11/rendition"
+      }
+    },
+    {
+      "id": "N110",
+      "payload": "fixtures/manifest/N110-two-thumbnails.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S26",
+      "purpose": "thumbnail_path set and two thumbnail artifacts",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "thumbnail_diagnostic_missing",
+        "instance_path": "/thumbnail_path"
+      }
+    },
+    {
+      "id": "N111",
+      "payload": "fixtures/manifest/N111-null-thumbnail-with-thumbnail-artifact.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S26",
+      "purpose": "thumbnail_path null with the diagnostic, but a thumbnail artifact remains",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "thumbnail_diagnostic_missing",
+        "instance_path": "/thumbnail_path"
+      }
+    },
+    {
+      "id": "N112",
+      "payload": "fixtures/manifest/N112-rendition-with-3601-segments.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S28",
+      "purpose": "One rendition holds 3,601 segments, one over the limit",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "limit_exceeded",
+        "instance_path": "/renditions/0"
+      }
+    },
+    {
+      "id": "N113",
+      "payload": "fixtures/manifest/N113-non-json-over-the-token-budget.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "4 token budget",
+      "purpose": "Not JSON and one token over max_tokens: the budget refuses it before decoding",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "size",
+        "reason": "payload_too_large",
+        "instance_path": null
+      }
+    },
+    {
+      "id": "N114",
+      "payload": "fixtures/manifest/N114-second-media-playlist-for-a-rendition.json",
+      "context": "fixtures/contexts/ctx-hub-storage.json",
+      "rule": "S24 f",
+      "purpose": "The 720p rendition has two media playlists (exactly one is allowed)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "artifact_inventory_mismatch",
+        "instance_path": "/renditions/0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/fixture-catalog.schema.json",
+  "title": "Transcode contract v2: the paired fixture catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "catalog_version",
+    "cases"
+  ],
+  "properties": {
+    "catalog_version": {
+      "type": "integer",
+      "const": 1,
+      "minimum": 1,
+      "maximum": 1
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "payload",
+          "context",
+          "rule",
+          "purpose",
+          "context_needed",
+          "expect"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 4,
+            "pattern": "^[PN][0-9]{2,3}$",
+            "not": {
+              "pattern": "[\\x00-\\x1f\\x7f]"
+            }
+          },
+          "payload": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^fixtures/(request|progress|result-completed|result-failed|hub-error|manifest)/[PN][0-9]{2,3}-[a-z0-9-]{1,80}\\.json$",
+            "not": {
+              "pattern": "[\\x00-\\x1f\\x7f]"
+            }
+          },
+          "context": {
+            "type": "string",
+            "maxLength": 96,
+            "pattern": "^fixtures/contexts/ctx-[a-z0-9-]{1,60}\\.json$",
+            "not": {
+              "pattern": "[\\x00-\\x1f\\x7f]"
+            }
+          },
+          "rule": {
+            "type": "string",
+            "maxLength": 64,
+            "not": {
+              "pattern": "[^\\x20-\\x7e]"
+            },
+            "allOf": [
+              {
+                "not": {
+                  "pattern": "://"
+                }
+              }
+            ]
+          },
+          "purpose": {
+            "type": "string",
+            "maxLength": 200,
+            "not": {
+              "pattern": "[^\\x20-\\x7e]"
+            },
+            "allOf": [
+              {
+                "not": {
+                  "pattern": "://"
+                }
+              }
+            ]
+          },
+          "context_needed": {
+            "type": "boolean"
+          },
+          "expect": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "outcome",
+              "layer",
+              "reason",
+              "instance_path"
+            ],
+            "properties": {
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "accept",
+                  "reject"
+                ]
+              },
+              "layer": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "size",
+                      "parse",
+                      "version",
+                      "schema",
+                      "semantic"
+                    ]
+                  }
+                ]
+              },
+              "reason": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "maxLength": 48,
+                    "pattern": "^[a-z][a-z0-9_]{2,47}$",
+                    "not": {
+                      "pattern": "[\\x00-\\x1f\\x7f]"
+                    }
+                  }
+                ]
+              },
+              "instance_path": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "string",
+                    "maxLength": 256,
+                    "pattern": "^(/[A-Za-z0-9_~.-]{0,64}){0,16}$",
+                    "not": {
+                      "pattern": "[\\x00-\\x1f\\x7f]"
+                    }
+                  }
+                ]
+              }
+            },
+            "if": {
+              "properties": {
+                "outcome": {
+                  "const": "accept"
+                }
+              },
+              "required": [
+                "outcome"
+              ]
+            },
+            "then": {
+              "properties": {
+                "layer": {
+                  "type": "null"
+                },
+                "reason": {
+                  "type": "null"
+                },
+                "instance_path": {
+                  "type": "null"
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "layer": {
+                  "not": {
+                    "type": "null"
+                  }
+                },
+                "reason": {
+                  "not": {
+                    "type": "null"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
