@@ -90,7 +90,7 @@
     "accepted_message_kinds": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 6,
+      "maxItems": 9,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -100,7 +100,10 @@
           "transcode.result.completed",
           "transcode.result.failed",
           "hub.error",
-          "generation.manifest"
+          "generation.manifest",
+          "transcode.claim",
+          "transcode.claim.granted",
+          "transcode.unclaimed"
         ]
       }
     },
@@ -323,6 +326,16 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 25209
+            }
+          ]
+        },
+        "runtime_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "common.schema.json#/$defs/uuid"
             }
           ]
         }

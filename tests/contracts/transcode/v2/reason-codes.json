@@ -92,10 +92,10 @@
     {
       "code": "dispatch_expired",
       "layer": "semantic",
-      "http_status": null,
+      "http_status": 410,
       "retryable": false,
       "reserved": false,
-      "first_unit": "B08"
+      "first_unit": "B07"
     },
     {
       "code": "identity_aliases_video_uuid",
@@ -290,6 +290,22 @@
       "first_unit": "B10"
     },
     {
+      "code": "runtime_mismatch",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
+      "code": "generation_prefix_mismatch",
+      "layer": "semantic",
+      "http_status": null,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "B07"
+    },
+    {
       "code": "invalid_signature",
       "layer": "auth",
       "http_status": 401,
@@ -334,6 +350,30 @@
       "layer": null,
       "http_status": 503,
       "retryable": true,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "invalid_bootstrap_token",
+      "layer": "auth",
+      "http_status": 401,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "claim_conflict",
+      "layer": "claim",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "B07"
+    },
+    {
+      "code": "claim_refused",
+      "layer": "claim",
+      "http_status": 403,
+      "retryable": false,
       "reserved": true,
       "first_unit": "B07"
     }

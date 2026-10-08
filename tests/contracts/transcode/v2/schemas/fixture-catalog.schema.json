@@ -44,7 +44,7 @@
           "payload": {
             "type": "string",
             "maxLength": 128,
-            "pattern": "^fixtures/(request|progress|result-completed|result-failed|hub-error|manifest)/[PN][0-9]{2,3}-[a-z0-9-]{1,80}\\.json$",
+            "pattern": "^fixtures/(request|progress|result-completed|result-failed|hub-error|manifest|claim|claim-granted|unclaimed)/[PN][0-9]{2,3}-[a-z0-9-]{1,80}\\.json$",
             "not": {
               "pattern": "[\\x00-\\x1f\\x7f]"
             }

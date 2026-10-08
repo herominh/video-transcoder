@@ -58,7 +58,7 @@ def test_schema_files_when_listed_should_declare_2020_12_and_an_id_inside_the_co
     headers = {path: files.read_json(path) for path in SCHEMA_FILES}
 
     # Assert
-    assert len(headers) == 11
+    assert len(headers) == 14
     for path, document in headers.items():
         assert document["$schema"] == DIALECT, path
         assert document["$id"] == schema.SCHEMA_BASE_URI + path, path

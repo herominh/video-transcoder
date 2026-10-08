@@ -17,6 +17,9 @@ from tests.contract.verdict import Verdict
 
 PUSH = "fixtures/contexts/ctx-hub-push.json"
 STORAGE = "fixtures/contexts/ctx-hub-storage.json"
+HUB_CLAIM = "fixtures/contexts/ctx-hub-claim.json"
+WORKER_GRANT = "fixtures/contexts/ctx-worker-claim-grant.json"
+HUB_UNCLAIMED = "fixtures/contexts/ctx-hub-unclaimed-push.json"
 PROGRESS_PAYLOAD = "fixtures/progress/P04-downloading.json"
 COMPLETED_PAYLOAD = "fixtures/result-completed/P07-full.json"
 FAILED_PAYLOAD = "fixtures/result-failed/P11-minimal-stage-null.json"
@@ -496,6 +499,14 @@ REFUSALS = {
     "a manifest posted to a message receiver": (PUSH, {"protocol_version": "2.0.0-draft",
                                                        "message_kind": "generation.manifest"},
                                                 "unexpected_message_kind", "/message_kind"),
+    "a claim posted to the Hub callback": (PUSH, {**PROGRESS_HEADER, "message_kind": "transcode.claim"},
+                                           "unexpected_message_kind", "/message_kind"),
+    "a claim grant posted to the Hub callback": (PUSH, {**PROGRESS_HEADER,
+                                                        "message_kind": "transcode.claim.granted"},
+                                                 "unexpected_message_kind", "/message_kind"),
+    "an unclaimed report where the receiver does not list it": (PUSH, {**PROGRESS_HEADER,
+                                                                       "message_kind": "transcode.unclaimed"},
+                                                                "unexpected_message_kind", "/message_kind"),
     "a message read from storage": (STORAGE, PROGRESS_HEADER, "unsupported_version", "/manifest_version"),
     "a manifest of another version": (STORAGE, {**MANIFEST_HEADER, "manifest_version": "2.0.0"},
                                       "unsupported_version", "/manifest_version"),
@@ -527,8 +538,14 @@ def test_select_when_version_or_kind_is_not_accepted_should_refuse_with_the_reas
          MessageKind.TRANSCODE_RESULT_FAILED),
         (STORAGE, MANIFEST_HEADER, MessageKind.GENERATION_MANIFEST),
         (PUSH, {**PROGRESS_HEADER, "callback_url": "x"}, MessageKind.TRANSCODE_PROGRESS),
+        (HUB_CLAIM, {**PROGRESS_HEADER, "message_kind": "transcode.claim"}, MessageKind.TRANSCODE_CLAIM),
+        (WORKER_GRANT, {**PROGRESS_HEADER, "message_kind": "transcode.claim.granted"},
+         MessageKind.TRANSCODE_CLAIM_GRANTED),
+        (HUB_UNCLAIMED, {**PROGRESS_HEADER, "message_kind": "transcode.unclaimed"},
+         MessageKind.TRANSCODE_UNCLAIMED),
     ],
-    ids=["a message", "a manifest from storage", "unknown fields left to the schema layer"],
+    ids=["a message", "a manifest from storage", "unknown fields left to the schema layer", "a claim at the Hub",
+         "a claim grant at the worker", "an unclaimed report at the Hub"],
 )
 def test_select_when_version_and_kind_are_accepted_should_return_the_kind(context, fields, kind):
     # Act

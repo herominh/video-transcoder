@@ -1,4 +1,4 @@
-"""Layer L4: the semantic checks S1-S28 against the trusted context (standard library only).
+"""Layer L4: the semantic checks S1-S30 against the trusted context (standard library only).
 
 The rule table below says, per (role, kind), which channels are allowed and which checks
 run, in order; the first failing check wins. It also yields the context fields each
@@ -67,8 +67,15 @@ _COMPLETED = MessageKind.TRANSCODE_RESULT_COMPLETED.value
 _FAILED = MessageKind.TRANSCODE_RESULT_FAILED.value
 _HUB_ERROR = MessageKind.HUB_ERROR.value
 _MANIFEST = MessageKind.GENERATION_MANIFEST.value
+_CLAIM = MessageKind.TRANSCODE_CLAIM.value
+_GRANT = MessageKind.TRANSCODE_CLAIM_GRANTED.value
+_UNCLAIMED = MessageKind.TRANSCODE_UNCLAIMED.value
 
 _RESULT_CHANNELS = (Channel.PUSH.value, Channel.POLL.value)
+# A claim and its grant are one HTTP exchange: neither is ever read from provider output.
+_CLAIM_CHANNELS = (Channel.PUSH.value,)
+# A claim and an unclaimed report name a dispatch, never an execution.
+_DISPATCH_ONLY_CHECKS = ("S1", "S2", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14")
 _RECEIVER_ROWS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     _PROGRESS: (
         _RESULT_CHANNELS,
@@ -88,16 +95,29 @@ _RECEIVER_ROWS: Mapping[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("S1", "S7", "S8", "S9", "S13", "S14", "S15", "S17", "S19", "S20", "S21", "S23", "S24", "S25", "S26",
          "S27", "S28"),
     ),
+    _CLAIM: (_CLAIM_CHANNELS, _DISPATCH_ONLY_CHECKS),
+    _UNCLAIMED: (_RESULT_CHANNELS, _DISPATCH_ONLY_CHECKS),
 }
 
 # (role, kind) -> (allowed channels, checks in evaluation order). worker_sender mirrors hub_receiver.
 RULES: Mapping[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
     (Role.WORKER_RECEIVER.value, _REQUEST): ((Channel.DISPATCH.value,), ("S1", "S2", "S3", "S4", "S6", "S7")),
     (Role.WORKER_RECEIVER.value, _HUB_ERROR): ((Channel.PUSH.value,), ("S1",)),
+    # The worker learns the execution id and its fence from the grant, so it compares neither (no S15, no S16).
+    (Role.WORKER_RECEIVER.value, _GRANT): (
+        _CLAIM_CHANNELS,
+        ("S1", "S2", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S18", "S21", "S29",
+         "S30"),
+    ),
     (Role.HUB_SENDER.value, _REQUEST): (
         (Channel.DISPATCH.value,),
         ("S1", "S2", "S3", "S4", "S6", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S17", "S18", "S19",
          "S20"),
+    ),
+    (Role.HUB_SENDER.value, _GRANT): (
+        _CLAIM_CHANNELS,
+        ("S1", "S2", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S18",
+         "S21", "S29", "S30"),
     ),
     **{(Role.HUB_RECEIVER.value, kind): row for kind, row in _RECEIVER_ROWS.items()},
     **{(Role.WORKER_SENDER.value, kind): row for kind, row in _RECEIVER_ROWS.items()},
@@ -124,10 +144,12 @@ _CHECK_CONTEXT_FIELDS: Mapping[str, tuple[str, ...]] = {
     "S22": ("last_event_seq",),
     "S27": ("expect.renditions",),
     "S28": ("expect.max_artifact_count",),
+    "S29": ("expect.runtime_id",),
 }
 _S18_CONTEXT_FIELDS: Mapping[str, tuple[str, ...]] = {
     _REQUEST: ("expect.source_location_id", "expect.output_location_id"),
     _COMPLETED: ("expect.output_location_id",),
+    _GRANT: ("expect.output_location_id",),
 }
 
 
@@ -176,6 +198,15 @@ def _source_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any]
     if not isinstance(source, Mapping):
         return None
     return "/source/source_id", source["source_id"]
+
+
+def _runtime_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any] | None:
+    """Pointer and value of the message's runtime id; None when the kind carries none."""
+    if kind == _CLAIM:
+        return "/claim/runtime_id", document["claim"]["runtime_id"]
+    if kind in (_GRANT, _UNCLAIMED):
+        return "/runtime_id", document["runtime_id"]
+    return None
 
 
 def _timestamps(document: Mapping[str, Any], kind: str) -> Iterator[tuple[str, Any]]:
@@ -257,6 +288,9 @@ def _s7_no_alias_of_video(
     if source_reference is not None:
         candidates.append(source_reference)
     candidates.append(("/identity/org_uuid", identity.get("org_uuid")))
+    runtime_reference = _runtime_reference(document, kind)
+    if runtime_reference is not None:
+        candidates.append(runtime_reference)
     for pointer, value in candidates:
         if value is not None and value == video_uuid:
             return ReasonCode.IDENTITY_ALIASES_VIDEO_UUID, pointer
@@ -298,6 +332,8 @@ def _s18_locations(document: Document, kind: str, context: TrustedContext, regis
             ("/source/location_id", document["source"]["location_id"], "expect.source_location_id"),
             ("/output/location_id", document["output"]["location_id"], "expect.output_location_id"),
         ]
+    elif kind == _GRANT:
+        comparisons = [("/output/location_id", document["output"]["location_id"], "expect.output_location_id")]
     else:
         comparisons = [("/manifest/location_id", document["manifest"]["location_id"], "expect.output_location_id")]
     for pointer, received, recorded_field in comparisons:
@@ -423,6 +459,22 @@ def _s28_limits(document: Document, kind: str, context: TrustedContext, registry
     return None
 
 
+def _s29_runtime(document: Document, kind: str, context: TrustedContext, registry: ContractRegistry) -> Finding:
+    if document["runtime_id"] != context.value("expect.runtime_id"):
+        return ReasonCode.RUNTIME_MISMATCH, "/runtime_id"
+    return None
+
+
+def _s30_prefix_ends_in_generation(
+    document: Document, kind: str, context: TrustedContext, registry: ContractRegistry
+) -> Finding:
+    """The last segment of the granted prefix is the generation; a prefix without a `/` is its own last segment."""
+    last_segment = document["output"]["prefix"].rsplit("/", 1)[-1]
+    if last_segment != document["generation_id"]:
+        return ReasonCode.GENERATION_PREFIX_MISMATCH, "/output/prefix"
+    return None
+
+
 CHECKS: Mapping[str, CheckFunction] = {
     "S1": _s1_timestamps,
     "S2": _s2_audience,
@@ -454,6 +506,8 @@ CHECKS: Mapping[str, CheckFunction] = {
     "S26": _s26_thumbnail,
     "S27": _s27_requested,
     "S28": _s28_limits,
+    "S29": _s29_runtime,
+    "S30": _s30_prefix_ends_in_generation,
 }
 
 

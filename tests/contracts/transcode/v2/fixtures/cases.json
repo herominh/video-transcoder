@@ -296,6 +296,62 @@
       }
     },
     {
+      "id": "P23",
+      "payload": "fixtures/claim/P23-claim-of-the-accepted-dispatch.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "15.1, S1-S14",
+      "purpose": "A runtime claims the dispatch it accepted, with the dispatch's bootstrap token",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P24",
+      "payload": "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "15.2, S18, S21, S29, S30",
+      "purpose": "The grant names the claiming runtime, the minted execution and a prefix that ends in the generation",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P25",
+      "payload": "fixtures/unclaimed/P25-refused-with-claim-conflict.json",
+      "context": "fixtures/contexts/ctx-hub-unclaimed-push.json",
+      "rule": "15.1, 7 if/then",
+      "purpose": "A start that did no work reports the Hub's refusal: cause refused with hub_error_code",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P26",
+      "payload": "fixtures/unclaimed/P26-unreachable-polled-three-hours-late.json",
+      "context": "fixtures/contexts/ctx-hub-unclaimed-poll.json",
+      "rule": "15.1, C14",
+      "purpose": "No answer until the expiry: no hub_error_code; sent 3 h before now and read from provider output",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
       "id": "N01",
       "payload": "fixtures/progress/N01-oversized-by-whitespace.json",
       "context": "fixtures/contexts/ctx-hub-push.json",
@@ -1889,6 +1945,258 @@
         "layer": "semantic",
         "reason": "artifact_inventory_mismatch",
         "instance_path": "/renditions/0"
+      }
+    },
+    {
+      "id": "N115",
+      "payload": "fixtures/claim/N115-execution-id-in-identity.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "C6",
+      "purpose": "A claim's identity carries execution_id, which only the grant assigns",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/identity"
+      }
+    },
+    {
+      "id": "N116",
+      "payload": "fixtures/claim/N116-missing-runtime-id.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "7 claim kinds",
+      "purpose": "claim without runtime_id",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/claim"
+      }
+    },
+    {
+      "id": "N117",
+      "payload": "fixtures/claim/N117-bootstrap-token-42-chars.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "7 claim kinds",
+      "purpose": "Bootstrap token of 42 characters",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/claim/bootstrap_token"
+      }
+    },
+    {
+      "id": "N118",
+      "payload": "fixtures/claim/N118-wrong-dispatch.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "S14",
+      "purpose": "A claim for another dispatch id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "dispatch_mismatch",
+        "instance_path": "/identity/dispatch_id"
+      }
+    },
+    {
+      "id": "N119",
+      "payload": "fixtures/claim/N119-stale-lifecycle-revision.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "S12, 15.2",
+      "purpose": "Lifecycle revision 2 < 3 (video deleted or superseded after the dispatch)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "stale_lifecycle_revision",
+        "instance_path": "/identity/lifecycle_revision"
+      }
+    },
+    {
+      "id": "N120",
+      "payload": "fixtures/claim/N120-sent-301s-ago.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "S5, C13",
+      "purpose": "A claim sent one second past the push tolerance",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "timestamp_out_of_tolerance",
+        "instance_path": "/sent_at"
+      }
+    },
+    {
+      "id": "N121",
+      "payload": "fixtures/claim/N121-hub-to-worker-key-on-claim.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "S3, C9",
+      "purpose": "A Hub-to-worker key id on a claim",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "unknown_key_id",
+        "instance_path": "/key_id"
+      }
+    },
+    {
+      "id": "N122",
+      "payload": "fixtures/claim-granted/N122-another-runtime-id.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S29",
+      "purpose": "The grant echoes the runtime id of another start",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "runtime_mismatch",
+        "instance_path": "/runtime_id"
+      }
+    },
+    {
+      "id": "N123",
+      "payload": "fixtures/claim-granted/N123-prefix-not-ending-in-generation.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S30",
+      "purpose": "The generation is a segment of output.prefix but not its last one",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "generation_prefix_mismatch",
+        "instance_path": "/output/prefix"
+      }
+    },
+    {
+      "id": "N124",
+      "payload": "fixtures/claim-granted/N124-generation-not-execution.json",
+      "context": "fixtures/contexts/ctx-hub-sender-claim-grant.json",
+      "rule": "S21",
+      "purpose": "The Hub self-check: generation_id differs from identity.execution_id; the prefix still ends in generation_id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "generation_execution_mismatch",
+        "instance_path": "/generation_id"
+      }
+    },
+    {
+      "id": "N125",
+      "payload": "fixtures/claim-granted/N125-wrong-output-location.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S18",
+      "purpose": "output.location_id differs from the dispatch's output location",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "storage_location_mismatch",
+        "instance_path": "/output/location_id"
+      }
+    },
+    {
+      "id": "N126",
+      "payload": "fixtures/claim-granted/N126-execution-id-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S7",
+      "purpose": "execution_id defaulted from the video UUID (generation_id then differs from it too)",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/identity/execution_id"
+      }
+    },
+    {
+      "id": "N127",
+      "payload": "fixtures/claim-granted/N127-prefix-with-dot-dot-segment.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "1.0 object_key",
+      "purpose": "output.prefix holds a .. segment",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/output/prefix"
+      }
+    },
+    {
+      "id": "N128",
+      "payload": "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json",
+      "context": "fixtures/contexts/ctx-worker-error.json",
+      "rule": "L2",
+      "purpose": "A valid grant where the worker accepts only hub.error",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "version",
+        "reason": "unexpected_message_kind",
+        "instance_path": "/message_kind"
+      }
+    },
+    {
+      "id": "N129",
+      "payload": "fixtures/unclaimed/N129-unknown-cause.json",
+      "context": "fixtures/contexts/ctx-hub-unclaimed-poll.json",
+      "rule": "C11",
+      "purpose": "Cause expired is not one of refused, unreachable, invalid_answer",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/cause"
+      }
+    },
+    {
+      "id": "N130",
+      "payload": "fixtures/unclaimed/N130-wrong-attempt.json",
+      "context": "fixtures/contexts/ctx-hub-unclaimed-push.json",
+      "rule": "S13",
+      "purpose": "An unclaimed report for another attempt id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "attempt_mismatch",
+        "instance_path": "/identity/attempt_id"
+      }
+    },
+    {
+      "id": "N131",
+      "payload": "fixtures/claim-granted/N131-wrong-audience.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S2",
+      "purpose": "A grant addressed to another worker audience",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "audience_mismatch",
+        "instance_path": "/audience"
+      }
+    },
+    {
+      "id": "N132",
+      "payload": "fixtures/claim/N132-runtime-id-equals-video-uuid.json",
+      "context": "fixtures/contexts/ctx-hub-claim.json",
+      "rule": "S7",
+      "purpose": "claim.runtime_id defaulted from the video UUID",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "identity_aliases_video_uuid",
+        "instance_path": "/claim/runtime_id"
       }
     }
   ]

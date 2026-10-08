@@ -6,7 +6,10 @@
     "transcode.result.completed": 16384,
     "transcode.result.failed": 16384,
     "hub.error": 2048,
-    "generation.manifest": 8388608
+    "generation.manifest": 8388608,
+    "transcode.claim": 4096,
+    "transcode.claim.granted": 4096,
+    "transcode.unclaimed": 4096
   },
   "carrier_max_bytes": {
     "runpod.input": 8448,
