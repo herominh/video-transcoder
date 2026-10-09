@@ -18,6 +18,9 @@ encode hold to them whatever the decoded stream turns out to be:
   orientation carried only in the coded stream is ignored, as the preflight's contract says;
 - only the admitted streams are mapped; metadata and chapters are dropped (a phone's location
   tag never reaches the output).
+
+The thumbnail (`core/thumbnail.py`) reads the source through the same input arguments, so it is
+read with exactly the rendition's isolation.
 """
 
 from __future__ import annotations
@@ -155,6 +158,30 @@ def _audio_arguments(source: EncodeSource, plan: RenditionPlan, profile: MediaPr
     ]
 
 
+def input_arguments(source: EncodeSource, profile: MediaProfile) -> list[str]:
+    """The input half of a command that reads `source`, from its protocol whitelist up to `-i`.
+
+    A local file, read only through the admitted demuxer, decoded within the pixel cap, with
+    autorotation off and only the codec's crop applied: every reader of the source (the rendition
+    encode, the thumbnail) reads it exactly so.
+    """
+    if not isinstance(source, EncodeSource):
+        raise TypeError("source must be an EncodeSource")
+    if not isinstance(profile, MediaProfile):
+        raise TypeError("profile must be a MediaProfile")
+    return [
+        "-protocol_whitelist", INPUT_PROTOCOLS,
+        "-format_whitelist", source.demuxer,
+        "-f", source.demuxer,
+        "-noautorotate",
+        # The container's own crop (MKV PixelCrop, MOV clap) is not in the preflight's geometry;
+        # only the codec's crop is, so only that one is applied.
+        "-apply_cropping", "codec",
+        "-max_pixels", str(decoder_pixel_limit(profile)),
+        "-i", f"{FILE_URL_PREFIX}{source.path}",
+    ]
+
+
 def rendition_argv(
     executable: str,
     source: EncodeSource,
@@ -182,16 +209,7 @@ def rendition_argv(
     return [
         executable,
         "-hide_banner", "-nostdin", "-nostats", "-loglevel", LOG_LEVEL,
-        # Input: a local file, read only through the admitted demuxer, decoded within the pixel cap.
-        "-protocol_whitelist", INPUT_PROTOCOLS,
-        "-format_whitelist", source.demuxer,
-        "-f", source.demuxer,
-        "-noautorotate",
-        # The container's own crop (MKV PixelCrop, MOV clap) is not in the preflight's geometry;
-        # only the codec's crop is, so only that one is applied.
-        "-apply_cropping", "codec",
-        "-max_pixels", str(decoder_pixel_limit(profile)),
-        "-i", f"{FILE_URL_PREFIX}{source.path}",
+        *input_arguments(source, profile),
         # Output: local files only; the admitted streams only; no metadata carried over.
         "-protocol_whitelist", OUTPUT_PROTOCOLS_PLAIN if key_info_path is None else OUTPUT_PROTOCOLS_ENCRYPTED,
         "-map", f"0:{source.video_index}",

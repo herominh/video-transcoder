@@ -198,10 +198,13 @@ def test_encode_rendition_when_encrypting_should_report_the_planned_rendition(en
 
     # Act
     reported = (output.name, output.width, output.height, output.codecs, output.playlist_path)
+    frame_rate = (output.frame_rate_num, output.frame_rate_den)
 
     # Assert
     assert reported == (plan.name, plan.width, plan.height, plan.codecs, f"{plan.name}/playlist.m3u8")
+    assert frame_rate == (plan.frame_rate_num, plan.frame_rate_den)
     assert output.codecs.endswith(",mp4a.40.2")
+    assert (output.has_audio, output.encrypted) == (True, True)
 
 
 def test_encode_rendition_when_encrypting_should_list_the_playlist_then_every_segment_with_its_size_and_digest(
@@ -317,6 +320,7 @@ def test_encode_rendition_when_not_encrypting_should_write_plain_transport_strea
 
     # Assert
     assert "#EXT-X-KEY" not in (job.rendition_dir / "playlist.m3u8").read_text(encoding="ascii")
+    assert output.encrypted is False
     for segment in _segment_paths(job, output):
         assert segment.read_bytes()[0] == TS_SYNC_BYTE
     assert list(job.work_dir.iterdir()) == []
@@ -482,6 +486,7 @@ def test_encode_rendition_when_the_source_is_silent_should_write_video_only_segm
     # Assert
     assert output.codecs == job.plan.codecs
     assert "mp4a" not in output.codecs
+    assert output.has_audio is False
     for segment in _segment_paths(job, output):
         assert [stream["codec_type"] for stream in _probe(segment)["streams"]] == ["video"]
 
@@ -1115,7 +1120,8 @@ def test_output_allowance_for_job_when_a_limit_is_not_a_positive_int_should_rais
 def _output(total_bytes: int, artifact_count: int) -> RenditionOutput:
     artifact = ArtifactFile(path="240p/segment_0000.ts", kind="hls_segment", size_bytes=1, sha256="0" * 64)
     return RenditionOutput(
-        name="240p", width=320, height=240, codecs="avc1.64001e", playlist_path="240p/playlist.m3u8",
+        name="240p", width=320, height=240, frame_rate_num=25, frame_rate_den=1, codecs="avc1.64001e",
+        has_audio=False, encrypted=False, playlist_path="240p/playlist.m3u8",
         segment_count=artifact_count - 1, duration_ms=MS_PER_SECOND, bandwidth_bps=8, average_bandwidth_bps=8,
         total_bytes=total_bytes, artifacts=(artifact,) * artifact_count,
     )

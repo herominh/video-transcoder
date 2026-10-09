@@ -107,6 +107,9 @@ X264_PRESETS = frozenset(
     {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}
 )
 MILLI_PER_UNIT = 1000
+# mjpeg's -q:v scale: 2 is its best quality, 31 its worst.
+MJPEG_QUALITY_MIN = 2
+MJPEG_QUALITY_MAX = 31
 
 
 def _require_member(name: str, value: object, allowed: frozenset[str]) -> None:
@@ -165,6 +168,17 @@ class EncodeProfile:
     # one the provider bills: a source that lies about its density costs at most this.
     encode_base_wall_ms: int
     encode_wall_ms_per_media_s: int
+    # The thumbnail's requirements (`core/thumbnail.py`).
+    thumbnail_short_edge: int  # the thumbnail's short edge (even); a smaller rendition is never upscaled
+    thumbnail_quality: int  # mjpeg -q:v, from 2 (best) to 31
+    thumbnail_max_bytes: int  # the room reserved for the thumbnail; a larger JPEG is refused
+    thumbnail_wall_ms: int  # the thumbnail's own time budget, never past the caller's deadline
+    # Taken at this share of the admitted duration, below 1000 (a time at the very end names an output
+    # frame that does not exist). Below 1000 is not enough on its own: the admitted duration is the
+    # longest stream's, often the audio's, so a share close to 1000 can still fall after the video's
+    # last frame and leave the job without a thumbnail. The pilot's 10 % keeps far from that end...
+    thumbnail_at_per_mille: int
+    thumbnail_at_max_ms: int  # ...but never later than this
 
     def __post_init__(self) -> None:
         _require_positive_int_fields(self)
@@ -191,6 +205,12 @@ class EncodeProfile:
         edges = [rung.short_edge for rung in self.ladder]
         if any(larger <= smaller for larger, smaller in zip(edges, edges[1:])):
             raise ValueError("ladder must be ordered by short_edge, largest first, without ties")
+        if self.thumbnail_short_edge % 2 != 0:
+            raise ValueError("thumbnail_short_edge must be even")
+        if not MJPEG_QUALITY_MIN <= self.thumbnail_quality <= MJPEG_QUALITY_MAX:
+            raise ValueError(f"thumbnail_quality must be from {MJPEG_QUALITY_MIN} to {MJPEG_QUALITY_MAX}")
+        if self.thumbnail_at_per_mille >= MILLI_PER_UNIT:
+            raise ValueError(f"thumbnail_at_per_mille must be below {MILLI_PER_UNIT}")
 
     @property
     def max_frame_rate_milli(self) -> int:
@@ -266,6 +286,16 @@ PILOT_OUTPUT_CHECK_INTERVAL_MS = 250
 # largest rung and far more for the others; the dispatch's own deadline still caps the whole job.
 PILOT_ENCODE_BASE_WALL_MS = 120_000
 PILOT_ENCODE_WALL_MS_PER_MEDIA_S = 20_000
+# The thumbnail: 360 lines (640x360 for a 16:9 landscape source) at mjpeg's best quality, taken a
+# tenth into the video but never later than 5 s, so a long source is not decoded for minutes to
+# reach it. A 640x360 JPEG at that quality takes tens of KiB; 1 MiB leaves room for noisy frames
+# and extreme aspect ratios.
+PILOT_THUMBNAIL_SHORT_EDGE = 360
+PILOT_THUMBNAIL_QUALITY = 2
+PILOT_THUMBNAIL_MAX_BYTES = 1 * MIB
+PILOT_THUMBNAIL_WALL_MS = 60_000
+PILOT_THUMBNAIL_AT_PER_MILLE = 100
+PILOT_THUMBNAIL_AT_MAX_MS = 5_000
 # The bitrates of the Hub's quality presets (and the draft worker's), one rung per contract name.
 PILOT_LADDER = (
     LadderRung("2160p", 2160, 15_000_000, 16_000_000, 22_500_000, 192_000),
@@ -328,5 +358,11 @@ PILOT_PROFILE = MediaProfile(
         output_check_interval_ms=PILOT_OUTPUT_CHECK_INTERVAL_MS,
         encode_base_wall_ms=PILOT_ENCODE_BASE_WALL_MS,
         encode_wall_ms_per_media_s=PILOT_ENCODE_WALL_MS_PER_MEDIA_S,
+        thumbnail_short_edge=PILOT_THUMBNAIL_SHORT_EDGE,
+        thumbnail_quality=PILOT_THUMBNAIL_QUALITY,
+        thumbnail_max_bytes=PILOT_THUMBNAIL_MAX_BYTES,
+        thumbnail_wall_ms=PILOT_THUMBNAIL_WALL_MS,
+        thumbnail_at_per_mille=PILOT_THUMBNAIL_AT_PER_MILLE,
+        thumbnail_at_max_ms=PILOT_THUMBNAIL_AT_MAX_MS,
     ),
 )
