@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, fields
+from fractions import Fraction
 
 KIB = 1024
 MIB = 1024 * KIB
@@ -21,7 +22,7 @@ def _is_strict_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _require_positive_int_fields(instance: SourceCaps | ProbeBudget) -> None:
+def _require_positive_int_fields(instance: SourceCaps | ProbeBudget | LadderRung | EncodeProfile) -> None:
     """Every int field is a real int and at least 1: zero never means unlimited."""
     for field in fields(instance):
         if field.type not in _INT_ANNOTATIONS:
@@ -93,12 +94,119 @@ class ProbeBudget:
             raise ValueError("probesize_bytes exceeds max_bytes")
 
 
+# Contract v2's rendition_name enum, largest first.
+RENDITION_NAMES = ("2160p", "1440p", "1080p", "720p", "480p", "360p", "240p")
+# Contract v2's limit on segments per rendition (limits.json, max_segments_per_rendition).
+CONTRACT_MAX_SEGMENTS_PER_RENDITION = 3600
+# What the encode stage can produce today. A GPU encoder joins only when Q2/D7 qualifies its resource.
+SUPPORTED_VIDEO_ENCODERS = frozenset({"libx264"})
+SUPPORTED_H264_PROFILES = frozenset({"high"})
+SUPPORTED_PIXEL_FORMATS = frozenset({"yuv420p"})
+SUPPORTED_AUDIO_CODECS = frozenset({"aac"})
+X264_PRESETS = frozenset(
+    {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}
+)
+MILLI_PER_UNIT = 1000
+
+
+def _require_member(name: str, value: object, allowed: frozenset[str]) -> None:
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(f"{name} must be one of {sorted(allowed)}, got {value!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class LadderRung:
+    """One rendition the profile can produce, named by the short edge of its display frame."""
+
+    name: str  # a contract v2 rendition name, e.g. "1080p"
+    short_edge: int  # 1080 for "1080p": the shorter side of the output, portrait or landscape
+    video_bitrate: int  # bits per second (-b:v)
+    video_maxrate: int  # bits per second (-maxrate)
+    video_bufsize: int  # bits (-bufsize)
+    audio_bitrate: int  # bits per second (-b:a)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or self.name not in RENDITION_NAMES:
+            raise ValueError(f"name must be one of {RENDITION_NAMES}, got {self.name!r}")
+        _require_positive_int_fields(self)
+        if self.short_edge % 2 != 0:
+            raise ValueError("short_edge must be even")
+        if self.video_bitrate > self.video_maxrate:
+            raise ValueError("video_bitrate exceeds video_maxrate")
+
+
+@dataclass(frozen=True, slots=True)
+class EncodeProfile:
+    """How every rendition is encoded: the output format, the ladder and the stage's own bounds."""
+
+    video_encoder: str
+    encoder_preset: str
+    h264_profile: str
+    pixel_format: str
+    max_frame_rate_num: int  # the output frame rate ceiling, as a fraction: 60/1
+    max_frame_rate_den: int
+    # The output frame rate floor: a slide show declaring 1/10 fps still gets a frame, and so a
+    # keyframe, at every segment boundary.
+    min_frame_rate_num: int
+    min_frame_rate_den: int
+    segment_duration_s: int  # the platform-wide HLS segment duration
+    max_segments_per_rendition: int
+    audio_codec: str
+    audio_sample_rate: int
+    audio_channels: int
+    ladder: tuple[LadderRung, ...]  # largest first
+    max_scratch_bytes: int  # the source plus every output of the job
+    max_playlist_bytes: int  # cap on reading back a media playlist the encoder wrote
+    max_stderr_bytes: int  # tail of the encoder's stderr kept
+    output_check_interval_ms: int  # how often the running encode's output is measured
+    # Each rendition's wall-time budget: a base plus so much per second of admitted media. No count
+    # of packets or frames bounds what a decoder does (an AV1 temporal unit or a VP9 superframe
+    # carries any number of frames, hidden ones included), so time is the decoder's bound, and the
+    # one the provider bills: a source that lies about its density costs at most this.
+    encode_base_wall_ms: int
+    encode_wall_ms_per_media_s: int
+
+    def __post_init__(self) -> None:
+        _require_positive_int_fields(self)
+        _require_member("video_encoder", self.video_encoder, SUPPORTED_VIDEO_ENCODERS)
+        _require_member("encoder_preset", self.encoder_preset, X264_PRESETS)
+        _require_member("h264_profile", self.h264_profile, SUPPORTED_H264_PROFILES)
+        _require_member("pixel_format", self.pixel_format, SUPPORTED_PIXEL_FORMATS)
+        _require_member("audio_codec", self.audio_codec, SUPPORTED_AUDIO_CODECS)
+        if self.max_segments_per_rendition > CONTRACT_MAX_SEGMENTS_PER_RENDITION:
+            raise ValueError(
+                f"max_segments_per_rendition exceeds the contract's {CONTRACT_MAX_SEGMENTS_PER_RENDITION}"
+            )
+        if not isinstance(self.ladder, tuple) or not self.ladder:
+            raise ValueError("ladder must be a non-empty tuple")
+        if not all(isinstance(rung, LadderRung) for rung in self.ladder):
+            raise ValueError("ladder must hold LadderRung entries")
+        if len({rung.name for rung in self.ladder}) != len(self.ladder):
+            raise ValueError("ladder holds duplicate rendition names")
+        floor = Fraction(self.min_frame_rate_num, self.min_frame_rate_den)
+        if floor > Fraction(self.max_frame_rate_num, self.max_frame_rate_den):
+            raise ValueError("the output frame rate floor exceeds its ceiling")
+        if floor * self.segment_duration_s < 1:
+            raise ValueError("the output frame rate floor leaves a segment without a frame")
+        edges = [rung.short_edge for rung in self.ladder]
+        if any(larger <= smaller for larger, smaller in zip(edges, edges[1:])):
+            raise ValueError("ladder must be ordered by short_edge, largest first, without ties")
+
+    @property
+    def max_frame_rate_milli(self) -> int:
+        return -(-self.max_frame_rate_num * MILLI_PER_UNIT // self.max_frame_rate_den)
+
+    def rung(self, name: str) -> LadderRung | None:
+        return next((rung for rung in self.ladder if rung.name == name), None)
+
+
 @dataclass(frozen=True, slots=True)
 class MediaProfile:
     profile_id: str
     version: int
     source: SourceCaps
     probe: ProbeBudget
+    encode: EncodeProfile
 
     def __post_init__(self) -> None:
         if not isinstance(self.profile_id, str) or PROFILE_ID_PATTERN.fullmatch(self.profile_id) is None:
@@ -109,6 +217,17 @@ class MediaProfile:
             raise ValueError("source must be a SourceCaps")
         if not isinstance(self.probe, ProbeBudget):
             raise ValueError("probe must be a ProbeBudget")
+        if not isinstance(self.encode, EncodeProfile):
+            raise ValueError("encode must be an EncodeProfile")
+        # The longest admitted source must fit the segment limit, and the output frame rate
+        # ceiling must not exceed what admission lets in.
+        max_encoded_ms = self.encode.segment_duration_s * MILLI_PER_UNIT * self.encode.max_segments_per_rendition
+        if self.source.max_duration_ms > max_encoded_ms:
+            raise ValueError("max_duration_ms exceeds segment_duration_s * max_segments_per_rendition")
+        if self.encode.max_frame_rate_milli > self.source.max_frame_rate_milli:
+            raise ValueError("the output frame rate ceiling exceeds the source frame rate cap")
+        if self.encode.max_scratch_bytes <= self.source.max_source_bytes:
+            raise ValueError("max_scratch_bytes leaves no room for output beside the largest source")
 
 
 PILOT_MAX_SOURCE_BYTES = 10 * GIB
@@ -130,6 +249,33 @@ PILOT_PROBE_MAX_OUTPUT_BYTES = 1 * MIB
 PILOT_PROBE_MAX_STDERR_BYTES = 64 * KIB
 PILOT_PROBESIZE_BYTES = 5_000_000
 PILOT_ANALYZE_DURATION_US = 5_000_000
+PILOT_MAX_OUTPUT_FRAME_RATE = 60
+PILOT_MIN_OUTPUT_FRAME_RATE = 1
+PILOT_SEGMENT_DURATION_S = 6
+PILOT_AUDIO_SAMPLE_RATE = 48_000
+PILOT_AUDIO_CHANNELS = 2
+# The worker's own ceiling on scratch use; the execution resource Q2 qualifies needs at least this
+# much disk, or a full disk ends the job first.
+PILOT_MAX_SCRATCH_BYTES = 64 * GIB
+# 3,600 segments, each with its own key line, take about 420 KiB.
+PILOT_MAX_PLAYLIST_BYTES = 1 * MIB
+PILOT_ENCODE_MAX_STDERR_BYTES = 64 * KIB
+PILOT_OUTPUT_CHECK_INTERVAL_MS = 250
+# Unmeasured until Q2 qualifies the execution resource: x264 "medium" at 2160p60 on 8 vCPUs runs
+# at roughly 5 to 7.5 s of wall time per second of media, so 20 s leaves about 3x headroom for the
+# largest rung and far more for the others; the dispatch's own deadline still caps the whole job.
+PILOT_ENCODE_BASE_WALL_MS = 120_000
+PILOT_ENCODE_WALL_MS_PER_MEDIA_S = 20_000
+# The bitrates of the Hub's quality presets (and the draft worker's), one rung per contract name.
+PILOT_LADDER = (
+    LadderRung("2160p", 2160, 15_000_000, 16_000_000, 22_500_000, 192_000),
+    LadderRung("1440p", 1440, 10_000_000, 10_700_000, 15_000_000, 192_000),
+    LadderRung("1080p", 1080, 5_000_000, 5_350_000, 7_500_000, 192_000),
+    LadderRung("720p", 720, 2_500_000, 2_675_000, 3_750_000, 128_000),
+    LadderRung("480p", 480, 1_200_000, 1_280_000, 1_800_000, 96_000),
+    LadderRung("360p", 360, 600_000, 640_000, 900_000, 64_000),
+    LadderRung("240p", 240, 300_000, 320_000, 450_000, 48_000),
+)
 
 # The worker's ceilings. A dispatch's own limits carry the measured envelope of issue #50,
 # and the effective limit is always the smaller of the two.
@@ -160,5 +306,27 @@ PILOT_PROFILE = MediaProfile(
         max_stderr_bytes=PILOT_PROBE_MAX_STDERR_BYTES,
         probesize_bytes=PILOT_PROBESIZE_BYTES,
         analyze_duration_us=PILOT_ANALYZE_DURATION_US,
+    ),
+    encode=EncodeProfile(
+        video_encoder="libx264",
+        encoder_preset="medium",
+        h264_profile="high",
+        pixel_format="yuv420p",
+        max_frame_rate_num=PILOT_MAX_OUTPUT_FRAME_RATE,
+        max_frame_rate_den=1,
+        min_frame_rate_num=PILOT_MIN_OUTPUT_FRAME_RATE,
+        min_frame_rate_den=1,
+        segment_duration_s=PILOT_SEGMENT_DURATION_S,
+        max_segments_per_rendition=CONTRACT_MAX_SEGMENTS_PER_RENDITION,
+        audio_codec="aac",
+        audio_sample_rate=PILOT_AUDIO_SAMPLE_RATE,
+        audio_channels=PILOT_AUDIO_CHANNELS,
+        ladder=PILOT_LADDER,
+        max_scratch_bytes=PILOT_MAX_SCRATCH_BYTES,
+        max_playlist_bytes=PILOT_MAX_PLAYLIST_BYTES,
+        max_stderr_bytes=PILOT_ENCODE_MAX_STDERR_BYTES,
+        output_check_interval_ms=PILOT_OUTPUT_CHECK_INTERVAL_MS,
+        encode_base_wall_ms=PILOT_ENCODE_BASE_WALL_MS,
+        encode_wall_ms_per_media_s=PILOT_ENCODE_WALL_MS_PER_MEDIA_S,
     ),
 )
