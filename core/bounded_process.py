@@ -2,6 +2,8 @@
 
 At the deadline the group gets SIGTERM, then SIGKILL after a one-second grace; reaping and the
 bounded reader joins can add a few seconds more, so callers reserve that overrun.
+An optional monitor, called at a fixed interval while the process runs, can stop it the same way.
+Every stderr byte, not only the kept tail, can be scanned for patterns the caller must not miss.
 """
 
 from __future__ import annotations
@@ -9,12 +11,13 @@ from __future__ import annotations
 import enum
 import math
 import os
+import re
 import selectors
 import signal
 import subprocess
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import IO, Protocol
 
@@ -28,6 +31,9 @@ READ_CHUNK_BYTES = 64 * 1024
 READER_DRAIN_TIMEOUT_S = 1.0
 READER_STOP_TIMEOUT_S = 1.0
 REAP_TIMEOUT_S = 1.0
+# The bytes of stderr carried from one read into the next, so a pattern split across two reads is
+# still found: a stderr pattern must match within this many bytes.
+STDERR_PATTERN_OVERLAP_BYTES = 256
 
 
 def _require_positive_ms(ms: object) -> int:
@@ -66,8 +72,8 @@ class Deadline:
 class BoundedResult:
     """The outcome of run_bounded.
 
-    returncode is None whenever the run timed out or overflowed stdout: the process tree was
-    killed (or never started), so no exit status is meaningful.
+    returncode is None whenever the run timed out, overflowed stdout or was stopped by its monitor:
+    the process tree was killed (or never started), so no exit status is meaningful.
     """
 
     returncode: int | None
@@ -76,6 +82,8 @@ class BoundedResult:
     timed_out: bool
     stdout_overflow: bool  # stdout exceeded the cap; the process tree was killed
     stderr_truncated: bool  # stderr held more than max_stderr_bytes in total; the tail lost its beginning
+    stopped_by_monitor: bool = False  # the monitor asked to stop; the process tree was killed
+    stderr_patterns_seen: frozenset[bytes] = frozenset()  # the .pattern of each stderr pattern that matched
 
 
 class _Sink(Protocol):
@@ -106,24 +114,45 @@ class _HeadBuffer:
 
 
 class _TailBuffer:
-    """Keeps a rolling tail of the last `cap` bytes and counts every byte seen."""
+    """Keeps a rolling tail of the last `cap` bytes, counts every byte seen, and scans every byte
+    for `patterns`, carrying an overlap between chunks."""
 
-    def __init__(self, cap: int) -> None:
+    def __init__(self, cap: int, patterns: Sequence[re.Pattern[bytes]] = ()) -> None:
         self._cap = cap
         self._data = bytearray()
         self._total_bytes = 0
+        self._patterns = tuple(patterns)
+        self._carry = b""
+        self._seen: set[bytes] = set()
+        self._seen_lock = threading.Lock()
 
     @property
     def truncated(self) -> bool:
         return self._total_bytes > self._cap
 
+    @property
+    def patterns_seen(self) -> frozenset[bytes]:
+        with self._seen_lock:
+            return frozenset(self._seen)
+
     def accept(self, chunk: bytes) -> bool:
         self._total_bytes += len(chunk)
+        self._scan(chunk)
         self._data += chunk
         excess = len(self._data) - self._cap
         if excess > 0:
             del self._data[:excess]
         return True
+
+    def _scan(self, chunk: bytes) -> None:
+        if not self._patterns:
+            return
+        window = self._carry + chunk
+        matched = [pattern.pattern for pattern in self._patterns if pattern.search(window) is not None]
+        if matched:
+            with self._seen_lock:
+                self._seen.update(matched)
+        self._carry = window[-STDERR_PATTERN_OVERLAP_BYTES:]
 
     def contents(self) -> bytes:
         return bytes(self._data)
@@ -134,6 +163,7 @@ class _Ending(enum.Enum):
     TIMED_OUT = "timed_out"
     OVERFLOWED = "overflowed"
     READ_FAILED = "read_failed"
+    STOPPED = "stopped"
 
 
 class _ReadErrors:
@@ -196,14 +226,38 @@ def _signal_group(pgid: int, signum: int) -> None:
         return
 
 
+class _Monitor:
+    """Calls the caller's monitor at most once per interval, the first time one interval after start."""
+
+    def __init__(self, check: Callable[[], bool] | None, interval_ms: int | None) -> None:
+        self._check = check
+        self._interval_s = 0.0 if interval_ms is None else interval_ms / MS_PER_SECOND
+        self._next_call_at = time.monotonic() + self._interval_s
+
+    def asks_to_stop(self) -> bool:
+        if self._check is None or time.monotonic() < self._next_call_at:
+            return False
+        keep_running = self._check()
+        self._next_call_at = time.monotonic() + self._interval_s
+        if not isinstance(keep_running, bool):
+            raise TypeError("the monitor must return a bool")
+        return not keep_running
+
+
 def _wait_for_ending(
-    process: subprocess.Popen[bytes], deadline: Deadline, overflowed: threading.Event, read_failed: threading.Event
+    process: subprocess.Popen[bytes],
+    deadline: Deadline,
+    overflowed: threading.Event,
+    read_failed: threading.Event,
+    monitor: _Monitor,
 ) -> _Ending:
     while True:
         if overflowed.is_set():
             return _Ending.OVERFLOWED
         if read_failed.is_set():
             return _Ending.READ_FAILED
+        if monitor.asks_to_stop():
+            return _Ending.STOPPED
         remaining = deadline.remaining_s()
         if remaining <= 0:
             return _Ending.EXITED if process.poll() is not None else _Ending.TIMED_OUT
@@ -269,6 +323,34 @@ def _require_cap(name: str, cap: object) -> None:
         raise ValueError(f"{name} must be an int of at least 1, got {cap!r}")
 
 
+def _validated_fds(fds: object) -> tuple[int, ...]:
+    if isinstance(fds, (str, bytes)) or not isinstance(fds, Sequence):
+        raise ValueError("pass_fds must be a sequence of descriptors")
+    descriptors = tuple(fds)
+    if not all(isinstance(fd, int) and not isinstance(fd, bool) and fd >= 0 for fd in descriptors):
+        raise ValueError("pass_fds must hold non-negative ints")
+    return descriptors
+
+
+def _validated_patterns(patterns: object) -> tuple[re.Pattern[bytes], ...]:
+    if isinstance(patterns, (str, bytes)) or not isinstance(patterns, Sequence):
+        raise ValueError("stderr_patterns must be a sequence of compiled bytes patterns")
+    compiled = tuple(patterns)
+    if not all(isinstance(pattern, re.Pattern) and isinstance(pattern.pattern, bytes) for pattern in compiled):
+        raise ValueError("stderr_patterns must hold compiled bytes patterns")
+    return compiled
+
+
+def _require_monitor(monitor: object, interval_ms: object) -> None:
+    if monitor is None and interval_ms is None:
+        return
+    if monitor is None or interval_ms is None:
+        raise ValueError("monitor and monitor_interval_ms must be given together")
+    if not callable(monitor):
+        raise ValueError("monitor must be callable")
+    _require_cap("monitor_interval_ms", interval_ms)
+
+
 def run_bounded(
     argv: Sequence[str],
     *,
@@ -277,14 +359,28 @@ def run_bounded(
     max_stderr_bytes: int,
     env: Mapping[str, str],
     cwd: str,
+    monitor: Callable[[], bool] | None = None,
+    monitor_interval_ms: int | None = None,
+    pass_fds: Sequence[int] = (),
+    stderr_patterns: Sequence[re.Pattern[bytes]] = (),
 ) -> BoundedResult:
     """Run argv in its own session; kill the whole process group at the deadline or on overflow.
 
     The child sees exactly `env`, nothing inherited. Output contents are never logged.
 
+    With `monitor` (and `monitor_interval_ms`, given together), the monitor is called at most once
+    per interval while the process runs; True lets it continue, False stops it as a deadline would.
+
     Raises OSError when the process cannot be started, or when its output could not be fully
     read (a reader could not be set up, or a read failed); the process group is dead by then.
     Raises RuntimeError when a reader thread cannot be started, likewise after the cleanup.
+    Whatever the monitor raises propagates, likewise after the cleanup.
+
+    `pass_fds` are the only descriptors the child inherits besides its standard streams.
+
+    Every stderr byte is scanned for `stderr_patterns` (each must match within
+    STDERR_PATTERN_OVERLAP_BYTES bytes); the result names those that matched, even when the kept
+    tail has lost them.
     """
     command = _validated_argv(argv)
     _require_cap("max_stdout_bytes", max_stdout_bytes)
@@ -294,6 +390,9 @@ def run_bounded(
         raise ValueError("deadline must be a Deadline")
     if not isinstance(cwd, str) or not cwd:
         raise ValueError("cwd must be a non-empty string")
+    _require_monitor(monitor, monitor_interval_ms)
+    inherited_fds = _validated_fds(pass_fds)
+    patterns = _validated_patterns(stderr_patterns)
     if deadline.expired():
         return BoundedResult(
             returncode=None,
@@ -313,9 +412,11 @@ def run_bounded(
         cwd=cwd,
         start_new_session=True,
         close_fds=True,
+        pass_fds=inherited_fds,
     )
+    output_monitor = _Monitor(monitor, monitor_interval_ms)
     stdout_buffer = _HeadBuffer(max_stdout_bytes)
-    stderr_buffer = _TailBuffer(max_stderr_bytes)
+    stderr_buffer = _TailBuffer(max_stderr_bytes, patterns)
     stop_reading = threading.Event()
     read_errors = _ReadErrors()
     readers: list[threading.Thread] = []
@@ -323,7 +424,9 @@ def run_bounded(
     try:
         readers.append(_start_reader(process.stdout, stdout_buffer, stop_reading, read_errors))
         readers.append(_start_reader(process.stderr, stderr_buffer, stop_reading, read_errors))
-        ending = _wait_for_ending(process, deadline, stdout_buffer.overflowed, read_errors.happened)
+        ending = _wait_for_ending(
+            process, deadline, stdout_buffer.overflowed, read_errors.happened, output_monitor
+        )
         if ending is not _Ending.EXITED:
             _terminate_group(process)
     finally:
@@ -340,7 +443,8 @@ def run_bounded(
 
     stdout_overflow = stdout_buffer.overflowed.is_set()
     timed_out = ending is _Ending.TIMED_OUT
-    killed = timed_out or stdout_overflow
+    stopped_by_monitor = ending is _Ending.STOPPED
+    killed = timed_out or stdout_overflow or stopped_by_monitor
     return BoundedResult(
         returncode=None if killed else process.returncode,
         stdout=stdout_buffer.contents(),
@@ -348,4 +452,6 @@ def run_bounded(
         timed_out=timed_out,
         stdout_overflow=stdout_overflow,
         stderr_truncated=stderr_buffer.truncated,
+        stopped_by_monitor=stopped_by_monitor,
+        stderr_patterns_seen=stderr_buffer.patterns_seen,
     )
