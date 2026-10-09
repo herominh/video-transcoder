@@ -10,6 +10,7 @@ import pytest
 from core.failure import (
     ERROR_CLASSES,
     NEVER_RETRYABLE_CLASSES,
+    Diagnostic,
     Failure,
     WorkerFailure,
     make_detail,
@@ -238,3 +239,51 @@ def test_make_detail_when_text_is_hostile_should_always_yield_a_valid_failure_de
     # Assert
     assert failure.detail == detail
     assert len(detail) <= SANITIZED_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        ("thumbnail_unavailable", "x" * SANITIZED_LIMIT),
+        ("abc", ""),
+        ("a" * 48, 'quotes " and \\ backslashes are printable'),
+    ],
+    ids=["the longest detail", "the shortest code and an empty detail", "the longest code"],
+)
+def test_diagnostic_when_code_and_detail_fit_the_contract_should_be_accepted(code: str, detail: str) -> None:
+    # Arrange / Act
+    diagnostic = Diagnostic(code=code, detail=detail)
+
+    # Assert
+    assert (diagnostic.code, diagnostic.detail) == (code, detail)
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        ("ab", "fine"),
+        ("a" * 49, "fine"),
+        ("Thumbnail", "fine"),
+        (None, "fine"),
+        ("thumbnail_unavailable", "x" * (SANITIZED_LIMIT + 1)),
+        ("thumbnail_unavailable", "a line\nbreak"),
+        ("thumbnail_unavailable", "caf\u00e9"),
+        ("thumbnail_unavailable", "see https://example.invalid/x"),
+        ("thumbnail_unavailable", None),
+    ],
+    ids=[
+        "a code too short",
+        "a code too long",
+        "an uppercase code",
+        "no code",
+        "a detail of 201 characters",
+        "a control character",
+        "a character outside ASCII",
+        "a URL",
+        "no detail",
+    ],
+)
+def test_diagnostic_when_code_or_detail_breaks_the_contract_should_raise(code: Any, detail: Any) -> None:
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError):
+        Diagnostic(code=code, detail=detail)

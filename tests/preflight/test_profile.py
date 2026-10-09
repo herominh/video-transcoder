@@ -52,6 +52,12 @@ ENCODE_INT_FIELDS = [
     "output_check_interval_ms",
     "encode_base_wall_ms",
     "encode_wall_ms_per_media_s",
+    "thumbnail_short_edge",
+    "thumbnail_quality",
+    "thumbnail_max_bytes",
+    "thumbnail_wall_ms",
+    "thumbnail_at_per_mille",
+    "thumbnail_at_max_ms",
 ]
 SIXTY_FPS_MILLI = 60_000
 UHD_PIXELS = 3840 * 2160
@@ -430,3 +436,55 @@ def test_encode_profile_when_the_frame_rate_floor_gives_each_segment_exactly_one
 
     # Assert
     assert encode.min_frame_rate_den == segment_s
+
+
+def test_pilot_profile_when_checked_should_take_a_360_line_thumbnail_a_tenth_in_within_5_s() -> None:
+    # Arrange
+    encode = PILOT_PROFILE.encode
+
+    # Act / Assert
+    assert (encode.thumbnail_short_edge, encode.thumbnail_quality) == (360, 2)
+    assert encode.thumbnail_max_bytes == 1024 * 1024
+    assert encode.thumbnail_wall_ms == 60_000
+    assert (encode.thumbnail_at_per_mille, encode.thumbnail_at_max_ms) == (100, 5_000)
+
+
+def test_encode_profile_when_the_thumbnail_short_edge_is_odd_should_raise() -> None:
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError):
+        _encode(thumbnail_short_edge=359)
+
+
+@pytest.mark.parametrize("quality", [1, 32])
+def test_encode_profile_when_the_thumbnail_quality_is_outside_mjpegs_2_to_31_should_raise(quality: int) -> None:
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError):
+        _encode(thumbnail_quality=quality)
+
+
+@pytest.mark.parametrize("quality", [2, 31])
+def test_encode_profile_when_the_thumbnail_quality_is_at_either_end_of_2_to_31_should_be_accepted(
+    quality: int,
+) -> None:
+    # Arrange / Act
+    encode = _encode(thumbnail_quality=quality)
+
+    # Assert
+    assert encode.thumbnail_quality == quality
+
+
+@pytest.mark.parametrize("per_mille", [1000, 1001], ids=["at the very end", "past the end"])
+def test_encode_profile_when_the_thumbnail_is_taken_at_or_past_the_end_of_the_source_should_raise(
+    per_mille: int,
+) -> None:
+    # Arrange / Act / Assert: a time at the very end can name an output frame that does not exist
+    with pytest.raises(ValueError):
+        _encode(thumbnail_at_per_mille=per_mille)
+
+
+def test_encode_profile_when_the_thumbnail_is_taken_just_before_the_end_of_the_source_should_be_accepted() -> None:
+    # Arrange / Act
+    encode = _encode(thumbnail_at_per_mille=999)
+
+    # Assert
+    assert encode.thumbnail_at_per_mille == 999

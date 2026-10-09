@@ -79,7 +79,8 @@ def _even_floor(value: Fraction | int) -> int:
     return max(MIN_OUTPUT_EDGE, math.floor(value) // 2 * 2)
 
 
-def _even_round(value: Fraction) -> int:
+def even_round(value: Fraction) -> int:
+    """The even integer nearest to `value`, at least 2: an output edge 4:2:0 chroma can carry."""
     return max(MIN_OUTPUT_EDGE, 2 * round(value / 2))
 
 
@@ -132,7 +133,7 @@ def _geometry(video: VideoStreamFacts, short_edge: int | None) -> tuple[int, int
     source_long = max(display_width, display_height)
     if short_edge is None:
         return _even_floor(display_width), _even_floor(display_height)
-    long_edge = min(_even_round(Fraction(short_edge * source_long, source_short)), _even_floor(source_long))
+    long_edge = min(even_round(Fraction(short_edge * source_long, source_short)), _even_floor(source_long))
     if display_width >= display_height:
         return long_edge, short_edge
     return short_edge, long_edge

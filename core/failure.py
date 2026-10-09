@@ -1,5 +1,8 @@
 """The typed failure every worker stage reports: the class, code, retryability and detail of the
-transcode contract v2 error object. The job runner adds the stage when it serializes one."""
+transcode contract v2 error object. The job runner adds the stage when it serializes one.
+
+Also the contract's diagnostic: a code and a short detail that a successful job carries in its
+generation manifest (an optional output it could not produce), never a failure."""
 
 from __future__ import annotations
 
@@ -82,6 +85,26 @@ class Failure:
         if self.retryable and self.error_class in NEVER_RETRYABLE_CLASSES:
             raise ValueError(f"error class {self.error_class} is never retryable")
         _require_valid_detail(self.detail)
+
+
+@dataclass(frozen=True, slots=True)
+class Diagnostic:
+    """Contract v2 `diagnostic`: a `diagnostic_code` and an `ascii_text_200` detail in our own words."""
+
+    code: str
+    detail: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or CODE_PATTERN.fullmatch(self.code) is None:
+            raise ValueError(f"invalid diagnostic code: {self.code!r}")
+        if not isinstance(self.detail, str):
+            raise ValueError("detail must be a string")
+        if len(self.detail) > SANITIZED_DETAIL_MAX_CHARS:
+            raise ValueError(f"detail must be at most {SANITIZED_DETAIL_MAX_CHARS} characters")
+        if not all(_is_printable_ascii(char) for char in self.detail):
+            raise ValueError("detail must hold printable ASCII only")
+        if URL_SCHEME_SEPARATOR in self.detail:
+            raise ValueError("detail must not contain a URL")
 
 
 class WorkerFailure(Exception):

@@ -21,11 +21,16 @@ ALLOWED_BYTES = bytes([0x09, 0x0A, 0x0D, *range(0x20, 0x7F)])
 # The token budget scan (README section 4, step 2): outside a string literal, `"`, `{`, `[`, the start
 # of a number (then every following byte of `0-9+-.eE`) and the start of a literal (`t`, `f` or `n`,
 # then every following byte of `a-z`) count 1; inside a string literal `\` skips the next byte.
-# Possessive quantifiers keep no backtracking state, so matching a long string literal costs memory
-# proportional to nothing but the match itself (a greedy alternation kept state per character).
-_TOKEN = re.compile(rb'"(?:[^"\\]++|\\.)*+"?|[{\[]|[-0-9][-0-9+.eE]*+|[tfn][a-z]*+', re.DOTALL)
+# String literals use the unrolled loop `"[^"\\]*(?:\\.[^"\\]*)*"`: a run of single characters keeps no
+# backtracking state, so memory grows with the number of escape sequences in a literal, not with its
+# length. (A greedy alternation per character kept state per character; the possessive form that
+# avoided it needs Python 3.11, and the worker image runs 3.10.) The matches are those of the possessive
+# form: `[^"\\]` never matches what starts `\\.` or closes the literal, so no backtracking can find
+# another one (tests/contract/test_gate_patterns.py compares the two). In the worker the validator only
+# ever reads its own output or a request already bounded by L0 to 4,096 bytes.
+_TOKEN = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"?|[{\[]|[-0-9][-0-9+.eE]*|[tfn][a-z]*', re.DOTALL)
 # Structural tokens of a text already known to be JSON: string literals, brackets and colons.
-_STRUCTURE = re.compile(r'"(?:[^"\\]++|\\.)*+"|[{}\[\]:]', re.DOTALL)
+_STRUCTURE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[{}\[\]:]', re.DOTALL)
 _ESCAPE = re.compile(r"\\(?:u([0-9A-Fa-f]{4})|.)", re.DOTALL)
 _HIGH_SURROGATES = range(0xD800, 0xDC00)
 _LOW_SURROGATES = range(0xDC00, 0xE000)

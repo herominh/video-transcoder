@@ -66,7 +66,15 @@ MAX_ARTIFACT_BYTES = 4_294_967_296
 MAX_BANDWIDTH_BPS = 999_999_999
 ARTIFACT_KIND_PLAYLIST = "hls_media_playlist"
 ARTIFACT_KIND_SEGMENT = "hls_segment"
-ARTIFACT_KINDS = frozenset({ARTIFACT_KIND_PLAYLIST, ARTIFACT_KIND_SEGMENT})
+ARTIFACT_KIND_MASTER = "hls_master_playlist"
+ARTIFACT_KIND_THUMBNAIL = "thumbnail"
+# The active artifact kinds of contract v2's manifest 1.0.0-draft.
+ARTIFACT_KINDS = frozenset(
+    {ARTIFACT_KIND_MASTER, ARTIFACT_KIND_PLAYLIST, ARTIFACT_KIND_SEGMENT, ARTIFACT_KIND_THUMBNAIL}
+)
+# Contract v2's rel_path: up to four lowercase components, never absolute, never "." or "..".
+REL_PATH_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}(/[a-z0-9][a-z0-9_.-]{0,63}){0,3}")
+REL_PATH_MAX_CHARS = 128
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 HASH_CHUNK_BYTES = 1024 * 1024
 MS_PER_SECOND = 1000
@@ -181,14 +189,18 @@ def _errno_name(error: BaseException) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ArtifactFile:
-    path: str  # relative to the job's output root: "<rendition>/playlist.m3u8", "<rendition>/segment_0000.ts"
-    kind: str  # "hls_media_playlist" | "hls_segment" (contract v2 artifact kinds)
+    path: str  # relative to the job's output root: "<rendition>/playlist.m3u8", "master.m3u8", "thumbnail.jpg"
+    kind: str  # one of ARTIFACT_KINDS (contract v2 artifact kinds)
     size_bytes: int
     sha256: str  # 64 lowercase hex
 
     def __post_init__(self) -> None:
-        if not isinstance(self.path, str) or not self.path:
-            raise ValueError("path must be a non-empty string")
+        if (
+            not isinstance(self.path, str)
+            or len(self.path) > REL_PATH_MAX_CHARS
+            or REL_PATH_PATTERN.fullmatch(self.path) is None
+        ):
+            raise ValueError("path must be a contract rel_path")
         if self.kind not in ARTIFACT_KINDS:
             raise ValueError(f"kind must be one of {sorted(ARTIFACT_KINDS)}, got {self.kind!r}")
         _require_int("size_bytes", self.size_bytes, 1)
@@ -201,7 +213,11 @@ class RenditionOutput:
     name: str
     width: int
     height: int
+    frame_rate_num: int  # the plan's constant output frame rate
+    frame_rate_den: int
     codecs: str
+    has_audio: bool
+    encrypted: bool  # every segment AES-128 encrypted
     playlist_path: str
     segment_count: int
     duration_ms: int  # measured: ceil(1000 * sum of EXTINF)
@@ -211,6 +227,10 @@ class RenditionOutput:
     artifacts: tuple[ArtifactFile, ...]  # the playlist first, then the segments in order
 
     def __post_init__(self) -> None:
+        _require_int("frame_rate_num", self.frame_rate_num, 1)
+        _require_int("frame_rate_den", self.frame_rate_den, 1)
+        if not isinstance(self.has_audio, bool) or not isinstance(self.encrypted, bool):
+            raise ValueError("has_audio and encrypted must be bools")
         if not isinstance(self.artifacts, tuple) or not all(isinstance(item, ArtifactFile) for item in self.artifacts):
             raise ValueError("artifacts must be a tuple of ArtifactFile")
 
@@ -232,8 +252,9 @@ class OutputAllowance:
     ) -> OutputAllowance:
         """The dispatch's output limits, capped by the scratch room the source leaves under the profile's ceiling.
 
-        It covers every output of the job: the caller reserves what the master playlist, the
-        thumbnail and the manifest need before handing the rest to the renditions.
+        It covers every output of the job: the caller passes it straight to `core/package.py`
+        `reserve_package`, which sets aside what the master playlist, the thumbnail and the
+        manifest need, and hands the rest to the renditions.
         """
         _require_int("max_output_bytes", max_output_bytes, 1)
         _require_int("max_artifact_count", max_artifact_count, 1)
@@ -249,6 +270,25 @@ class OutputAllowance:
                 f"{profile.encode.max_scratch_bytes} bytes",
             )
         return cls(max_bytes=min(max_output_bytes, scratch_room), max_artifacts=max_artifact_count)
+
+    def reserve(self, max_bytes: int, max_artifacts: int) -> OutputAllowance:
+        """What remains once `max_bytes` and `max_artifacts` are set aside for other outputs.
+
+        Raises the typed limit failure when the room does not fit the allowance.
+        """
+        _require_int("max_bytes", max_bytes, 0)
+        _require_int("max_artifacts", max_artifacts, 0)
+        if max_bytes > self.max_bytes:
+            raise _failure(
+                INPUT_LIMITS_EXCEEDED, OUTPUT_TOO_LARGE,
+                f"the job's {self.max_bytes} output bytes cannot hold the {max_bytes} its package needs",
+            )
+        if max_artifacts > self.max_artifacts:
+            raise _failure(
+                INPUT_LIMITS_EXCEEDED, TOO_MANY_ARTIFACTS,
+                f"the job's {self.max_artifacts} files cannot hold the {max_artifacts} its package needs",
+            )
+        return OutputAllowance(max_bytes=self.max_bytes - max_bytes, max_artifacts=self.max_artifacts - max_artifacts)
 
     def after(self, output: RenditionOutput) -> OutputAllowance:
         """What is left once `output` is kept. Raises ValueError when it does not fit."""
@@ -1023,7 +1063,11 @@ def _verified_output(
         name=plan.name,
         width=plan.width,
         height=plan.height,
+        frame_rate_num=plan.frame_rate_num,
+        frame_rate_den=plan.frame_rate_den,
         codecs=plan.codecs,
+        has_audio=plan.audio_bitrate is not None,
+        encrypted=media_key is not None,
         playlist_path=f"{plan.name}/{PLAYLIST_NAME}",
         segment_count=len(segment_names),
         duration_ms=duration_ms,

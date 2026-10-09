@@ -7,6 +7,7 @@ import dataclasses
 import shutil
 import struct
 import subprocess
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,6 +107,21 @@ EBML_SIZE_BITS_PER_BYTE = 7
 BITS_PER_BYTE = 8
 TITLE_MARKER = "PrivateTitleMarker"
 LOCATION_MARKER = "+48.8577+002.2950/"
+# A PNG whose iCCP chunk carries a stand-in ICC profile of 560 bytes, made into a MOV whose colr atom
+# carries it: ffmpeg passes it on as frame side data. The marker shows where its bytes end up.
+ICC_MARKER = b"IccProfileMarkerXYZ"
+ICC_PROFILE_BYTES = 560
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+PNG_RGB_COLOUR_TYPE = 2
+PNG_BIT_DEPTH = 8
+PNG_FILTER_NONE = b"\x00"
+ICC_PICTURE_SIZE = (320, 240)
+ICC_PICTURE_RGB = bytes([200, 30, 30])
+ICC_DURATION_S = 2
+# Still pictures at one frame per ten seconds: one red picture for 10 s; red for 10 s, then blue.
+STILL_RATE = "1/10"
+STILL_SIZE = "160x120"
+STILL_COLOURS = ("red", "blue")
 # An HLS playlist saved under a video file name: a demuxer that followed it would fetch this URL.
 DISGUISED_PLAYLIST = (
     "#EXTM3U\n"
@@ -134,6 +150,9 @@ class EncodeMedia:
     at_pixel_cap: Path  # 200x100
     cropped: Path  # Matroska, 320x240 red over blue, its container crop removing the blue half
     slideshow: Path  # 160x120, a picture every 10 s for 20 s, with audio
+    icc_profiled: Path | None  # MOV whose colr atom carries an ICC profile; None when ffmpeg does not keep it
+    single_picture: Path  # 160x120, one red picture lasting 10 s
+    two_pictures: Path  # 160x120, a red picture for 10 s, then a blue one for 10 s
     tie: Path  # 160x120, 1.5 s at 60 fps
     ntsc: Path  # 160x120, 2 s at 30000/1001 fps, with audio
     dense_av1: Path | None  # AV1 in Matroska declaring 1 s at 30 fps, carrying 30,000 frames; None without SVT/dav1d
@@ -440,6 +459,51 @@ def _oversized_vp9(root: Path) -> Path | None:
     return target
 
 
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+
+def _icc_png(target: Path) -> Path:
+    """A red PNG whose iCCP chunk carries a stand-in ICC profile holding ICC_MARKER."""
+    width, height = ICC_PICTURE_SIZE
+    profile = (ICC_MARKER * (ICC_PROFILE_BYTES // len(ICC_MARKER) + 1))[:ICC_PROFILE_BYTES]
+    rows = b"".join(PNG_FILTER_NONE + ICC_PICTURE_RGB * width for _ in range(height))
+    header = struct.pack(">IIBBBBB", width, height, PNG_BIT_DEPTH, PNG_RGB_COLOUR_TYPE, 0, 0, 0)
+    target.write_bytes(
+        PNG_SIGNATURE
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"iCCP", b"stand-in\x00\x00" + zlib.compress(profile))
+        + _png_chunk(b"IDAT", zlib.compress(rows))
+        + _png_chunk(b"IEND", b"")
+    )
+    return target
+
+
+def _icc_profiled(root: Path) -> Path | None:
+    target = root / "icc_profiled.mov"
+    _ffmpeg(
+        "-loop", "1", "-framerate", "25", "-i", str(_icc_png(root / "icc.png")), "-t", str(ICC_DURATION_S),
+        "-c:v", "libx264", "-preset", FAST_PRESET, "-pix_fmt", "yuv420p",
+        "-movflags", "+write_colr+prefer_icc",
+        str(target),
+    )
+    return target if ICC_MARKER in target.read_bytes() else None
+
+
+def _still_pictures(root: Path, name: str, colours: tuple[str, ...]) -> Path:
+    """One picture of each colour in turn, each shown for 10 s."""
+    for number, colour in enumerate(colours):
+        _ffmpeg("-f", "lavfi", "-i", f"color=c={colour}:size={STILL_SIZE}", "-frames:v", "1",
+                str(root / f"{name}_{number}.png"))
+    target = root / f"{name}.mp4"
+    _ffmpeg(
+        "-framerate", STILL_RATE, "-i", str(root / f"{name}_%d.png"), "-frames:v", str(len(colours)),
+        "-c:v", "libx264", "-preset", FAST_PRESET, "-pix_fmt", "yuv420p",
+        str(target),
+    )
+    return target
+
+
 def _segmented_source(root: Path) -> Path:
     target = root / "segmented_source.mp4"
     _ffmpeg(
@@ -495,6 +559,9 @@ def _build_media(root: Path) -> EncodeMedia:
         at_pixel_cap=_h264_only(root / "at_pixel_cap.mp4", AT_PIXEL_CAP_SIZE, RESIZE_PART_DURATION_S),
         cropped=_cropped(root),
         slideshow=slideshow,
+        icc_profiled=_icc_profiled(root),
+        single_picture=_still_pictures(root, "single_picture", STILL_COLOURS[:1]),
+        two_pictures=_still_pictures(root, "two_pictures", STILL_COLOURS),
         tie=_h264_only(root / "tie.mp4", SMALL_SIZE, TIE_DURATION_S, fps=TIE_FPS),
         ntsc=_ntsc(root),
         dense_av1=_dense_av1(root),
