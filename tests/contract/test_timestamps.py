@@ -3,7 +3,7 @@ ContractTimestampTest."""
 
 import pytest
 
-from tests.contract.semantic import parse_timestamp_ms
+from core.protocol.semantic import parse_timestamp_ms
 
 REAL_INSTANTS = {
     "the epoch": ("1970-01-01T00:00:00.000Z", 0),

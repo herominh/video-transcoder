@@ -3,9 +3,9 @@ RFC 6901, and parity with the Hub is on layer and reason (the pointer of a many-
 
 import json
 
-from tests.contract import files, pipeline, schema
-from tests.contract.context import TrustedContext
-from tests.contract.reasons import Layer, ReasonCode
+from core.protocol import files, pipeline, schema
+from core.protocol.context import TrustedContext
+from core.protocol.reasons import Layer, ReasonCode
 
 PUSH = "fixtures/contexts/ctx-hub-push.json"
 PROGRESS_PAYLOAD = "fixtures/progress/P04-downloading.json"

@@ -6,7 +6,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from tests.contract import files, schema
+from core.protocol import files, schema
 
 DIALECT = "https://json-schema.org/draft/2020-12/schema"
 EXT_DEFINITION = ("schemas/common.schema.json", "/$defs/ext")

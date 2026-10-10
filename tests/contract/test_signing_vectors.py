@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from tests.contract import files, schema, signing
-from tests.contract.registry import load_registry
+from core.protocol import files, schema, signing
+from core.protocol.registry import load_registry
 
 VECTORS = files.read_json("signing/vectors.json")
 KEYS = {entry["key_id"]: bytes.fromhex(entry["key_hex"]) for entry in VECTORS["keys"]}

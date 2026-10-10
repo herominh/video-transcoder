@@ -9,11 +9,11 @@ from typing import Any
 
 import pytest
 
-from tests.contract import files, pipeline
-from tests.contract.context import TrustedContext
-from tests.contract.reasons import Layer, ReasonCode
-from tests.contract.registry import load_registry
-from tests.contract.verdict import Verdict
+from core.protocol import files, pipeline
+from core.protocol.context import TrustedContext
+from core.protocol.reasons import Layer, ReasonCode
+from core.protocol.registry import load_registry
+from core.protocol.verdict import Verdict
 
 CLAIM = "fixtures/claim/P23-claim-of-the-accepted-dispatch.json"
 GRANT = "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json"

@@ -32,9 +32,9 @@ from core.package import (
     write_master_playlist,
 )
 from core.profile import GIB, MIB, PILOT_PROFILE, RENDITION_NAMES, MediaProfile
+from core.protocol.context import TrustedContext
+from core.protocol.pipeline import validate
 from core.thumbnail import ThumbnailResult
-from tests.contract.context import TrustedContext
-from tests.contract.pipeline import validate
 from tests.encode.conftest import fast_profile
 
 ORG_UUID = "11111111-1111-7111-8111-111111111111"

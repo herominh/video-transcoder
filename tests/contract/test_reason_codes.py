@@ -1,8 +1,8 @@
 """The Python enums, the JSON lists and the schema enums name the same codes and kinds."""
 
-from tests.contract import files
-from tests.contract.reasons import Layer, ReasonCode
-from tests.contract.registry import ContractRegistry
+from core.protocol import files
+from core.protocol.reasons import Layer, ReasonCode
+from core.protocol.registry import ContractRegistry
 
 MANIFEST_DRAFT = "1.0.0-draft"
 RESERVED_CODES = {

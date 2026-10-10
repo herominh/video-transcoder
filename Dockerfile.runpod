@@ -27,6 +27,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY core/ core/
+# The contract v2 tree core/protocol/ reads, at the same path relative to WORKDIR as in the repository.
+COPY tests/contracts/transcode/v2/ tests/contracts/transcode/v2/
 COPY wrappers/ wrappers/
 
 ENV PYTHONUNBUFFERED=1

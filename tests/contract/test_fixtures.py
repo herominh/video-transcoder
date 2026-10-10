@@ -4,10 +4,10 @@ from typing import Any
 
 import pytest
 
-from tests.contract import files, gate, pipeline, schema, semantic
-from tests.contract.context import TrustedContext
-from tests.contract.reasons import Layer, ReasonCode
-from tests.contract.registry import load_registry
+from core.protocol import files, gate, pipeline, schema, semantic
+from core.protocol.context import TrustedContext
+from core.protocol.reasons import Layer, ReasonCode
+from core.protocol.registry import load_registry
 
 CATALOG_FILE = "fixtures/cases.json"
 CATALOG_SCHEMA_FILE = "schemas/fixture-catalog.schema.json"

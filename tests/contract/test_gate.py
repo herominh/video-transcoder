@@ -9,11 +9,11 @@ from typing import Any
 
 import pytest
 
-from tests.contract import files, gate, pipeline
-from tests.contract.context import TrustedContext
-from tests.contract.reasons import Layer, ReasonCode
-from tests.contract.registry import MessageKind, load_registry
-from tests.contract.verdict import Verdict
+from core.protocol import files, gate, pipeline
+from core.protocol.context import TrustedContext
+from core.protocol.reasons import Layer, ReasonCode
+from core.protocol.registry import MessageKind, load_registry
+from core.protocol.verdict import Verdict
 
 PUSH = "fixtures/contexts/ctx-hub-push.json"
 STORAGE = "fixtures/contexts/ctx-hub-storage.json"

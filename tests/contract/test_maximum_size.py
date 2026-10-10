@@ -15,10 +15,10 @@ from urllib.parse import urljoin
 
 import pytest
 
-from tests.contract import files, gate, pipeline, schema
-from tests.contract.context import TrustedContext
-from tests.contract.reasons import Layer, ReasonCode
-from tests.contract.registry import MessageKind, load_registry
+from core.protocol import files, gate, pipeline, schema
+from core.protocol.context import TrustedContext
+from core.protocol.reasons import Layer, ReasonCode
+from core.protocol.registry import MessageKind, load_registry
 
 UUID = "f" * 8 + "-" + "f" * 4 + "-" + "f" * 4 + "-" + "f" * 4 + "-" + "f" * 12
 TIMESTAMP = "2030-12-31T23:59:59.999Z"

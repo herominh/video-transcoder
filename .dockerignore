@@ -7,6 +7,8 @@ __pycache__
 **/__pycache__
 *.pyc
 tests/
+# ...except the contract v2 tree, which Dockerfile.runpod ships for core/protocol/.
+!tests/contracts/transcode/v2/
 .pytest_cache
 *.mp4
 *.ts
