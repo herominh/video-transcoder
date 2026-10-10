@@ -1,8 +1,8 @@
-"""The three kinds of the claim exchange (README.md sections 7, 8 and 15): a grant binds the runtime that claimed (S29)
-and a prefix whose last segment is the generation (S30); the worker takes the execution from the grant where the Hub's
-self-check compares it with its records; an unclaimed report is read from whichever start sent it; a runtime id is
-never the video's UUID (S7). The fixture catalog pins one case per check; these are the boundaries it leaves, and they
-copy the Hub's ClaimExchangeTest row for row."""
+"""The three kinds of the claim exchange (README.md sections 7, 8 and 15): a grant binds the runtime that claimed (S29),
+a prefix whose last segment is the generation (S30) and, for an encrypted dispatch, the dispatch's media key (S31); the
+worker takes the execution from the grant where the Hub's self-check compares it with its records; an unclaimed report
+is read from whichever start sent it; a runtime id is never the video's UUID (S7). The fixture catalog pins one case per
+check; these are the boundaries it leaves, and they copy the Hub's ClaimExchangeTest row for row."""
 
 import json
 from typing import Any
@@ -17,6 +17,8 @@ from tests.contract.verdict import Verdict
 
 CLAIM = "fixtures/claim/P23-claim-of-the-accepted-dispatch.json"
 GRANT = "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json"
+# P27: the grant of P24 for an unencrypted dispatch, without media_key.
+GRANT_WITHOUT_MEDIA_KEY = "fixtures/claim-granted/P27-unencrypted-grant-without-media-key.json"
 UNCLAIMED_REFUSED = "fixtures/unclaimed/P25-refused-with-claim-conflict.json"
 UNCLAIMED_UNREACHABLE = "fixtures/unclaimed/P26-unreachable-polled-three-hours-late.json"
 CLAIM_SENT_301S_AGO = "fixtures/claim/N120-sent-301s-ago.json"  # N120: the claim of P23 sent 301 s before now
@@ -25,6 +27,7 @@ GRANT_PREFIX_PAST_THE_GENERATION = "fixtures/claim-granted/N123-prefix-not-endin
 HUB_CLAIM = "fixtures/contexts/ctx-hub-claim.json"
 WORKER_GRANT = "fixtures/contexts/ctx-worker-claim-grant.json"
 HUB_SENDER_GRANT = "fixtures/contexts/ctx-hub-sender-claim-grant.json"
+HUB_SENDER_GRANT_UNENCRYPTED = "fixtures/contexts/ctx-hub-sender-claim-grant-unencrypted.json"
 HUB_UNCLAIMED_PUSH = "fixtures/contexts/ctx-hub-unclaimed-push.json"
 HUB_UNCLAIMED_POLL = "fixtures/contexts/ctx-hub-unclaimed-poll.json"
 VIDEO = "22222222-2222-7222-8222-222222222222"
@@ -105,6 +108,19 @@ def test_grant_when_its_runtime_and_its_prefix_are_both_wrong_should_report_the_
     assert (verdict.reason, verdict.instance_path) == (ReasonCode.RUNTIME_MISMATCH, "/runtime_id")
 
 
+def test_grant_when_its_prefix_and_its_media_key_are_both_wrong_should_report_the_prefix_first():
+    # Arrange: S30 runs before S31.
+    grant = files.read_json(GRANT)
+    grant["output"]["prefix"] = f"test/media/{VIDEO}"
+    del grant["media_key"]
+
+    # Act
+    verdict = _validate(grant, files.read_json(WORKER_GRANT))
+
+    # Assert
+    assert (verdict.reason, verdict.instance_path) == (ReasonCode.GENERATION_PREFIX_MISMATCH, "/output/prefix")
+
+
 def test_grant_when_the_worker_validates_it_should_take_the_execution_from_the_grant():
     # Arrange: a grant consistent in itself for an execution the worker has never heard of, at any fence.
     grant = _grant_for_execution(OTHER_EXECUTION, 9)
@@ -160,6 +176,17 @@ def test_grant_when_the_hub_self_checks_the_one_it_minted_should_be_accepted():
 
     # Act
     verdict = _validate(grant, files.read_json(HUB_SENDER_GRANT))
+
+    # Assert
+    assert verdict.accepted, verdict
+
+
+def test_grant_when_the_hub_self_checks_an_unencrypted_dispatchs_grant_without_a_media_key_should_be_accepted():
+    # Arrange: the grant the worker accepts in the catalog (P27), before the Hub sends it.
+    raw = files.read_bytes(GRANT_WITHOUT_MEDIA_KEY)
+
+    # Act
+    verdict = pipeline.validate(raw, TrustedContext.from_dict(files.read_json(HUB_SENDER_GRANT_UNENCRYPTED)))
 
     # Assert
     assert verdict.accepted, verdict

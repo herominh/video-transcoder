@@ -1,7 +1,7 @@
 {
   "protocol_version": "2.0.0-draft",
   "message_kind": "transcode.claim.granted",
-  "message_id": "99999999-9999-7999-8999-000000000223",
+  "message_id": "99999999-9999-7999-8999-000000000235",
   "sent_at": "2029-12-31T23:59:56.000Z",
   "audience": "worker:runpod-test",
   "key_id": "test-hub2wk-k1",
@@ -20,10 +20,10 @@
   "generation_id": "55555555-5555-7555-8555-555555555555",
   "output": {
     "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
-    "prefix": "test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555/hls"
+    "prefix": "test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555"
   },
   "media_key": {
-    "media_key_id": "77777777-7777-7777-8777-777777777777",
+    "media_key_id": "78787878-7878-7878-8878-787878787878",
     "key_hex": "00112233445566778899aabbccddeeff"
   }
 }

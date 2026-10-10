@@ -1,4 +1,4 @@
-"""Layer L4: the semantic checks S1-S30 against the trusted context (standard library only).
+"""Layer L4: the semantic checks S1-S31 against the trusted context (standard library only).
 
 The rule table below says, per (role, kind), which channels are allowed and which checks
 run, in order; the first failing check wins. It also yields the context fields each
@@ -28,6 +28,8 @@ KIND_MEDIA_PLAYLIST = "hls_media_playlist"
 KIND_SEGMENT = "hls_segment"
 KIND_THUMBNAIL = "thumbnail"
 DIAGNOSTIC_THUMBNAIL_UNAVAILABLE = "thumbnail_unavailable"
+# The encryption mode whose dispatch has a media key (the schema's other mode, `none`, has none).
+ENCRYPTED_MODE = "aes-128"
 
 Finding = Optional[tuple[ReasonCode, str]]
 Document = Mapping[str, Any]
@@ -107,7 +109,7 @@ RULES: Mapping[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
     (Role.WORKER_RECEIVER.value, _GRANT): (
         _CLAIM_CHANNELS,
         ("S1", "S2", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S18", "S21", "S29",
-         "S30"),
+         "S30", "S31"),
     ),
     (Role.HUB_SENDER.value, _REQUEST): (
         (Channel.DISPATCH.value,),
@@ -117,7 +119,7 @@ RULES: Mapping[tuple[str, str], tuple[tuple[str, ...], tuple[str, ...]]] = {
     (Role.HUB_SENDER.value, _GRANT): (
         _CLAIM_CHANNELS,
         ("S1", "S2", "S3", "S4", "S5", "S7", "S8", "S9", "S10", "S11", "S12", "S13", "S14", "S15", "S16", "S18",
-         "S21", "S29", "S30"),
+         "S21", "S29", "S30", "S31"),
     ),
     **{(Role.HUB_RECEIVER.value, kind): row for kind, row in _RECEIVER_ROWS.items()},
     **{(Role.WORKER_SENDER.value, kind): row for kind, row in _RECEIVER_ROWS.items()},
@@ -145,6 +147,7 @@ _CHECK_CONTEXT_FIELDS: Mapping[str, tuple[str, ...]] = {
     "S27": ("expect.renditions",),
     "S28": ("expect.max_artifact_count",),
     "S29": ("expect.runtime_id",),
+    "S31": ("expect.encryption",),
 }
 _S18_CONTEXT_FIELDS: Mapping[str, tuple[str, ...]] = {
     _REQUEST: ("expect.source_location_id", "expect.output_location_id"),
@@ -475,6 +478,20 @@ def _s30_prefix_ends_in_generation(
     return None
 
 
+def _s31_granted_media_key(
+    document: Document, kind: str, context: TrustedContext, registry: ContractRegistry
+) -> Finding:
+    """An encrypted dispatch's grant carries the dispatch's media key, named by the key id it sent; an unencrypted
+    dispatch's grant carries none. The schema already proved a present `media_key` holds both members."""
+    media_key = document.get("media_key")
+    recorded = context.value("expect.encryption")
+    if recorded["mode"] == ENCRYPTED_MODE:
+        granted = media_key is not None and media_key["media_key_id"] == recorded.get("media_key_id")
+    else:
+        granted = media_key is None
+    return None if granted else (ReasonCode.ENCRYPTION_MISMATCH, "/media_key")
+
+
 CHECKS: Mapping[str, CheckFunction] = {
     "S1": _s1_timestamps,
     "S2": _s2_audience,
@@ -508,6 +525,7 @@ CHECKS: Mapping[str, CheckFunction] = {
     "S28": _s28_limits,
     "S29": _s29_runtime,
     "S30": _s30_prefix_ends_in_generation,
+    "S31": _s31_granted_media_key,
 }
 
 

@@ -49,7 +49,7 @@ verdict `{accepted, layer, reason, instance_path}`. Layers run in this order; th
 | 3 | `version` (L2) | version, then kind; selects the schema |
 | 4 | `size` (L0 b) | raw byte count against the selected kind's limit |
 | 5 | `schema` (L3) | JSON Schema 2020-12 of the selected kind |
-| 6 | `semantic` (L4) | checks S1-S30 against the trusted context |
+| 6 | `semantic` (L4) | checks S1-S31 against the trusted context |
 
 * An accepted verdict has `layer`, `reason` and `instance_path` all null.
 * L1 yields `parse` / `malformed_json`, except its token budget, which yields `size` /
@@ -192,14 +192,14 @@ Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no versio
 
 | Kind | Direction | Limit (bytes) | Carries |
 |---|---|---:|---|
-| `transcode.request` | Hub to worker | 4,096 | envelope, identity without execution fields, source locator, output location, profile, renditions, encryption mode and key id, limits, claim bootstrap |
+| `transcode.request` | Hub to worker | 4,096 | envelope, identity without execution fields, source locator (`location_id`, `bucket`, `credential_ref`, object key, size, ETag), output location (`location_id`, `bucket`, `credential_ref`), profile, renditions, encryption mode and key id, limits, claim bootstrap |
 | `transcode.progress` | worker to Hub | 4,096 | envelope, full identity, `event_seq`, stage, stage percentage, optional message, counters, `ext` |
 | `transcode.result.completed` | worker to Hub | 16,384 | envelope, full identity, `generation_id`, manifest locator, source read facts, profile, media, encoder, optional diagnostics, `ext` |
 | `transcode.result.failed` | worker to Hub | 16,384 | envelope, full identity, typed error, optional source, encoder, diagnostics, `ext` |
 | `hub.error` | Hub to worker (HTTP body) | 2,048 | version, kind, id, `sent_at`, error; **no** audience, key id or identity; unsigned in B03 |
 | `generation.manifest` | stored by the worker, read by the Hub | 8,388,608 | manifest version, kind, generation, identity (no cell, epoch, revision), profile, encryption, media, renditions, paths, inventory |
 | `transcode.claim` | worker to Hub (HTTP request body) | 4,096 | envelope, identity without execution fields, `claim` with the dispatch's `bootstrap_token` and the runtime's `runtime_id` |
-| `transcode.claim.granted` | Hub to worker (HTTP response body) | 4,096 | envelope, full identity, `runtime_id`, `generation_id`, `output` with `location_id` and the generation `prefix` |
+| `transcode.claim.granted` | Hub to worker (HTTP response body) | 4,096 | envelope, full identity, `runtime_id`, `generation_id`, `output` with `location_id` and the generation `prefix`, and, for an encrypted dispatch, `media_key` |
 | `transcode.unclaimed` | worker to Hub | 4,096 | envelope, identity without execution fields, `runtime_id`, `cause`, `hub_error_code` when the cause is `refused` |
 
 Envelope = `protocol_version`, `message_kind`, `message_id`, `sent_at`, `audience`, `key_id`.
@@ -210,12 +210,30 @@ manifest identity is `org_uuid`, `video_uuid`, `source_id`, `attempt_id`, `dispa
 `execution_id`.
 
 **Secrets and free text.** No field of any kind is defined to carry a media key, a storage credential
-or a presigned URL. Free text (`message`, `error.detail`, `error.message`, `diagnostics[].detail`,
-`encoder.ffmpeg_version`) and `ext` string values are printable ASCII and refuse the substring `://`
-(the `ascii_text_*` definitions: `not` `[^\x20-\x7e]` and `allOf` `not` `://`). Free text is
+or a presigned URL, with one exception: `transcode.claim.granted` `media_key.key_hex`, the
+generation's 16-byte AES-128 key in lowercase hex, which the Hub sends only for an encrypted dispatch
+and only in the body of the claim response to the runtime it grants (section 15). No other kind
+carries it, and the worker never puts it in a message. `bucket` and `credential_ref` name a
+location's bucket and the worker's configured access to it; `credential_ref` is a name, never a
+secret. Free text (`message`, `error.detail`, `error.message`, `diagnostics[].detail`,
+`encoder.ffmpeg_version`) and `ext` string values are printable ASCII and refuse the substring
+`://` (the `ascii_text_*` definitions: `not` `[^\x20-\x7e]` and `allOf` `not` `://`). Free text is
 producer-sanitized and never holds a URL (`://` is refused); the contract cannot prove that opaque
 text holds no key material, so receivers treat free text as untrusted: bounded, never interpreted,
 never logged beyond its bounded form.
+
+**Reaching a location.** A request names each storage location by `location_id` and carries,
+beside it, that location's `bucket` and `credential_ref` (in `source` and in `output`). The Hub
+fills both from the recorded location that `location_id` names; both are immutable for that
+location. The worker reaches a location through `bucket` and the access profile its trusted
+configuration holds under `credential_ref` (endpoint and credentials); nothing in a message names
+an endpoint or a credential. It resolves both targets only after the grant (section 15.1). The
+grant's `output.location_id` names the same location as the dispatch's `output` (S18 compares
+them), so the output bucket is the dispatch's. A `credential_ref` its configuration does not hold
+ends the execution with `transcode.result.failed`, error class `configuration_error`, code
+`unknown_credential_ref`, before it reads the source. No semantic check reads `bucket` or
+`credential_ref`: the schema bounds them, the Hub's own record is the source of truth, and the
+worker checks nothing beyond the schema.
 
 Bounds of note: `source.size_bytes`, `limits.max_source_bytes` 1 to 32,212,254,720 (30 GiB);
 `source.bytes_read` 0 to 32,212,254,720; `limits.max_source_duration_ms` and `media.duration_ms` 1 to
@@ -249,7 +267,7 @@ lists; any other answer is `invalid_answer`). The claim kinds carry no `ext`. Se
 
 ### 8.2 The checks
 
-The checks run in the order S1 to S30, restricted to the ones that apply (8.3). The first failing check
+The checks run in the order S1 to S31, restricted to the ones that apply (8.3). The first failing check
 is the verdict: layer `semantic`, its reason and its pointer. Each check reports at most one pointer,
 chosen by the rule in the table.
 
@@ -285,6 +303,7 @@ chosen by the rule in the table.
 | S28 | `artifact_count > expect.max_artifact_count`; else a rendition (in array order) has more than `limits.json` `max_segments_per_rendition` (3,600) `hls_segment` artifacts | `limit_exceeded` | `/artifact_count`; else `/renditions/<i>` |
 | S29 | `runtime_id != expect.runtime_id` | `runtime_mismatch` | `/runtime_id` |
 | S30 | the text of `output.prefix` after its last `/` (the whole text when it has none) differs from `generation_id` | `generation_prefix_mismatch` | `/output/prefix` |
+| S31 | claim grant: with `expect.encryption.mode` `aes-128`, `media_key` is absent or `media_key.media_key_id != expect.encryption.media_key_id`; with `none`, `media_key` is present | `encryption_mismatch` | `/media_key` |
 
 ### 8.3 Which checks run
 
@@ -303,13 +322,13 @@ self-check of its own dispatch and of its own claim grant.
 | `hub_receiver`, `worker_sender` | `transcode.result.failed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 |
 | `hub_receiver`, `worker_sender` | `generation.manifest` | `storage` | S1 S7 S8 S9 S13 S14 S15 S17 S19 S20 S21 S23 S24 S25 S26 S27 S28 |
 | `hub_receiver`, `worker_sender` | `transcode.claim` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 |
-| `worker_receiver` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S18 S21 S29 S30 |
-| `hub_sender` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S21 S29 S30 |
+| `worker_receiver` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S18 S21 S29 S30 S31 |
+| `hub_sender` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S21 S29 S30 S31 |
 | `hub_receiver`, `worker_sender` | `transcode.unclaimed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 |
 
 For the claim grant the worker's `expect` is the identity of the dispatch it accepted, the
-dispatch's `output.location_id` and the `runtime_id` it sent; the worker learns `execution_id` and
-`execution_fence` from the grant, so it runs neither S15 nor S16.
+dispatch's `output.location_id` and `encryption`, and the `runtime_id` it sent; the worker learns
+`execution_id` and `execution_fence` from the grant, so it runs neither S15 nor S16.
 
 S5 runs only when the channel is `push`: the `poll` channel (provider output read later) waives the
 past bound, and the `dispatch` channel judges the claim expiry instead (S6). The manifest carries no
@@ -380,8 +399,8 @@ reads it, whatever the channel:
 | `hub_receiver`, `worker_sender` | `transcode.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.source_id` |
 | `hub_receiver`, `worker_sender` | `generation.manifest` | `accepted_manifest_versions`, `expect.org_uuid`, `expect.video_uuid`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.source_id`, `expect.profile`, `expect.encryption`, `expect.renditions`, `expect.max_artifact_count` |
 | `hub_receiver`, `worker_sender` | `transcode.claim` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id` |
-| `worker_receiver` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.output_location_id`, `expect.runtime_id` |
-| `hub_sender` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.output_location_id`, `expect.runtime_id` |
+| `worker_receiver` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.output_location_id`, `expect.runtime_id`, `expect.encryption` |
+| `hub_sender` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.output_location_id`, `expect.runtime_id`, `expect.encryption` |
 | `hub_receiver`, `worker_sender` | `transcode.unclaimed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id` |
 
 `expect.<name>` is missing when `expect` itself is missing or null. An empty version list is present
@@ -503,7 +522,7 @@ file (9.2), validate, and assert:
   (`instance_path` is null for L0 and L1; for `schema` it is the first error both libraries report,
   section 6).
 
-Catalog rules: 25 positive and 132 negative cases, ids `P01`-`P26` and `N01`-`N132` (two or three
+Catalog rules: 26 positive and 148 negative cases, ids `P01`-`P27` and `N01`-`N148` (two or three
 digits). `P17` is retired: it pinned an integer-valued float as accepted, and its payload became
 `N76` when number literals had to be integer literals. Large payloads (`P21`, `N84`, `N112`, `N113`)
 are stored compact; every file stays under 1 MB; every non-reserved reason code is produced by at
@@ -519,9 +538,11 @@ would dangle at L4); the pipeline stops at the first failing layer. N03 (nesting
 
 Synthetic values: now `2030-01-01T00:00:00.000Z`; org `11111111-1111-7111-8111-111111111111`,
 video `22222222-2222-7222-8222-222222222222`, attempt `33333333-...`, dispatch `44444444-...`,
-execution and generation `55555555-...`, source `66666666-...`, media key id `77777777-...`, source
-location `aaaaaaaa-...`, output location `bbbbbbbb-...`; cell `cell-test-a`, epoch 7, lifecycle
-revision 3, execution fence 2, last event sequence 4; audiences `hub:cell-test-a` and
+execution and generation `55555555-...`, source `66666666-...`, media key id `77777777-...` (its
+test-only key `00112233445566778899aabbccddeeff`), source location `aaaaaaaa-...` (bucket
+`test-source-bucket`), output location `bbbbbbbb-...` (bucket `test-output-bucket`), credential ref
+`default` for both; cell `cell-test-a`, epoch 7, lifecycle revision 3, execution fence 2, last event
+sequence 4; audiences `hub:cell-test-a` and
 `worker:runpod-test`; key ids `test-wk2hub-k1`, `test-wk2hub-k2` (worker to Hub) and
 `test-hub2wk-k1` (Hub to worker); profile `test-h264-sdr` version 1; runtime `88888888-...`; generation
 prefix `test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555`.
@@ -544,17 +565,29 @@ the rules below bind the worker and the Hub's claim core, which keeps the state.
 2. After it accepted the dispatch (`worker_receiver`, `transcode.request`) and before it reads the
    source or writes any object, it sends `transcode.claim` to the Hub's claim address: the
    dispatch's identity and `bootstrap_token`, and its `runtime_id`. The claim address comes from
-   the worker's trusted configuration, never from a message.
+   the worker's trusted configuration, never from a message. It is an `https` URL: the worker
+   refuses any other scheme and verifies the Hub's certificate, because the response can carry the
+   media key (rule 4).
 3. It may work only after it received a `200` response whose body verifies under a Hub-to-worker
    key and is an accepted `transcode.claim.granted` (`worker_receiver`, section 8.3). From then on
    its `execution_id`, `execution_fence` and `generation_id` are the grant's, every object it
    writes has a key that starts with `output.prefix` followed by `/`, in the location
    `output.location_id`, and its progress, result and manifest carry that identity.
-4. When the request fails in transport, times out, or is answered with a `hub.error` whose
+4. With an encrypted dispatch, the grant's `media_key` is the one key the runtime encrypts with, and
+   it never obtains a key any other way. It holds the key in memory only, from the grant until its
+   encode and the encode's own checks of the encrypted output are done, and never past its
+   execution. An anonymous memory file that a child process inherits counts as memory; a
+   development host without one may use an owner-only file, removed once the encode and its checks
+   are done. The key leaves the runtime only inside the encrypted segments: never in a log line, a
+   message, an object or the provider's job output.
+5. For every dispatch and whatever the outcome, the body of a claim it sends and of a claim response
+   it receives is never logged, stored or put in the provider's job output, and the key of a
+   response the runtime does not accept (rule 7) is discarded at once, unused.
+6. When the request fails in transport, times out, or is answered with a `hub.error` whose
    `retryable` is true, it may send the claim again, with the same `runtime_id` and token and a new
    `message_id` and `sent_at`, until the dispatch's `claim.expires_at`. It never claims after that
    instant.
-5. In every other case it does no work: it reads no source and writes no object. It reports
+7. In every other case it does no work: it reads no source and writes no object. It reports
    `transcode.unclaimed` where it would have reported a result, with `cause` `refused` (a
    `hub.error` that is not retryable, or still retryable at the expiry; `hub_error_code` is that
    error's code), `unreachable` (no answer until the expiry) or `invalid_answer` (any other answer,
@@ -572,12 +605,28 @@ before the token is looked at. The rows are tried in order and the first that ma
 |---|---|---|
 | 1 | the token is not the dispatch's | `hub.error` `invalid_bootstrap_token` |
 | 2 | an execution was granted for the dispatch to another `runtime_id`, whatever became of it since | `hub.error` `claim_conflict`: no authority and no new execution, also after that execution ended or its deadline passed |
-| 3 | an execution was granted to this same `runtime_id` and the Hub still holds it as the dispatch's execution (it has not ended and the Hub has not withdrawn it) | the same grant again: identity, `runtime_id`, `generation_id` and `output` identical, `message_id` and `sent_at` new. A limit that is reached never refuses this row: the granted execution is what holds the limit's place |
+| 3 | an execution was granted to this same `runtime_id` and the Hub still holds it as the dispatch's execution (it has not ended and the Hub has not withdrawn it) | the same grant again: identity, `runtime_id`, `generation_id`, `output` and `media_key` identical, `message_id` and `sent_at` new. A limit that is reached never refuses this row: the granted execution is what holds the limit's place |
 | 4 | an execution was granted to this same `runtime_id` and it has ended or the Hub has withdrawn it (the organization was suspended, the work was cancelled) | `hub.error` `claim_refused` |
 | 5 | no execution was granted and the dispatch's bootstrap has expired | `hub.error` `dispatch_expired` |
 | 6 | no execution was granted and the Hub's records no longer authorize the work for a reason no semantic check names (the organization is suspended, a limit is reached) | `hub.error` `claim_refused` |
-| 7 | otherwise | it mints `execution_id` (a fresh UUID, also the generation id), sets `execution_fence`, binds them to the claim's `runtime_id`, consumes the bootstrap and answers `transcode.claim.granted` |
+| 7 | otherwise | it mints `execution_id` (a fresh UUID, also the generation id), sets `execution_fence`, binds them to the claim's `runtime_id`, consumes the bootstrap and answers `transcode.claim.granted`, with the dispatch's media key (`media_key_id` as dispatched) when the dispatch is encrypted |
 
+* The media key travels only in the claim response, and the claim address is served only over TLS
+  (15.1, rule 2); the claim route never redirects a plain-HTTP request to HTTPS. A claim that
+  reached the Hub without TLS, on its own connection or as its trusted TLS terminator reports, is
+  never decided by the table and gets no grant. That refusal is not a backstop: a claim that
+  travelled in cleartext has exposed its token and signature, and a captured copy replayed over TLS
+  can be granted. Only 15.1's rule 2 keeps a claim off a cleartext path. Where TLS ends before the
+  claim core (a reverse proxy or a CDN in front of the Hub), that terminator and the link from it
+  to the claim core (a private network, or TLS again) see the key and are part of the trusted
+  path; a deployment names both in its runbook (B14). The Hub never logs or stores a grant body.
+* Row 3 repeats the key to any valid claim that carries the dispatch's token and the granted
+  `runtime_id`, for as long as the Hub holds the execution; the Hub never logs a claim body and
+  never exposes a granted `runtime_id`. A claim body is therefore as sensitive as the key it can
+  fetch: whoever holds a valid one, captured or built with the worker's signing key and the
+  dispatch's token, obtains the key at row 7 or row 3. That is why 15.1's rules 2 and 5 (the
+  worker) and this section's TLS-only route and logging rule (the Hub) keep claim bodies off any
+  untrusted path and out of every log.
 * A deleted or superseded video has a higher `lifecycle_revision`, and a moved organization a
   higher `placement_epoch`: those claims fail S12 or S11 before the table applies.
 * The dedupe step of section 12 does not apply to a claim: a claim whose `message_id` repeats an
@@ -591,8 +640,15 @@ before the token is looked at. The rows are tried in order and the first that ma
 
 ### 15.3 Outside this version
 
-The grant carries no storage credential, no media key, no lease and no deadline: the worker still
-holds its configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its
-run. Narrow credentials issued with the grant, the lease and its renewal are B07's and arrive as
-a later protocol version that both sides list before either writes it (C5). The claim address,
-its route and the literal layout of `output.prefix` are the Hub's, outside the contract.
+The grant carries no storage credential, no lease and no deadline: the worker still holds its
+configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its run. It
+carries the media key since the amendment of 2026-10-10 (C1b): the plan's protected channel, so the
+dispatch never needs one. Narrow credentials issued with the grant, the lease and its renewal are
+B07's and arrive as a later protocol version that both sides list before either writes it (C5);
+those credentials will replace the configured access profile that `credential_ref` names, the
+dispatch still naming the location (section 7, "Reaching a location"). Until then one configured
+profile can reach every organization's bucket, so a Hub defect that paired a `location_id` with
+another location's `bucket` would put the output in the wrong bucket: no semantic check compares
+them, and the residual risk is accepted until B07's scoped credentials (publication still fails
+closed, the manifest being read from the named location). The claim address, its
+route and the literal layout of `output.prefix` are the Hub's, outside the contract.

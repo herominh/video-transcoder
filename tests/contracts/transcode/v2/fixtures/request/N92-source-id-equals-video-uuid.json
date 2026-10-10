@@ -17,12 +17,16 @@
   "source": {
     "source_id": "22222222-2222-7222-8222-222222222222",
     "location_id": "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa",
+    "bucket": "test-source-bucket",
+    "credential_ref": "default",
     "object_key": "test/sources/source-0001.mp4",
     "size_bytes": 734003200,
     "etag": "test-etag-0001"
   },
   "output": {
-    "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"
+    "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
+    "bucket": "test-output-bucket",
+    "credential_ref": "default"
   },
   "profile": {
     "id": "test-h264-sdr",

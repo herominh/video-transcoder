@@ -64,6 +64,7 @@ REQUIRED_FIELDS: dict[tuple[str, str, str], list[str]] = {
         *DISPATCH_IDENTITY,
         "expect.output_location_id",
         "expect.runtime_id",
+        "expect.encryption",
     ],
     ("hub_sender", REQUEST, "dispatch"): [
         *SIGNED_ENVELOPE,
@@ -79,6 +80,7 @@ REQUIRED_FIELDS: dict[tuple[str, str, str], list[str]] = {
         *EXECUTION_IDENTITY,
         "expect.output_location_id",
         "expect.runtime_id",
+        "expect.encryption",
     ],
     **{("hub_receiver", kind, "storage" if kind == MANIFEST else "push"): fields
        for kind, fields in RECEIVER_REQUIREMENTS.items()},

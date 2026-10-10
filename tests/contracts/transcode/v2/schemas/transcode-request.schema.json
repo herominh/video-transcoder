@@ -49,6 +49,8 @@
       "required": [
         "source_id",
         "location_id",
+        "bucket",
+        "credential_ref",
         "object_key",
         "size_bytes",
         "etag"
@@ -59,6 +61,12 @@
         },
         "location_id": {
           "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "bucket": {
+          "$ref": "common.schema.json#/$defs/bucket"
+        },
+        "credential_ref": {
+          "$ref": "common.schema.json#/$defs/credential_ref"
         },
         "object_key": {
           "$ref": "common.schema.json#/$defs/object_key"
@@ -77,11 +85,19 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "location_id"
+        "location_id",
+        "bucket",
+        "credential_ref"
       ],
       "properties": {
         "location_id": {
           "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "bucket": {
+          "$ref": "common.schema.json#/$defs/bucket"
+        },
+        "credential_ref": {
+          "$ref": "common.schema.json#/$defs/credential_ref"
         }
       }
     },
