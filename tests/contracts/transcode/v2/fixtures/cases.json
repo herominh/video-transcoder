@@ -313,8 +313,8 @@
       "id": "P24",
       "payload": "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json",
       "context": "fixtures/contexts/ctx-worker-claim-grant.json",
-      "rule": "15.2, S18, S21, S29, S30",
-      "purpose": "The grant names the claiming runtime, the minted execution and a prefix that ends in the generation",
+      "rule": "15.2, S18, S21, S29, S30, S31",
+      "purpose": "The grant names the claiming runtime, the minted execution and a prefix that ends in the generation, and carries the encrypted dispatch's media key (a test-only key)",
       "context_needed": true,
       "expect": {
         "outcome": "accept",
@@ -343,6 +343,20 @@
       "context": "fixtures/contexts/ctx-hub-unclaimed-poll.json",
       "rule": "15.1, C14",
       "purpose": "No answer until the expiry: no hub_error_code; sent 3 h before now and read from provider output",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P27",
+      "payload": "fixtures/claim-granted/P27-unencrypted-grant-without-media-key.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant-unencrypted.json",
+      "rule": "S31",
+      "purpose": "An unencrypted dispatch's grant carries no media key",
       "context_needed": true,
       "expect": {
         "outcome": "accept",
@@ -2197,6 +2211,230 @@
         "layer": "semantic",
         "reason": "identity_aliases_video_uuid",
         "instance_path": "/claim/runtime_id"
+      }
+    },
+    {
+      "id": "N133",
+      "payload": "fixtures/claim-granted/P27-unencrypted-grant-without-media-key.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S31",
+      "purpose": "An encrypted dispatch's grant without media_key",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N134",
+      "payload": "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant-unencrypted.json",
+      "rule": "S31",
+      "purpose": "An unencrypted dispatch's grant that carries a media key",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N135",
+      "payload": "fixtures/claim-granted/N135-another-media-key-id.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "S31",
+      "purpose": "media_key.media_key_id names another key than the dispatch's encryption.media_key_id",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N136",
+      "payload": "fixtures/claim-granted/N136-key-hex-uppercase.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "7 secrets",
+      "purpose": "media_key.key_hex in uppercase hex digits",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/media_key/key_hex"
+      }
+    },
+    {
+      "id": "N137",
+      "payload": "fixtures/claim-granted/N137-key-hex-30-digits.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "7 secrets",
+      "purpose": "media_key.key_hex of 30 hex digits (15 bytes)",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/media_key/key_hex"
+      }
+    },
+    {
+      "id": "N138",
+      "payload": "fixtures/claim-granted/N138-media-key-extra-member.json",
+      "context": "fixtures/contexts/ctx-worker-claim-grant.json",
+      "rule": "C6",
+      "purpose": "media_key carries an iv_hex member",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N139",
+      "payload": "fixtures/claim-granted/P27-unencrypted-grant-without-media-key.json",
+      "context": "fixtures/contexts/ctx-hub-sender-claim-grant.json",
+      "rule": "S31",
+      "purpose": "The Hub self-check: an encrypted dispatch's grant without media_key",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N140",
+      "payload": "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json",
+      "context": "fixtures/contexts/ctx-hub-sender-claim-grant-unencrypted.json",
+      "rule": "S31",
+      "purpose": "The Hub self-check: an unencrypted dispatch's grant that carries a media key",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N141",
+      "payload": "fixtures/claim-granted/N135-another-media-key-id.json",
+      "context": "fixtures/contexts/ctx-hub-sender-claim-grant.json",
+      "rule": "S31",
+      "purpose": "The Hub self-check: media_key.media_key_id differs from the dispatch's",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "encryption_mismatch",
+        "instance_path": "/media_key"
+      }
+    },
+    {
+      "id": "N142",
+      "payload": "fixtures/request/N142-media-key-in-the-dispatch.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "C6, 7 secrets",
+      "purpose": "A dispatch that carries a media key at its root: only the claim grant carries one",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": ""
+      }
+    },
+    {
+      "id": "N143",
+      "payload": "fixtures/request/N143-source-bucket-uppercase.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "7 reaching a location",
+      "purpose": "source.bucket in uppercase letters",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/source/bucket"
+      }
+    },
+    {
+      "id": "N144",
+      "payload": "fixtures/request/N144-source-bucket-two-characters.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "7 reaching a location",
+      "purpose": "source.bucket of 2 characters",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/source/bucket"
+      }
+    },
+    {
+      "id": "N145",
+      "payload": "fixtures/request/N145-output-bucket-with-underscore.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "7 reaching a location",
+      "purpose": "output.bucket holds an underscore",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/output/bucket"
+      }
+    },
+    {
+      "id": "N146",
+      "payload": "fixtures/request/N146-output-without-credential-ref.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "7 reaching a location",
+      "purpose": "output without credential_ref",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/output"
+      }
+    },
+    {
+      "id": "N147",
+      "payload": "fixtures/request/N147-source-credential-ref-leading-digit.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "7 reaching a location",
+      "purpose": "source.credential_ref starts with a digit",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/source/credential_ref"
+      }
+    },
+    {
+      "id": "N148",
+      "payload": "fixtures/request/N148-output-credential-ref-secret-looking.json",
+      "context": "fixtures/contexts/ctx-worker-dispatch.json",
+      "rule": "7 secrets, 7 reaching a location",
+      "purpose": "output.credential_ref holds a secret-looking value with '=': a name, never a secret",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/output/credential_ref"
       }
     }
   ]

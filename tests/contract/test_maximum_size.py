@@ -33,7 +33,10 @@ MAX_ARTIFACTS = 25_209
 REL_PATH = "a" * 32 + "/" + "a" * 31 + "/" + "a" * 31 + "/" + "a" * 31
 OBJECT_KEY = "a/" * 255 + "aa"
 BOOTSTRAP_TOKEN = "t" * files.read_json("schemas/common.schema.json")["$defs"]["bootstrap_token"]["maxLength"]
+BUCKET = "b" * files.read_json("schemas/common.schema.json")["$defs"]["bucket"]["maxLength"]
+CREDENTIAL_REF = "r" * files.read_json("schemas/common.schema.json")["$defs"]["credential_ref"]["maxLength"]
 SHA256 = "f" * 64
+KEY_HEX = "f" * 32  # a media key's 16 bytes in hex, as the claim grant's media_key.key_hex writes them
 CODECS = "c" * 32 + "," + "c" * 31
 RENDITIONS = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "240p"]
 
@@ -106,11 +109,13 @@ def worst_cases() -> dict[MessageKind, dict[str, Any]]:
             "source": {
                 "source_id": UUID,
                 "location_id": UUID,
+                "bucket": BUCKET,
+                "credential_ref": CREDENTIAL_REF,
                 "object_key": OBJECT_KEY,
                 "size_bytes": MAX_SOURCE_BYTES,
                 "etag": "e" * 128,
             },
-            "output": {"location_id": UUID},
+            "output": {"location_id": UUID, "bucket": BUCKET, "credential_ref": CREDENTIAL_REF},
             "profile": profile,
             "renditions": RENDITIONS,
             "encryption": encryption,
@@ -222,6 +227,7 @@ def worst_cases() -> dict[MessageKind, dict[str, Any]]:
             "runtime_id": UUID,
             "generation_id": UUID,
             "output": {"location_id": UUID, "prefix": OBJECT_KEY},
+            "media_key": {"media_key_id": UUID, "key_hex": KEY_HEX},
         },
         # The cause `refused` makes the largest report: only it carries hub_error_code, which outweighs the
         # longer names of the other causes.

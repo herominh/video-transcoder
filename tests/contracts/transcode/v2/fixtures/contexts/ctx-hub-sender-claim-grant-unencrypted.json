@@ -26,8 +26,7 @@
     "execution_fence": 2,
     "output_location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
     "encryption": {
-      "mode": "aes-128",
-      "media_key_id": "77777777-7777-7777-8777-777777777777"
+      "mode": "none"
     },
     "runtime_id": "88888888-8888-7888-8888-888888888888"
   }

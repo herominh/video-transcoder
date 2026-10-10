@@ -1,7 +1,7 @@
 {
   "protocol_version": "2.0.0-draft",
   "message_kind": "transcode.request",
-  "message_id": "99999999-9999-7999-8999-000000000199",
+  "message_id": "99999999-9999-7999-8999-000000000242",
   "sent_at": "2029-12-31T23:50:00.000Z",
   "audience": "worker:runpod-test",
   "key_id": "test-hub2wk-k1",
@@ -39,7 +39,8 @@
     "360p"
   ],
   "encryption": {
-    "mode": "none"
+    "mode": "aes-128",
+    "media_key_id": "77777777-7777-7777-8777-777777777777"
   },
   "limits": {
     "max_source_bytes": 10737418240,
@@ -51,5 +52,9 @@
   "claim": {
     "bootstrap_token": "TESTONLYbootstrapTokenNotASecret00000000000",
     "expires_at": "2030-01-01T00:50:00.000Z"
+  },
+  "media_key": {
+    "media_key_id": "77777777-7777-7777-8777-777777777777",
+    "key_hex": "00112233445566778899aabbccddeeff"
   }
 }

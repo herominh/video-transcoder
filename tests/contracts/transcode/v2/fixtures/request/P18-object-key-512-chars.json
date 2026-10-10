@@ -17,12 +17,16 @@
   "source": {
     "source_id": "66666666-6666-7666-8666-666666666666",
     "location_id": "aaaaaaaa-aaaa-7aaa-8aaa-aaaaaaaaaaaa",
+    "bucket": "test-source-bucket",
+    "credential_ref": "default",
     "object_key": "test/sources/sssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss.mp4",
     "size_bytes": 734003200,
     "etag": "test-etag-0001"
   },
   "output": {
-    "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb"
+    "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
+    "bucket": "test-output-bucket",
+    "credential_ref": "default"
   },
   "profile": {
     "id": "test-h264-sdr",

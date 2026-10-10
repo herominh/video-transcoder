@@ -60,6 +60,28 @@
           "$ref": "common.schema.json#/$defs/object_key"
         }
       }
+    },
+    "media_key": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "media_key_id",
+        "key_hex"
+      ],
+      "properties": {
+        "media_key_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "key_hex": {
+          "type": "string",
+          "minLength": 32,
+          "maxLength": 32,
+          "pattern": "^[0-9a-f]{32}$",
+          "not": {
+            "pattern": "[\\x00-\\x1f\\x7f]"
+          }
+        }
+      }
     }
   }
 }

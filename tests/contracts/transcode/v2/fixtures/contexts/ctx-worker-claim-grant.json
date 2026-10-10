@@ -23,6 +23,10 @@
     "attempt_id": "33333333-3333-7333-8333-333333333333",
     "dispatch_id": "44444444-4444-7444-8444-444444444444",
     "output_location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
+    "encryption": {
+      "mode": "aes-128",
+      "media_key_id": "77777777-7777-7777-8777-777777777777"
+    },
     "runtime_id": "88888888-8888-7888-8888-888888888888"
   }
 }
