@@ -228,11 +228,14 @@ def timestamp(moment: datetime) -> str:
 
 
 def encode(message: Mapping[str, Any]) -> bytes:
-    """Compact ASCII JSON in the message's own key order; MessageTooLarge above its kind's byte limit."""
+    """Compact ASCII JSON in the message's own key order; MessageTooLarge above its kind's byte limit.
+
+    Only a kind the worker sends: what it receives is never written again (a grant carries the media key).
+    """
     _require_type("message", message, Mapping)
     kind = message.get("message_kind")
-    if kind not in {item.value for item in MessageKind} or kind == MessageKind.GENERATION_MANIFEST.value:
-        raise ValueError("encode() takes a message whose message_kind the contract defines")
+    if kind not in {item.value for item in _SENT_IDENTITIES}:
+        raise ValueError("encode() takes a message of a kind the worker sends")
     _refuse_floats(message, kind)
     encoded = json.dumps(message, ensure_ascii=True, separators=(",", ":"), allow_nan=False).encode("ascii")
     limit = load_registry().max_bytes(kind)
@@ -252,6 +255,7 @@ def seal(message_bytes: bytes, key: bytes) -> str:
 def _envelope(
     kind: MessageKind, *, protocol_version: str, message_id: str, sent_at: datetime, key_id: str, cell_id: str
 ) -> dict[str, Any]:
+    _require_type("sent_at", sent_at, datetime)
     return {
         "protocol_version": protocol_version,
         "message_kind": kind.value,
@@ -487,6 +491,7 @@ def worker_sender_context(
         raise ValueError(f"the worker does not send {message_kind.value}")
     _require_type("identity", identity, expected_identity)
     _require_type("settings", settings, WorkerSettings)
+    _require_type("now", now, datetime)
     expect: dict[str, Any] = identity.to_dict()
     for name, value in (("source_id", source_id), ("output_location_id", output_location_id)):
         if value is not None:
@@ -529,6 +534,8 @@ def receiver_context(
     """
     message_kind = MessageKind(kind)
     _require_type("settings", settings, WorkerSettings)
+    if now is not None:
+        _require_type("now", now, datetime)
     data: dict[str, Any] = {
         "context_version": CONTEXT_VERSION,
         "role": Role.WORKER_RECEIVER.value,

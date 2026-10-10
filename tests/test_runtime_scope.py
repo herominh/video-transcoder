@@ -13,7 +13,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_PACKAGE = "core.protocol"
-ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py"]
+ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py", "wrappers/docker_server.py"]
 
 
 def _module_path(module: str) -> Path | None:

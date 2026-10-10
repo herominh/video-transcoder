@@ -1,5 +1,6 @@
 """The start-up check accepts only the pinned tree: every way a copy can drift from it is refused."""
 
+import errno
 import os
 import re
 import shutil
@@ -14,6 +15,9 @@ from core.protocol.files import ContractTreeInvalid, verify_contract_tree
 TAMPERED_FILE = "limits.json"
 REMOVED_FILE = "versions.json"
 UNLISTED_FILE = "schemas/extra.schema.json"
+UNREADABLE_FILE = "reason-codes.json"
+# What a hostile file name appends to forge a second log line.
+FORGED_LOG_LINE = "\nINFO forged line"
 # A recursive walk needs a stack frame per level: the deep-tree test leaves the walk fewer frames than the
 # tree has levels (a shallow tree and a lowered limit, so every filesystem and platform can hold it).
 DEEP_TREE_LEVELS = 150
@@ -121,6 +125,33 @@ def test_verify_contract_tree_when_sha256sums_is_missing_should_refuse(tree_copy
     # Act / Assert
     with pytest.raises(ContractTreeInvalid, match="SHA256SUMS is missing"):
         verify_contract_tree(root=tree_copy)
+
+
+def test_verify_contract_tree_when_a_listed_file_cannot_be_read_should_refuse_naming_it_on_one_line(
+    tree_copy: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # Arrange: reading one listed file fails as the system reports it, under a name that holds a line break
+    # (no chmod: a container runs the suite as root, which reads any file).
+    unreadable = tree_copy / UNREADABLE_FILE
+    reported_name = f"{unreadable}{FORGED_LOG_LINE}"
+    read_bytes = Path.read_bytes
+
+    def read_bytes_unless_unreadable(path: Path) -> bytes:
+        if path == unreadable:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), reported_name)
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes_unless_unreadable)
+
+    # Act
+    with pytest.raises(ContractTreeInvalid) as raised:
+        verify_contract_tree(root=tree_copy)
+
+    # Assert: the name is shown by its repr, so the refusal stays one line.
+    message = str(raised.value)
+    assert "cannot be read" in message
+    assert repr(reported_name) in message
+    assert "\n" not in message
 
 
 @pytest.mark.skipif(

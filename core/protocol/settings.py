@@ -5,7 +5,8 @@ Everything here comes from the worker's own configuration, never from a message:
     VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of protocol versions versions.json defines; a draft is
                                     accepted only when listed here, and there is no default
     VH_WORKER_AUDIENCE              this worker's audience, `worker:<name>` (the contract audience)
-    VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids
+    VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids and
+                                    distinct keys
     VH_WORKER_TO_HUB_KEY_ID         the id of the one key this worker signs with (not a Hub-to-worker id)
     VH_WORKER_TO_HUB_KEY            that key (not the bytes of a Hub-to-worker key: the check is on the
                                     exact bytes, the paste error it exists for)
@@ -238,7 +239,11 @@ def _hub_to_worker_keys(env: Mapping[str, str]) -> dict[str, bytes]:
         _key_id(HUB_KEYS_VARIABLE, key_id, where)
         if key_id in keys:
             raise SettingsInvalid(HUB_KEYS_VARIABLE, f"{where}repeats a key id")
-        keys[key_id] = _key(HUB_KEYS_VARIABLE, key_hex, where)
+        key = _key(HUB_KEYS_VARIABLE, key_hex, where)
+        if key in keys.values():
+            # Two ids for one key would make a rotation rotate nothing, and a message's key id name nothing.
+            raise SettingsInvalid(HUB_KEYS_VARIABLE, f"{where}repeats a key")
+        keys[key_id] = key
     return keys
 
 

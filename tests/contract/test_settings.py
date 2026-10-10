@@ -2,11 +2,14 @@
 
 import re
 import traceback
+from dataclasses import FrozenInstanceError
 from typing import Any, Iterator, Mapping
+from urllib.parse import SplitResult
 
 import pytest
 
 from core.protocol import files
+from core.protocol import settings as worker_settings
 from core.protocol.settings import (
     MAX_HUB_TO_WORKER_KEYS,
     SettingsInvalid,
@@ -91,6 +94,14 @@ NOT_URL_CHARACTERS = {
     "pipe": "|",
     "right-brace": "}",
 }
+# The longest DNS label and host name (RFC 1035), and the highest port.
+MAX_LABEL_LENGTH = 63
+MAX_HOST_NAME_LENGTH = 253
+HIGHEST_PORT = 65535
+# Brackets around what is not an IPv6 address. A current urlsplit() refuses this URL itself (seen on 3.12.0
+# and on the worker image's 3.10.12); one without that check returns this split, the host unread (seen on 3.9.6).
+BRACKETED_IPV4_URL = "https://[1.2.3.4]/claim"
+BRACKETED_IPV4_SPLIT = SplitResult(scheme="https", netloc="[1.2.3.4]", path="/claim", query="", fragment="")
 
 
 def _env(**changes: str | None) -> dict[str, str]:
@@ -130,6 +141,12 @@ def _shown_as(variable: str) -> tuple[str, str]:
 
 def _keys(count: int) -> str:
     return ",".join(f"hub-key-{index:02d}={index:02x}" + "ab" * 31 for index in range(count))
+
+
+def _host_name(length: int) -> str:
+    """A host name exactly `length` characters long: labels of the longest length, then a shorter last one."""
+    full_labels, last_label_length = divmod(length, MAX_LABEL_LENGTH + 1)
+    return ".".join(["a" * MAX_LABEL_LENGTH] * full_labels + ["a" * last_label_length])
 
 
 class _RecordingEnv(Mapping[str, str]):
@@ -197,6 +214,10 @@ def test_from_env_when_loaded_should_be_immutable():
         settings.hub_to_worker_keys["another-key"] = b"x" * 32  # type: ignore[index]
     with pytest.raises(TypeError):
         settings.storage_profiles["another"] = settings.storage_profile("default")  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        settings.claim_url = "https://elsewhere.test.invalid/claim"  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        settings.storage_profile("default").endpoint = "https://elsewhere.test.invalid"  # type: ignore[misc]
 
 
 @pytest.mark.parametrize("variable", REQUIRED_VARIABLES)
@@ -212,7 +233,8 @@ def test_from_env_when_a_required_variable_is_missing_should_refuse_naming_it(va
     assert str(refusal) == f"{shown} {lead_in}is required"
 
 
-@pytest.mark.parametrize("variable", REQUIRED_VARIABLES)
+# VH_CLOCK_SKEW_S has a default, which an empty value must not take: empty is not absent.
+@pytest.mark.parametrize("variable", [*REQUIRED_VARIABLES, "VH_CLOCK_SKEW_S"])
 def test_from_env_when_a_variable_is_empty_should_refuse_naming_it(variable):
     # Arrange
     shown, lead_in = _shown_as(variable)
@@ -266,9 +288,16 @@ def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
         ("3.0.0-draft", "versions.json"),
         ("2.0.0", "versions.json"),
         ("2.0.0-draft,2.0.0-draft", "twice"),
+        ("2.0.0-draft , 2.0.0-draft", "twice"),
         ("2.0.0-draft,", "empty entry"),
     ],
-    ids=["another-major", "the-release-versions-json-does-not-define", "listed-twice", "empty-entry"],
+    ids=[
+        "another-major",
+        "the-release-versions-json-does-not-define",
+        "listed-twice",
+        "listed-twice-with-spaces-around-the-comma",
+        "empty-entry",
+    ],
 )
 def test_from_env_when_the_accepted_versions_break_a_rule_should_refuse(value, rule):
     # Act
@@ -339,6 +368,7 @@ def test_max_hub_to_worker_keys_when_compared_with_the_context_schema_should_equ
         (f"test-hub2wk-k1={HUB_KEY_HEX[:-1]}", "entry 1: the key must be lowercase hex"),
         (f"test-hub2wk-k1={HUB_KEY_HEX[:-2]}", "entry 1: the key must be at least 32 bytes"),
         (f"test-hub2wk-k1={HUB_KEY_HEX},test-hub2wk-k1={SECOND_HUB_KEY_HEX}", "entry 2: repeats a key id"),
+        (f"test-hub2wk-k1={HUB_KEY_HEX},test-hub2wk-k2={HUB_KEY_HEX}", "entry 2: repeats a key"),
         (f"test-hub2wk-k1={HUB_KEY_HEX},,", "empty entry"),
     ],
     ids=[
@@ -350,6 +380,7 @@ def test_max_hub_to_worker_keys_when_compared_with_the_context_schema_should_equ
         "key-odd-hex-digits",
         "key-31-bytes",
         "key-id-repeated",
+        "key-repeated-under-another-id",
         "empty-entry",
     ],
 )
@@ -411,6 +442,12 @@ def test_from_env_when_the_worker_key_breaks_a_rule_should_refuse(changes, varia
         ("https://hub.test.0x7f000001/claim", NOT_AN_HTTPS_URL),
         ("https://999.999.999.999/claim", NOT_AN_HTTPS_URL),
         ("https://1.2.3.4.5/claim", NOT_AN_HTTPS_URL),
+        ("https://[::1/claim", NOT_AN_HTTPS_URL),
+        (BRACKETED_IPV4_URL, NOT_AN_HTTPS_URL),
+        (f"https://hub.test.invalid:{HIGHEST_PORT + 1}/claim", NOT_AN_HTTPS_URL),
+        ("https://a-.example/claim", NOT_AN_HTTPS_URL),
+        (f"https://{'a' * (MAX_LABEL_LENGTH + 1)}.example/claim", NOT_AN_HTTPS_URL),
+        (f"https://{_host_name(MAX_HOST_NAME_LENGTH + 1)}/claim", NOT_AN_HTTPS_URL),
         ("https://user:password@hub.test.invalid/claim", CARRIES_USERINFO),
         ("https://user@hub.test.invalid/claim", CARRIES_USERINFO),
         ("https://hub.test.invalid/claim#part", CARRIES_A_FRAGMENT),
@@ -439,6 +476,12 @@ def test_from_env_when_the_worker_key_breaks_a_rule_should_refuse(changes, varia
         "host-ending-in-a-hex-number",
         "ipv4-address-out-of-range",
         "ipv4-address-of-five-parts",
+        "bracket-not-closed",
+        "brackets-around-an-ipv4-address",
+        "port-one-above-the-highest",
+        "label-ending-with-a-hyphen",
+        "label-one-character-too-long",
+        "host-name-one-character-too-long",
         "user-and-password",
         "user",
         "fragment",
@@ -452,8 +495,30 @@ def test_from_env_when_a_url_is_not_a_bare_https_url_should_refuse(variable, val
     # Act
     refusal = _refusal(_env(**{variable: value}))
 
-    # Assert
+    # Assert: and no parser's own error rides along, hidden or not: urlsplit() refuses some of these itself
+    # (a bracket that is not closed), with an error that can quote the value.
     assert (refusal.variable, refusal.rule) == (shown, lead_in + rule)
+    assert refusal.__context__ is None
+
+
+@pytest.mark.parametrize("variable", URL_VARIABLES)
+def test_from_env_when_the_url_parser_does_not_read_the_brackets_should_still_refuse_a_host_that_is_not_ipv6(
+    variable, monkeypatch: pytest.MonkeyPatch
+):
+    # Arrange: a parser without the bracket check, which splits this URL instead of refusing it.
+    split_by_this_interpreter = worker_settings.urlsplit
+    monkeypatch.setattr(
+        worker_settings,
+        "urlsplit",
+        lambda url: BRACKETED_IPV4_SPLIT if url == BRACKETED_IPV4_URL else split_by_this_interpreter(url),
+    )
+    shown, lead_in = _shown_as(variable)
+
+    # Act
+    refusal = _refusal(_env(**{variable: BRACKETED_IPV4_URL}))
+
+    # Assert
+    assert (refusal.variable, refusal.rule) == (shown, lead_in + NOT_AN_HTTPS_URL)
 
 
 @pytest.mark.parametrize("variable", URL_VARIABLES)
@@ -472,8 +537,26 @@ def test_from_env_when_a_url_holds_a_character_no_url_can_hold_should_refuse(var
 
 @pytest.mark.parametrize(
     "url",
-    ["https://hub.test.invalid:8443/claim?x=1", "https://[::1]:8443/claim", "https://127.0.0.1/claim"],
-    ids=["name-with-port-and-query", "bracketed-ipv6-with-port", "ipv4-address"],
+    [
+        "https://hub.test.invalid:8443/claim?x=1",
+        "https://[::1]:8443/claim",
+        "https://127.0.0.1/claim",
+        f"https://hub.test.invalid:{HIGHEST_PORT}/claim",
+        "HTTPS://Hub.Test.Invalid/claim",
+        "https://hub/claim",
+        f"https://{'a' * MAX_LABEL_LENGTH}.example/claim",
+        f"https://{_host_name(MAX_HOST_NAME_LENGTH)}/claim",
+    ],
+    ids=[
+        "name-with-port-and-query",
+        "bracketed-ipv6-with-port",
+        "ipv4-address",
+        "the-highest-port",
+        "upper-case-scheme-and-host",
+        "single-label",
+        "label-of-the-longest-length",
+        "host-name-of-the-longest-length",
+    ],
 )
 def test_from_env_when_a_url_names_a_host_with_an_optional_port_should_hold_it_unchanged(url):
     # Act
@@ -527,6 +610,18 @@ def test_from_env_when_two_profiles_are_configured_should_map_each_ref_to_its_va
         "eu-archive-secret",
     )
     assert settings.storage_profile("default").region == "auto"
+
+
+def test_from_env_when_the_profile_list_has_spaces_around_its_comma_should_load_both_profiles():
+    # Arrange: the two profiles of TWO_PROFILES_ENV, their list written with a space on each side of the comma.
+    env = _env(**{**TWO_PROFILES_ENV, "VH_STORAGE_PROFILES": "default , eu-archive"})
+
+    # Act
+    settings = WorkerSettings.from_env(env)
+
+    # Assert: each entry is the ref without its spaces.
+    assert tuple(settings.storage_profiles) == ("default", "eu-archive")
+    assert settings.storage_profile("eu-archive").endpoint == TWO_PROFILES_ENV["VH_STORAGE_EU_ARCHIVE_ENDPOINT"]
 
 
 @pytest.mark.parametrize(
@@ -655,6 +750,8 @@ def _canaries_in(shown: str) -> list[str]:
         {"VH_STORAGE_DEFAULT_ENDPOINT": f"http://storage.test.invalid/{SECRET_ACCESS_KEY}"},
         {"VH_STORAGE_PROFILES": WORKER_KEY_HEX},
         {"VH_STORAGE_PROFILES": f"default,{WORKER_KEY_HEX}"},
+        {"VH_STORAGE_PROFILES": SECRET_ACCESS_KEY},
+        {"VH_STORAGE_PROFILES": f"default,{WORKER_KEY_HEX.upper()}"},
     ],
     ids=[
         "hub-key-upper-case",
@@ -673,6 +770,8 @@ def _canaries_in(shown: str) -> list[str]:
         "endpoint-plain-http-with-secret-path",
         "profile-list-holding-a-key",
         "profile-list-holding-a-key-as-its-second-entry",
+        "profile-list-holding-a-secret-that-is-no-credential-ref",
+        "profile-list-holding-an-upper-case-key-as-its-second-entry",
     ],
 )
 def test_from_env_when_a_refused_value_holds_a_secret_should_never_show_it(changes):
@@ -719,3 +818,53 @@ def test_from_env_when_only_the_v1_variables_are_set_should_refuse_rather_than_f
 
     # Assert
     assert refusal.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
+
+
+# --- the environment is the mapping handed over, and only that ---------------------------------
+
+
+def test_from_env_when_the_process_environment_holds_a_whole_configuration_should_read_only_the_mapping_given(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Arrange: everything from_env() needs is in the real environment, nothing in the mapping it is given.
+    for variable, value in VALID_ENV.items():
+        monkeypatch.setenv(variable, value)
+
+    # Act
+    refusal = _refusal({})
+
+    # Assert
+    assert (refusal.variable, refusal.rule) == (REQUIRED_VARIABLES[0], "is required")
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("VH_CLOCK_SKEW_S", 300),
+        ("VH_STORAGE_DEFAULT_SECRET_ACCESS_KEY", SECRET_ACCESS_KEY.encode("ascii")),
+    ],
+    ids=["an-integer", "bytes-in-a-storage-variable"],
+)
+def test_from_env_when_a_value_is_not_a_string_should_refuse_saying_so(variable, value):
+    # Arrange: the mapping is typed Mapping[str, str], which stops no caller from handing over another type.
+    # (_refusal() reads every value as text, so it cannot take this environment.)
+    shown, lead_in = _shown_as(variable)
+    env: dict[str, Any] = {**VALID_ENV, variable: value}
+
+    # Act
+    with pytest.raises(SettingsInvalid) as raised:
+        WorkerSettings.from_env(env)
+
+    # Assert
+    assert (raised.value.variable, raised.value.rule) == (shown, lead_in + "must be a string")
+
+
+@pytest.mark.parametrize(
+    "not_a_mapping",
+    [None, [("VH_CLAIM_URL", VALID_ENV["VH_CLAIM_URL"])]],
+    ids=["none", "a-list-of-pairs"],
+)
+def test_from_env_when_the_environment_is_not_a_mapping_should_raise_type_error(not_a_mapping):
+    # Act / Assert
+    with pytest.raises(TypeError, match="mapping"):
+        WorkerSettings.from_env(not_a_mapping)
