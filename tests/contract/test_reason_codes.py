@@ -12,6 +12,9 @@ RESERVED_CODES = {
     "manifest_digest_mismatch",
     "internal_error",
     "service_unavailable",
+    "invalid_bootstrap_token",
+    "claim_conflict",
+    "claim_refused",
 }
 
 
@@ -31,7 +34,7 @@ def test_reason_codes_when_compared_should_match_python_enum():
     assert python_codes == list(registry.reason_code_values())
 
 
-def test_reason_codes_when_scanned_should_reserve_exactly_the_live_path_codes():
+def test_reason_codes_when_scanned_should_reserve_exactly_the_live_path_and_claim_core_codes():
     # Arrange
     registry = ContractRegistry.load()
 

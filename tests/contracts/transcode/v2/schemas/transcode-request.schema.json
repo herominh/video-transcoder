@@ -147,13 +147,7 @@
       ],
       "properties": {
         "bootstrap_token": {
-          "type": "string",
-          "minLength": 43,
-          "maxLength": 43,
-          "pattern": "^[A-Za-z0-9_-]{43}$",
-          "not": {
-            "pattern": "[\\x00-\\x1f\\x7f]"
-          }
+          "$ref": "common.schema.json#/$defs/bootstrap_token"
         },
         "expires_at": {
           "$ref": "common.schema.json#/$defs/timestamp"

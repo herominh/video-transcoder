@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/transcode-claim.schema.json",
+  "title": "Transcode contract v2: transcode.claim (worker to Hub)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "claim"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "transcode.claim"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_dispatch"
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bootstrap_token",
+        "runtime_id"
+      ],
+      "properties": {
+        "bootstrap_token": {
+          "$ref": "common.schema.json#/$defs/bootstrap_token"
+        },
+        "runtime_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        }
+      }
+    }
+  }
+}

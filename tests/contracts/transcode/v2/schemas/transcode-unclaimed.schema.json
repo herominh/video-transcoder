@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/transcode-unclaimed.schema.json",
+  "title": "Transcode contract v2: transcode.unclaimed (worker to Hub)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "runtime_id",
+    "cause"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "transcode.unclaimed"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_dispatch"
+    },
+    "runtime_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "cause": {
+      "type": "string",
+      "enum": [
+        "refused",
+        "unreachable",
+        "invalid_answer"
+      ]
+    },
+    "hub_error_code": {
+      "$ref": "common.schema.json#/$defs/diagnostic_code"
+    }
+  },
+  "if": {
+    "properties": {
+      "cause": {
+        "const": "refused"
+      }
+    },
+    "required": [
+      "cause"
+    ]
+  },
+  "then": {
+    "required": [
+      "hub_error_code"
+    ]
+  },
+  "else": {
+    "not": {
+      "required": [
+        "hub_error_code"
+      ]
+    }
+  }
+}

@@ -32,6 +32,7 @@ MAX_DURATION_MS = 21_600_000
 MAX_ARTIFACTS = 25_209
 REL_PATH = "a" * 32 + "/" + "a" * 31 + "/" + "a" * 31 + "/" + "a" * 31
 OBJECT_KEY = "a/" * 255 + "aa"
+BOOTSTRAP_TOKEN = "t" * files.read_json("schemas/common.schema.json")["$defs"]["bootstrap_token"]["maxLength"]
 SHA256 = "f" * 64
 CODECS = "c" * 32 + "," + "c" * 31
 RENDITIONS = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "240p"]
@@ -120,7 +121,7 @@ def worst_cases() -> dict[MessageKind, dict[str, Any]]:
                 "max_artifact_count": MAX_ARTIFACTS,
                 "max_wall_time_ms": 86_400_000,
             },
-            "claim": {"bootstrap_token": "t" * 43, "expires_at": TIMESTAMP},
+            "claim": {"bootstrap_token": BOOTSTRAP_TOKEN, "expires_at": TIMESTAMP},
         },
         MessageKind.TRANSCODE_PROGRESS: {
             **envelope("transcode.progress"),
@@ -209,6 +210,27 @@ def worst_cases() -> dict[MessageKind, dict[str, Any]]:
             "total_bytes": 1_099_511_627_776,
             "artifacts": [artifact] * MAX_ARTIFACTS,
             "diagnostics": diagnostics,
+        },
+        MessageKind.TRANSCODE_CLAIM: {
+            **envelope("transcode.claim"),
+            "identity": identity,
+            "claim": {"bootstrap_token": BOOTSTRAP_TOKEN, "runtime_id": UUID},
+        },
+        MessageKind.TRANSCODE_CLAIM_GRANTED: {
+            **envelope("transcode.claim.granted"),
+            "identity": identity_execution,
+            "runtime_id": UUID,
+            "generation_id": UUID,
+            "output": {"location_id": UUID, "prefix": OBJECT_KEY},
+        },
+        # The cause `refused` makes the largest report: only it carries hub_error_code, which outweighs the
+        # longer names of the other causes.
+        MessageKind.TRANSCODE_UNCLAIMED: {
+            **envelope("transcode.unclaimed"),
+            "identity": identity,
+            "runtime_id": UUID,
+            "cause": "refused",
+            "hub_error_code": "d" * 48,
         },
     }
 

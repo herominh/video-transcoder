@@ -49,7 +49,7 @@ verdict `{accepted, layer, reason, instance_path}`. Layers run in this order; th
 | 3 | `version` (L2) | version, then kind; selects the schema |
 | 4 | `size` (L0 b) | raw byte count against the selected kind's limit |
 | 5 | `schema` (L3) | JSON Schema 2020-12 of the selected kind |
-| 6 | `semantic` (L4) | checks S1-S28 against the trusted context |
+| 6 | `semantic` (L4) | checks S1-S30 against the trusted context |
 
 * An accepted verdict has `layer`, `reason` and `instance_path` all null.
 * L1 yields `parse` / `malformed_json`, except its token budget, which yields `size` /
@@ -138,9 +138,10 @@ In this order:
 
 1. The version field is absent, not a string, or not in the accepted versions:
    `version` / `unsupported_version`, pointer `/protocol_version` (manifest: `/manifest_version`).
-2. The kind field is absent, not a string, or not one of the six known kinds (`transcode.request`,
+2. The kind field is absent, not a string, or not one of the nine known kinds (`transcode.request`,
    `transcode.progress`, `transcode.result.completed`, `transcode.result.failed`, `hub.error`,
-   `generation.manifest`): `version` / `unknown_message_kind`, pointer `/message_kind`
+   `generation.manifest`, `transcode.claim`, `transcode.claim.granted`, `transcode.unclaimed`):
+   `version` / `unknown_message_kind`, pointer `/message_kind`
    (manifest: `/document_kind`).
 3. The kind is known but not in `accepted_message_kinds`: `version` / `unexpected_message_kind`, same
    pointer as 2.
@@ -157,6 +158,9 @@ Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no versio
 | `transcode.result.failed` | `schemas/transcode-result-failed.schema.json` |
 | `hub.error` | `schemas/hub-error.schema.json` |
 | `generation.manifest` | `schemas/generation-manifest.schema.json` |
+| `transcode.claim` | `schemas/transcode-claim.schema.json` |
+| `transcode.claim.granted` | `schemas/transcode-claim-granted.schema.json` |
+| `transcode.unclaimed` | `schemas/transcode-unclaimed.schema.json` |
 
 * JSON Schema draft 2020-12. Every schema file of `schemas/` and `carriers/` is registered locally
   under its `$id` before validation. A `$ref` that names anything else must fail; nothing is ever
@@ -194,10 +198,14 @@ Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no versio
 | `transcode.result.failed` | worker to Hub | 16,384 | envelope, full identity, typed error, optional source, encoder, diagnostics, `ext` |
 | `hub.error` | Hub to worker (HTTP body) | 2,048 | version, kind, id, `sent_at`, error; **no** audience, key id or identity; unsigned in B03 |
 | `generation.manifest` | stored by the worker, read by the Hub | 8,388,608 | manifest version, kind, generation, identity (no cell, epoch, revision), profile, encryption, media, renditions, paths, inventory |
+| `transcode.claim` | worker to Hub (HTTP request body) | 4,096 | envelope, identity without execution fields, `claim` with the dispatch's `bootstrap_token` and the runtime's `runtime_id` |
+| `transcode.claim.granted` | Hub to worker (HTTP response body) | 4,096 | envelope, full identity, `runtime_id`, `generation_id`, `output` with `location_id` and the generation `prefix` |
+| `transcode.unclaimed` | worker to Hub | 4,096 | envelope, identity without execution fields, `runtime_id`, `cause`, `hub_error_code` when the cause is `refused` |
 
 Envelope = `protocol_version`, `message_kind`, `message_id`, `sent_at`, `audience`, `key_id`.
 Identity = `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`,
-`attempt_id`, `dispatch_id`, plus `execution_id` and `execution_fence` on progress and results. The
+`attempt_id`, `dispatch_id`, plus `execution_id` and `execution_fence` on progress, results and the
+claim grant. The
 manifest identity is `org_uuid`, `video_uuid`, `source_id`, `attempt_id`, `dispatch_id`,
 `execution_id`.
 
@@ -216,6 +224,15 @@ fences and revisions up to 9,007,199,254,740,991 (2^53 - 1); at most 25,209 arti
 segments per rendition. The HLS segment duration is fixed platform-wide (6 s, carried by the media
 profile) and is not a request field.
 
+The claim kinds: `runtime_id` is a lowercase UUID. `output.prefix` is an object key (at most 512
+characters, no leading or trailing `/`, no `.` or `..` segment); the contract fixes no literal
+layout, only that its last segment is the generation (S30). `cause` is one of `refused`,
+`unreachable`, `invalid_answer`; `hub_error_code` is required when the cause is `refused` and
+forbidden otherwise. It repeats the `error.code` of the refusing `hub.error`; its schema is the
+shape of a reason code, not the enum of this version, so this kind's schema does not change when
+a later version adds a code (a worker still accepts only a `hub.error` whose code its own version
+lists; any other answer is `invalid_answer`). The claim kinds carry no `ext`. Section 15 holds the rules of the exchange.
+
 ## 8. L4: semantic checks
 
 ### 8.1 Timestamps, freshness, comparisons
@@ -232,7 +249,7 @@ profile) and is not a request field.
 
 ### 8.2 The checks
 
-The checks run in the order S1 to S28, restricted to the ones that apply (8.3). The first failing check
+The checks run in the order S1 to S30, restricted to the ones that apply (8.3). The first failing check
 is the verdict: layer `semantic`, its reason and its pointer. Each check reports at most one pointer,
 chosen by the rule in the table.
 
@@ -244,7 +261,7 @@ chosen by the rule in the table.
 | S4 | `sent_at_ms > now_ms + skew_ms` | `timestamp_in_future` | `/sent_at` |
 | S5 | `sent_at_ms < now_ms - skew_ms` (channel `push` only) | `timestamp_out_of_tolerance` | `/sent_at` |
 | S6 | `claim.expires_at_ms <= sent_at_ms`, or `now_ms > claim.expires_at_ms + skew_ms` | `dispatch_expired` | `/claim/expires_at` |
-| S7 | one of these ids equals `identity.video_uuid`, checked in this order: `identity.attempt_id`, `identity.dispatch_id`, `identity.execution_id` (when present), the source id (`/source/source_id` on request and results when the `source` block is present; `/identity/source_id` on the manifest), `identity.org_uuid` | `identity_aliases_video_uuid` | the pointer of the first aliasing id |
+| S7 | one of these ids equals `identity.video_uuid`, checked in this order: `identity.attempt_id`, `identity.dispatch_id`, `identity.execution_id` (when present), the source id (`/source/source_id` on request and results when the `source` block is present; `/identity/source_id` on the manifest), `identity.org_uuid`, the runtime id (`/claim/runtime_id` on the claim; `/runtime_id` on the claim grant and on `transcode.unclaimed`) | `identity_aliases_video_uuid` | the pointer of the first aliasing id |
 | S8 | `identity.org_uuid != expect.org_uuid` | `org_mismatch` | `/identity/org_uuid` |
 | S9 | `identity.video_uuid != expect.video_uuid` | `video_mismatch` | `/identity/video_uuid` |
 | S10 | `identity.owning_cell_id != expect.owning_cell_id` | `cell_mismatch` | `/identity/owning_cell_id` |
@@ -255,7 +272,7 @@ chosen by the rule in the table.
 | S15 | `identity.execution_id != expect.execution_id` | `execution_mismatch` | `/identity/execution_id` |
 | S16 | `identity.execution_fence` lower / higher than `expect.execution_fence` | `stale_execution_fence` / `execution_mismatch` | `/identity/execution_fence` |
 | S17 | the source id differs from `expect.source_id`; skipped when an optional `source` block is absent (failed result) | `source_mismatch` | `/source/source_id` (request, results), `/identity/source_id` (manifest) |
-| S18 | request: `source.location_id != expect.source_location_id`, then `output.location_id != expect.output_location_id`; completed result: `manifest.location_id != expect.output_location_id` | `storage_location_mismatch` | `/source/location_id`, then `/output/location_id`; `/manifest/location_id` |
+| S18 | request: `source.location_id != expect.source_location_id`, then `output.location_id != expect.output_location_id`; completed result: `manifest.location_id != expect.output_location_id`; claim grant: `output.location_id != expect.output_location_id` | `storage_location_mismatch` | `/source/location_id`, then `/output/location_id`; `/manifest/location_id`; `/output/location_id` |
 | S19 | any of `profile.id`, `profile.version`, `profile.sha256` differs from `expect.profile` | `profile_mismatch` | `/profile` |
 | S20 | `encryption.mode != expect.encryption.mode`, or `media_key_id` differs (absent equals only absent) | `encryption_mismatch` | `/encryption` |
 | S21 | `generation_id != identity.execution_id` | `generation_execution_mismatch` | `/generation_id` |
@@ -266,13 +283,15 @@ chosen by the rule in the table.
 | S26 | with `T` = the number of `thumbnail` artifacts and `D` = whether `diagnostics` holds a code `thumbnail_unavailable`: when `thumbnail_path` is null the check requires `D` and `T == 0`; when it is not null it requires `T == 1` | `thumbnail_diagnostic_missing` | `/thumbnail_path` |
 | S27 | a rendition name (in array order) is not in `expect.renditions` | `rendition_not_requested` | `/renditions/<i>/name` of the first such rendition |
 | S28 | `artifact_count > expect.max_artifact_count`; else a rendition (in array order) has more than `limits.json` `max_segments_per_rendition` (3,600) `hls_segment` artifacts | `limit_exceeded` | `/artifact_count`; else `/renditions/<i>` |
+| S29 | `runtime_id != expect.runtime_id` | `runtime_mismatch` | `/runtime_id` |
+| S30 | the text of `output.prefix` after its last `/` (the whole text when it has none) differs from `generation_id` | `generation_prefix_mismatch` | `/output/prefix` |
 
 ### 8.3 Which checks run
 
 Checks depend on the context's `role`, the selected kind and the channel. A (role, kind) pair
 without a row is not part of the contract (section 9.2). `worker_sender` is the worker's self-check
 before sending and runs exactly what `hub_receiver` runs for the same kind; `hub_sender` is the Hub's
-self-check of its own dispatch.
+self-check of its own dispatch and of its own claim grant.
 
 | Role | Kind | Allowed channels | Checks, in order |
 |---|---|---|---|
@@ -283,6 +302,14 @@ self-check of its own dispatch.
 | `hub_receiver`, `worker_sender` | `transcode.result.completed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 S18 S19 S21 |
 | `hub_receiver`, `worker_sender` | `transcode.result.failed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S17 |
 | `hub_receiver`, `worker_sender` | `generation.manifest` | `storage` | S1 S7 S8 S9 S13 S14 S15 S17 S19 S20 S21 S23 S24 S25 S26 S27 S28 |
+| `hub_receiver`, `worker_sender` | `transcode.claim` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 |
+| `worker_receiver` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S18 S21 S29 S30 |
+| `hub_sender` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S21 S29 S30 |
+| `hub_receiver`, `worker_sender` | `transcode.unclaimed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 |
+
+For the claim grant the worker's `expect` is the identity of the dispatch it accepted, the
+dispatch's `output.location_id` and the `runtime_id` it sent; the worker learns `execution_id` and
+`execution_fence` from the grant, so it runs neither S15 nor S16.
 
 S5 runs only when the channel is `push`: the `poll` channel (provider output read later) waives the
 past bound, and the `dispatch` channel judges the claim expiry instead (S6). The manifest carries no
@@ -300,13 +327,13 @@ it, never taken from the message. `schemas/trusted-context.schema.json` is exact
 | `context_version` | integer 1 | required |
 | `role` | `hub_receiver`, `hub_sender`, `worker_receiver`, `worker_sender` | required |
 | `channel` | `push`, `poll`, `dispatch`, `storage` | required; selects message or manifest (2.1) and the freshness rule |
-| `accepted_message_kinds` | 1 to 6 distinct kinds | required |
+| `accepted_message_kinds` | 1 to 9 distinct kinds | required |
 | `now` | timestamp or null | injected clock |
 | `clock_skew_s` | integer 0 to 600 or null | `limits.json` `clock_skew_seconds` (300) in production |
 | `accepted_protocol_versions`, `accepted_manifest_versions` | up to 8 distinct versions, or null | from `versions.json` (`live`; `draft` in tests only); may be empty |
 | `expected_audience` | audience or null | the receiver's own audience (a sender self-check: the target's) |
 | `known_key_ids` | up to 8 distinct key ids, or null | the keys valid for this direction |
-| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`; each optional and nullable |
+| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`; each optional and nullable |
 | `last_event_seq` | integer 0 to 2,147,483,647 or null | highest accepted progress sequence of the execution |
 
 ### 9.2 Construction
@@ -352,6 +379,10 @@ reads it, whatever the channel:
 | `hub_receiver`, `worker_sender` | `transcode.result.completed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.source_id`, `expect.output_location_id`, `expect.profile` |
 | `hub_receiver`, `worker_sender` | `transcode.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.source_id` |
 | `hub_receiver`, `worker_sender` | `generation.manifest` | `accepted_manifest_versions`, `expect.org_uuid`, `expect.video_uuid`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.source_id`, `expect.profile`, `expect.encryption`, `expect.renditions`, `expect.max_artifact_count` |
+| `hub_receiver`, `worker_sender` | `transcode.claim` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id` |
+| `worker_receiver` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.output_location_id`, `expect.runtime_id` |
+| `hub_sender` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.output_location_id`, `expect.runtime_id` |
+| `hub_receiver`, `worker_sender` | `transcode.unclaimed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id` |
 
 `expect.<name>` is missing when `expect` itself is missing or null. An empty version list is present
 (not missing): it makes every message `unsupported_version`.
@@ -365,7 +396,7 @@ reads it, whatever the channel:
 | C3 | Drafts match by exact string; no draft is compatible with another version. |
 | C4 | `versions.json` `live` is empty for both lines in B03; any payload validated under a live context is `unsupported_version`. |
 | C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. |
-| C6 | Every object of every schema has `additionalProperties: false` (the six kinds, the context, the carriers, the catalog), except `ext`. |
+| C6 | Every object of every schema has `additionalProperties: false` (the nine kinds, the context, the carriers, the catalog), except `ext`. |
 | C7 | `ext` is the only extension point: optional on progress and results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
 | C8 | Every identity field is required and non-null, with no default; an identity field equal to `video_uuid` where it names another entity is S7. |
 | C9 | A key id outside the context's set for that direction is `unknown_key_id`; there is no fallback key. |
@@ -405,13 +436,16 @@ manifest itself are never artifacts.
   value (wrong prefix, uppercase, wrong length, not a string) is `false`, never an exception. The key
   must be non-empty bytes (a programming error otherwise). There is no key storage, key lookup or
   header parsing beyond the `hmac-sha256=` prefix.
-* **HTTP carrier** (worker-to-Hub callback, and the `hub.error` response): the body is the message
-  bytes; the header `X-VH-Signature: hmac-sha256=<hex>`. `sent_at` is in the body; there is no
-  timestamp header. `hub.error` is unsigned in B03.
+* **HTTP carrier** (worker-to-Hub callback, the claim request, the claim grant and the `hub.error`
+  response): the body is the message bytes; the header `X-VH-Signature: hmac-sha256=<hex>`, a
+  request header on a worker-to-Hub message and a response header on the claim grant. `sent_at` is
+  in the body; there is no timestamp header. `hub.error` is unsigned in B03. The claim grant is
+  the body of a `200` response and is signed with a Hub-to-worker key; a `transcode.unclaimed`
+  message travels like a result (callback or RunPod output).
 * **RunPod input** (`carriers/runpod-input.schema.json`) validates the value of RunPod's `input`
   object: `{"vh_message": <message text>, "vh_signature": "hmac-sha256=<hex>"}`, nothing else;
   `vh_message` at most 4,096 characters. **RunPod output** (`carriers/runpod-output.schema.json`) is
-  the same shape, returned by the worker handler for both outcomes, `vh_message` at most 16,384
+  the same shape, returned by the worker handler for both outcomes and for a `transcode.unclaimed` report, `vh_message` at most 16,384
   characters. `vh_message` holds only printable ASCII and JSON whitespace (tab, LF, CR); every
   accepted message is ASCII in all its bytes (section 4, step 1, overwritten duplicates included),
   so characters equal bytes, and decoding the JSON string yields the exact message bytes. The raw limits of `limits.json` `carrier_max_bytes` (`runpod.input` 8,448,
@@ -433,7 +467,7 @@ manifest itself are never artifacts.
 ## 13. Limits and reason codes
 
 `limits.json`: `max_bytes` per kind (request 4,096; progress 4,096; completed 16,384; failed 16,384;
-`hub.error` 2,048; manifest 8,388,608), `carrier_max_bytes` (`runpod.input` 8,448, `runpod.output`
+`hub.error` 2,048; manifest 8,388,608; claim, claim grant and unclaimed 4,096 each), `carrier_max_bytes` (`runpod.input` 8,448, `runpod.output`
 33,024), `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
 `max_segments_per_rendition` 3,600. The worst case of every kind (every string at its maximum length
 in the costliest characters, every integer at its maximum, every array full, every optional member
@@ -445,10 +479,13 @@ JSON requires (optionally `/` as `\/`), integers as integer literals. The byte l
 for such writers; receivers accept any JSON text within the byte limit.
 
 `reason-codes.json` lists every code in a fixed order with `layer` (`size`, `parse`, `version`,
-`schema`, `semantic`; reserved codes: `auth`, `dedupe`, `fetch` or null), `http_status` (what B07
+`schema`, `semantic`; reserved codes: `auth`, `dedupe`, `fetch`, `claim` or null), `http_status` (what B07
 returns; null when the code never becomes an HTTP response), `retryable`, `reserved` (not produced by
-the B03 pipeline: `invalid_signature`, `duplicate_message`, `conflicting_terminal_result`,
-`manifest_digest_mismatch`, `internal_error`, `service_unavailable`) and `first_unit`. The PHP and
+the validation pipeline: `invalid_signature`, `duplicate_message`, `conflicting_terminal_result`,
+`manifest_digest_mismatch`, `internal_error`, `service_unavailable`, and the claim core's
+`invalid_bootstrap_token`, `claim_conflict`, `claim_refused`; section 15) and `first_unit`.
+`dispatch_expired` is not reserved: S6 produces it on the worker, and it is also the claim core's
+answer to a claim that arrives after the bootstrap's expiry (section 15.2), with status 410. The PHP and
 Python enums equal this list, and `hub.error`'s `error.code` enum equals it too.
 
 ## 14. The fixture catalog
@@ -466,14 +503,16 @@ file (9.2), validate, and assert:
   (`instance_path` is null for L0 and L1; for `schema` it is the first error both libraries report,
   section 6).
 
-Catalog rules: 21 positive and 114 negative cases, ids `P01`-`P22` and `N01`-`N114` (two or three
+Catalog rules: 25 positive and 132 negative cases, ids `P01`-`P26` and `N01`-`N132` (two or three
 digits). `P17` is retired: it pinned an integer-valued float as accepted, and its payload became
 `N76` when number literals had to be integer literals. Large payloads (`P21`, `N84`, `N112`, `N113`)
 are stored compact; every file stays under 1 MB; every non-reserved reason code is produced by at
 least one negative; every fixture file is used by a case. Each negative starts from a valid positive
 and changes one thing, so it holds one violation at its layer: an L3 negative produces errors only
 at its pinned pointer (in jsonschema's flattened report), and an L4 negative fails only its pinned
-check, except that an S7 case also fails the equality check of the aliased id. A negative may still
+check, except that an S7 case also fails the equality check of the aliased id where its row runs
+one (S13 for N45, S15 for N91); N126, whose row runs no S15, fails S21 instead, and N132 (the
+runtime id, which no equality check of its row reads) fails S7 alone. A negative may still
 break a later layer as a consequence (N27 renames the master playlist, so `master_playlist_path`
 would dangle at L4); the pipeline stops at the first failing layer. N03 (nesting 33, L1) and N70
 (nesting 32, accepted by L1, refused by L3) pin the depth boundary.
@@ -484,4 +523,76 @@ execution and generation `55555555-...`, source `66666666-...`, media key id `77
 location `aaaaaaaa-...`, output location `bbbbbbbb-...`; cell `cell-test-a`, epoch 7, lifecycle
 revision 3, execution fence 2, last event sequence 4; audiences `hub:cell-test-a` and
 `worker:runpod-test`; key ids `test-wk2hub-k1`, `test-wk2hub-k2` (worker to Hub) and
-`test-hub2wk-k1` (Hub to worker); profile `test-h264-sdr` version 1.
+`test-hub2wk-k1` (Hub to worker); profile `test-h264-sdr` version 1; runtime `88888888-...`; generation
+prefix `test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555`.
+
+## 15. The claim exchange
+
+A dispatch names work; it does not name a running process. A provider may start one dispatch more
+than once, and every start receives the same request bytes. The claim turns one of those starts into
+the execution; the others do no work. The validator checks the three messages (sections 7 to 9);
+the rules below bind the worker and the Hub's claim core, which keeps the state.
+
+### 15.1 The worker
+
+1. A runtime is one start of the worker's handler for one dispatch. It draws a fresh random
+   `runtime_id` (a UUID) when it starts, keeps it in memory only, and never reuses it for another
+   start or another dispatch. It never derives it from the dispatch, the provider's job id or any
+   other value a second start could compute: two starts that send the same `runtime_id` are one
+   runtime to the Hub and receive the same execution, and the Hub cannot tell (S7 refuses only
+   the alias of the video's id).
+2. After it accepted the dispatch (`worker_receiver`, `transcode.request`) and before it reads the
+   source or writes any object, it sends `transcode.claim` to the Hub's claim address: the
+   dispatch's identity and `bootstrap_token`, and its `runtime_id`. The claim address comes from
+   the worker's trusted configuration, never from a message.
+3. It may work only after it received a `200` response whose body verifies under a Hub-to-worker
+   key and is an accepted `transcode.claim.granted` (`worker_receiver`, section 8.3). From then on
+   its `execution_id`, `execution_fence` and `generation_id` are the grant's, every object it
+   writes has a key that starts with `output.prefix` followed by `/`, in the location
+   `output.location_id`, and its progress, result and manifest carry that identity.
+4. When the request fails in transport, times out, or is answered with a `hub.error` whose
+   `retryable` is true, it may send the claim again, with the same `runtime_id` and token and a new
+   `message_id` and `sent_at`, until the dispatch's `claim.expires_at`. It never claims after that
+   instant.
+5. In every other case it does no work: it reads no source and writes no object. It reports
+   `transcode.unclaimed` where it would have reported a result, with `cause` `refused` (a
+   `hub.error` that is not retryable, or still retryable at the expiry; `hub_error_code` is that
+   error's code), `unreachable` (no answer until the expiry) or `invalid_answer` (any other answer,
+   a grant that does not verify or is not accepted included). A `hub.error` is unsigned: the worker
+   never acts on one except by not working.
+
+### 15.2 The Hub's claim core
+
+The Hub validates the claim (`hub_receiver`, `transcode.claim`, with the live receiver order of
+section 12) against the dispatch its `dispatch_id` names, then decides in one atomic step. A claim
+whose `dispatch_id` names no dispatch of the Hub is answered `hub.error` `dispatch_mismatch`,
+before the token is looked at. The rows are tried in order and the first that matches decides:
+
+| # | Case | Answer |
+|---|---|---|
+| 1 | the token is not the dispatch's | `hub.error` `invalid_bootstrap_token` |
+| 2 | an execution was granted for the dispatch to another `runtime_id`, whatever became of it since | `hub.error` `claim_conflict`: no authority and no new execution, also after that execution ended or its deadline passed |
+| 3 | an execution was granted to this same `runtime_id` and the Hub still holds it as the dispatch's execution (it has not ended and the Hub has not withdrawn it) | the same grant again: identity, `runtime_id`, `generation_id` and `output` identical, `message_id` and `sent_at` new. A limit that is reached never refuses this row: the granted execution is what holds the limit's place |
+| 4 | an execution was granted to this same `runtime_id` and it has ended or the Hub has withdrawn it (the organization was suspended, the work was cancelled) | `hub.error` `claim_refused` |
+| 5 | no execution was granted and the dispatch's bootstrap has expired | `hub.error` `dispatch_expired` |
+| 6 | no execution was granted and the Hub's records no longer authorize the work for a reason no semantic check names (the organization is suspended, a limit is reached) | `hub.error` `claim_refused` |
+| 7 | otherwise | it mints `execution_id` (a fresh UUID, also the generation id), sets `execution_fence`, binds them to the claim's `runtime_id`, consumes the bootstrap and answers `transcode.claim.granted` |
+
+* A deleted or superseded video has a higher `lifecycle_revision`, and a moved organization a
+  higher `placement_epoch`: those claims fail S12 or S11 before the table applies.
+* The dedupe step of section 12 does not apply to a claim: a claim whose `message_id` repeats an
+  earlier one is decided by the table like any other, never answered `duplicate_message`.
+* A consumed bootstrap never creates a second execution. A replacement needs a new dispatch with
+  a new `dispatch_id` and a new bootstrap.
+* The Hub accepts progress, results and a manifest only from the execution it granted (S15, S16,
+  S21). A `transcode.unclaimed` message settles nothing: it says that one start did no work, never
+  what became of the granted execution.
+* A prefix is granted once and never reused.
+
+### 15.3 Outside this version
+
+The grant carries no storage credential, no media key, no lease and no deadline: the worker still
+holds its configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its
+run. Narrow credentials issued with the grant, the lease and its renewal are B07's and arrive as
+a later protocol version that both sides list before either writes it (C5). The claim address,
+its route and the literal layout of `output.prefix` are the Hub's, outside the contract.

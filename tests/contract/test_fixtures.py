@@ -11,19 +11,18 @@ from tests.contract.registry import load_registry
 
 CATALOG_FILE = "fixtures/cases.json"
 CATALOG_SCHEMA_FILE = "schemas/fixture-catalog.schema.json"
-PAYLOAD_DIRECTORIES = ("request", "progress", "result-completed", "result-failed", "hub-error", "manifest")
-EXPECTED_POSITIVE_IDS = {f"P{number:02d}" for number in range(1, 23)} - {"P17"}  # P17 retired into N76
-EXPECTED_NEGATIVE_IDS = {f"N{number:02d}" for number in range(1, 115)}
+PAYLOAD_DIRECTORIES = (
+    "request", "progress", "result-completed", "result-failed", "hub-error", "manifest", "claim", "claim-granted",
+    "unclaimed",
+)
+EXPECTED_POSITIVE_IDS = {f"P{number:02d}" for number in range(1, 27)} - {"P17"}  # P17 retired into N76
+EXPECTED_NEGATIVE_IDS = {f"N{number:02d}" for number in range(1, 133)}
 
-# S7 flags an id equal to video_uuid; that id necessarily also differs from the recorded one.
-S7_COMPANION_CHECKS = {
-    "/identity/attempt_id": "S13",
-    "/identity/dispatch_id": "S14",
-    "/identity/execution_id": "S15",
-    "/source/source_id": "S17",
-    "/identity/source_id": "S17",
-    "/identity/org_uuid": "S8",
-}
+# README section 14: an S7 case also fails the equality check of the aliased id where its row runs one (S13 for
+# N45, S15 for N91); N126, whose row runs no S15, fails S21 instead. Every other negative fails its pinned check
+# alone: the S7 cases of a row that compares no identity (N90, N92, N93) and N132, whose runtime id no equality
+# check of its row reads.
+S7_COMPANION_CHECK = {"N45": "S13", "N91": "S15", "N126": "S21"}
 
 CATALOG: dict[str, Any] = files.read_json(CATALOG_FILE)
 POSITIVE_CASES = [case for case in CATALOG["cases"] if case["expect"]["outcome"] == "accept"]
@@ -96,8 +95,9 @@ def test_negative_fixture_when_evaluated_should_violate_only_its_own_rule(case):
     else:
         first, others = found[0], found[1:]
         assert (first.reason.value, first.instance_path) == (case["expect"]["reason"], pinned)
-        companion = S7_COMPANION_CHECKS.get(first.instance_path) if first.check == "S7" else None
-        assert all(other.check == companion for other in others), others
+        companion = S7_COMPANION_CHECK.get(case["id"])
+        assert companion is None or first.check == "S7"
+        assert [other.check for other in others] == ([] if companion is None else [companion]), others
 
 
 def test_catalog_when_validated_should_satisfy_catalog_schema():
@@ -108,12 +108,12 @@ def test_catalog_when_validated_should_satisfy_catalog_schema():
     assert pointers == []
 
 
-def test_catalog_when_counted_should_hold_21_positive_and_114_negative_cases():
+def test_catalog_when_counted_should_hold_25_positive_and_132_negative_cases():
     # Act
     counts = (len(POSITIVE_CASES), len(NEGATIVE_CASES))
 
     # Assert
-    assert counts == (21, 114)
+    assert counts == (25, 132)
 
 
 def test_catalog_when_listed_should_hold_exactly_the_expected_case_ids():

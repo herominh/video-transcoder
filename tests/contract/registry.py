@@ -11,7 +11,7 @@ from . import files
 
 
 class MessageKind(str, Enum):
-    """The six kinds of the contract; generation.manifest is a stored document, the others are messages."""
+    """The nine kinds of the contract; generation.manifest is a stored document, the others are messages."""
 
     TRANSCODE_REQUEST = "transcode.request"
     TRANSCODE_PROGRESS = "transcode.progress"
@@ -19,6 +19,9 @@ class MessageKind(str, Enum):
     TRANSCODE_RESULT_FAILED = "transcode.result.failed"
     HUB_ERROR = "hub.error"
     GENERATION_MANIFEST = "generation.manifest"
+    TRANSCODE_CLAIM = "transcode.claim"
+    TRANSCODE_CLAIM_GRANTED = "transcode.claim.granted"
+    TRANSCODE_UNCLAIMED = "transcode.unclaimed"
 
     @property
     def schema_file(self) -> str:
@@ -32,6 +35,9 @@ _SCHEMA_FILES: Mapping[MessageKind, str] = {
     MessageKind.TRANSCODE_RESULT_FAILED: "schemas/transcode-result-failed.schema.json",
     MessageKind.HUB_ERROR: "schemas/hub-error.schema.json",
     MessageKind.GENERATION_MANIFEST: "schemas/generation-manifest.schema.json",
+    MessageKind.TRANSCODE_CLAIM: "schemas/transcode-claim.schema.json",
+    MessageKind.TRANSCODE_CLAIM_GRANTED: "schemas/transcode-claim-granted.schema.json",
+    MessageKind.TRANSCODE_UNCLAIMED: "schemas/transcode-unclaimed.schema.json",
 }
 
 KNOWN_KINDS: frozenset[str] = frozenset(kind.value for kind in MessageKind)

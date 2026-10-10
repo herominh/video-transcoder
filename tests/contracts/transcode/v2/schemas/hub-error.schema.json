@@ -73,12 +73,17 @@
             "thumbnail_diagnostic_missing",
             "rendition_not_requested",
             "limit_exceeded",
+            "runtime_mismatch",
+            "generation_prefix_mismatch",
             "invalid_signature",
             "duplicate_message",
             "conflicting_terminal_result",
             "manifest_digest_mismatch",
             "internal_error",
-            "service_unavailable"
+            "service_unavailable",
+            "invalid_bootstrap_token",
+            "claim_conflict",
+            "claim_refused"
           ]
         },
         "message": {

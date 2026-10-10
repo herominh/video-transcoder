@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from tests.contract import files, schema
+from tests.contract import files, schema, semantic
 from tests.contract.context import ContextIncomplete, ContextInvalid, TrustedContext
 
 CONTEXT_SCHEMA_FILE = "schemas/trusted-context.schema.json"
@@ -17,6 +17,9 @@ COMPLETED = "transcode.result.completed"
 FAILED = "transcode.result.failed"
 HUB_ERROR = "hub.error"
 MANIFEST = "generation.manifest"
+CLAIM = "transcode.claim"
+GRANT = "transcode.claim.granted"
+UNCLAIMED = "transcode.unclaimed"
 
 MESSAGE_GATE = ["accepted_protocol_versions"]
 SIGNED_ENVELOPE = [*MESSAGE_GATE, "expected_audience", "known_key_ids", "now", "clock_skew_s"]
@@ -30,6 +33,7 @@ DISPATCH_IDENTITY = [
     "expect.dispatch_id",
 ]
 EXECUTION_IDENTITY = [*DISPATCH_IDENTITY, "expect.execution_id", "expect.execution_fence"]
+DISPATCH_ONLY = [*SIGNED_ENVELOPE, *DISPATCH_IDENTITY]
 RECEIVER_REQUIREMENTS = {
     PROGRESS: [*SIGNED_ENVELOPE, *EXECUTION_IDENTITY, "last_event_seq"],
     COMPLETED: [*SIGNED_ENVELOPE, *EXECUTION_IDENTITY, "expect.source_id", "expect.output_location_id",
@@ -48,11 +52,19 @@ RECEIVER_REQUIREMENTS = {
         "expect.renditions",
         "expect.max_artifact_count",
     ],
+    CLAIM: DISPATCH_ONLY,
+    UNCLAIMED: DISPATCH_ONLY,
 }
 # (role, kind, channel) -> the required context fields stated in README.md.
 REQUIRED_FIELDS: dict[tuple[str, str, str], list[str]] = {
     ("worker_receiver", REQUEST, "dispatch"): SIGNED_ENVELOPE,
     ("worker_receiver", HUB_ERROR, "push"): MESSAGE_GATE,
+    ("worker_receiver", GRANT, "push"): [
+        *SIGNED_ENVELOPE,
+        *DISPATCH_IDENTITY,
+        "expect.output_location_id",
+        "expect.runtime_id",
+    ],
     ("hub_sender", REQUEST, "dispatch"): [
         *SIGNED_ENVELOPE,
         *DISPATCH_IDENTITY,
@@ -61,6 +73,12 @@ REQUIRED_FIELDS: dict[tuple[str, str, str], list[str]] = {
         "expect.output_location_id",
         "expect.profile",
         "expect.encryption",
+    ],
+    ("hub_sender", GRANT, "push"): [
+        *SIGNED_ENVELOPE,
+        *EXECUTION_IDENTITY,
+        "expect.output_location_id",
+        "expect.runtime_id",
     ],
     **{("hub_receiver", kind, "storage" if kind == MANIFEST else "push"): fields
        for kind, fields in RECEIVER_REQUIREMENTS.items()},
@@ -78,12 +96,14 @@ def _complete_context(role: str, kind: str, channel: str) -> dict[str, Any]:
     """Every context field filled, taken from the fixture contexts."""
     push = files.read_json("fixtures/contexts/ctx-hub-push.json")
     storage = files.read_json("fixtures/contexts/ctx-hub-storage.json")
+    grant = files.read_json("fixtures/contexts/ctx-worker-claim-grant.json")
     return {
         **push,
         "role": role,
         "channel": channel,
         "accepted_message_kinds": [kind],
         "accepted_manifest_versions": storage["accepted_manifest_versions"],
+        "expect": {**push["expect"], "runtime_id": grant["expect"]["runtime_id"]},
     }
 
 
@@ -112,6 +132,20 @@ def _only(context: dict[str, Any], required: list[str]) -> dict[str, Any]:
     if expect_fields:
         reduced["expect"] = {key: value for key, value in context["expect"].items() if key in expect_fields}
     return reduced
+
+
+@pytest.mark.parametrize(("role", "kind", "channel"), list(REQUIRED_FIELDS))
+def test_required_fields_when_listed_for_a_role_and_kind_should_match_the_contract_table_in_order(
+    role, kind, channel
+):
+    # Arrange: README section 9.3, written out above, never read from the code under test.
+    expected = REQUIRED_FIELDS[(role, kind, channel)]
+
+    # Act
+    required = semantic.required_context_fields(role, kind)
+
+    # Assert
+    assert list(required) == expected
 
 
 @pytest.mark.parametrize("path", CONTEXT_FILES)
@@ -176,6 +210,17 @@ def test_context_when_holding_only_the_required_fields_should_load(role, kind, c
         ("hub_receiver", MANIFEST, "push"),
         ("hub_receiver", COMPLETED, "storage"),
         ("worker_receiver", REQUEST, "push"),
+        ("hub_receiver", CLAIM, "poll"),
+        ("worker_receiver", GRANT, "poll"),
+        ("hub_sender", GRANT, "dispatch"),
+        ("hub_receiver", UNCLAIMED, "dispatch"),
+        ("worker_receiver", CLAIM, "push"),
+        ("worker_receiver", UNCLAIMED, "push"),
+        ("hub_receiver", GRANT, "push"),
+        ("hub_sender", CLAIM, "push"),
+        ("hub_sender", GRANT, "poll"),
+        ("worker_sender", CLAIM, "poll"),
+        ("worker_sender", UNCLAIMED, "dispatch"),
     ],
 )
 def test_context_when_role_kind_and_channel_do_not_fit_should_raise_context_invalid(role, kind, channel):
@@ -212,8 +257,14 @@ def test_context_when_now_is_not_a_calendar_instant_should_raise_context_invalid
 
 @pytest.mark.parametrize(
     "change",
-    [{"unknown_field": 1}, {"clock_skew_s": 601}, {"context_version": 2}, {"accepted_message_kinds": []}],
-    ids=["unknown-field", "skew-over-600", "context-version-2", "no-accepted-kind"],
+    [
+        {"unknown_field": 1},
+        {"clock_skew_s": 601},
+        {"context_version": 2},
+        {"accepted_message_kinds": []},
+        {"expect": {"runtime_id": "runtime-1"}},
+    ],
+    ids=["unknown-field", "skew-over-600", "context-version-2", "no-accepted-kind", "runtime-id-not-a-uuid"],
 )
 def test_context_when_shape_violates_schema_should_raise_context_invalid(change):
     # Arrange
