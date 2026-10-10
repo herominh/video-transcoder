@@ -104,7 +104,8 @@ def error_pointers(relative_path: str, instance: Any) -> list[str]:
 
 
 def error_pointers_for_schema(schema: Mapping[str, Any], instance: Any) -> list[str]:
-    """Validate against an ad-hoc schema that may $ref the tree (used by lint tests)."""
+    """Validate against an ad-hoc schema that may $ref the tree: one definition of it (the settings and the
+    message builders), or a lint test's own schema."""
     return _pointers(Draft202012Validator(dict(schema), registry=local_registry()), instance)
 
 

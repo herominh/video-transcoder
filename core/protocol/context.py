@@ -5,12 +5,18 @@ Construction validates, in this order: the shape (trusted-context.schema.json), 
 supported for the role on this channel -> ContextInvalid; every field each accepted (role, kind)
 requires present and non-null -> ContextIncomplete. Both are programming errors, never a verdict on
 a message.
+
+from_dict() is the only constructor (a direct construction or dataclasses.replace() raises TypeError),
+and the context is immutable all the way down: `expect` and every mapping inside it are read-only views
+of a private deep copy, and its lists are tuples. So a context is neither deep-copied, pickled nor
+serialised (each raises TypeError): a different context is built again from its source values.
 """
 
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
+from types import MappingProxyType
 from typing import Any, Mapping
 
 from . import schema
@@ -20,6 +26,8 @@ from .semantic import parse_timestamp_ms, required_context_fields, supported_cha
 CONTEXT_SCHEMA_FILE = "schemas/trusted-context.schema.json"
 _EXPECT_PREFIX = "expect."
 _MS_PER_SECOND = 1_000
+# Only from_dict() holds this, so only it can complete a construction.
+_FROM_DICT = object()
 
 
 class ContextInvalid(ValueError):
@@ -61,6 +69,15 @@ def _tuple_or_none(value: Any) -> tuple[Any, ...] | None:
     return None if value is None else tuple(value)
 
 
+def _frozen(value: Any) -> Any:
+    """A read-only copy: every mapping a MappingProxyType, every list a tuple (the input is already private)."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _frozen(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_frozen(item) for item in value)
+    return value
+
+
 @dataclass(frozen=True)
 class TrustedContext:
     role: str
@@ -74,6 +91,11 @@ class TrustedContext:
     known_key_ids: tuple[str, ...] | None
     expect: Mapping[str, Any] | None
     last_event_seq: int | float | None
+    _construction: InitVar[object] = None
+
+    def __post_init__(self, _construction: object) -> None:
+        if _construction is not _FROM_DICT:
+            raise TypeError("a TrustedContext is built only by TrustedContext.from_dict()")
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> TrustedContext:
@@ -110,8 +132,9 @@ class TrustedContext:
             accepted_manifest_versions=_tuple_or_none(snapshot.get("accepted_manifest_versions")),
             expected_audience=snapshot.get("expected_audience"),
             known_key_ids=_tuple_or_none(snapshot.get("known_key_ids")),
-            expect=snapshot.get("expect"),
+            expect=_frozen(snapshot.get("expect")),
             last_event_seq=snapshot.get("last_event_seq"),
+            _construction=_FROM_DICT,
         )
 
     def value(self, dotted_field: str) -> Any:
