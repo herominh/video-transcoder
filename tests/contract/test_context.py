@@ -5,8 +5,8 @@ from typing import Any
 
 import pytest
 
-from tests.contract import files, schema, semantic
-from tests.contract.context import ContextIncomplete, ContextInvalid, TrustedContext
+from core.protocol import files, schema, semantic
+from core.protocol.context import ContextIncomplete, ContextInvalid, TrustedContext
 
 CONTEXT_SCHEMA_FILE = "schemas/trusted-context.schema.json"
 CONTEXT_FILES = [path for path in files.list_tree_files() if path.startswith("fixtures/contexts/")]

@@ -30,10 +30,10 @@ from core.package import (
     write_master_playlist,
 )
 from core.profile import GIB, LadderRung
+from core.protocol.context import TrustedContext
+from core.protocol.pipeline import validate
 from core.renditions import plan_renditions
 from core.thumbnail import ThumbnailResult, make_thumbnail
-from tests.contract.context import TrustedContext
-from tests.contract.pipeline import validate
 from tests.encode.conftest import EncodeMedia, fast_profile, probe_facts
 from tests.preflight.conftest import FFMPEG_TIMEOUT_S
 

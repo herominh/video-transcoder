@@ -10,7 +10,7 @@ import sys
 
 import pytest
 
-from tests.contract import gate
+from core.protocol import gate
 
 pytestmark = pytest.mark.skipif(
     sys.version_info < (3, 11), reason="the possessive originals compile only on Python 3.11 and later"

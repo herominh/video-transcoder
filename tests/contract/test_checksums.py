@@ -2,7 +2,7 @@
 
 import re
 
-from tests.contract import files
+from core.protocol import files
 
 CHECKSUM_LINE = re.compile(r"(?P<digest>[0-9a-f]{64})  (?P<path>[^\n]+)")
 

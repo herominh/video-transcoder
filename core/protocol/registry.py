@@ -135,5 +135,5 @@ class ContractRegistry:
 
 @lru_cache(maxsize=1)
 def load_registry() -> ContractRegistry:
-    """The registry of the tree next to this package (read once per process)."""
+    """The registry of the contract tree at files.CONTRACT_ROOT (read once per process)."""
     return ContractRegistry.load()

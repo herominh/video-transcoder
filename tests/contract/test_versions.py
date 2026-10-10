@@ -2,10 +2,10 @@
 
 import pytest
 
-from tests.contract import files, pipeline
-from tests.contract.context import TrustedContext
-from tests.contract.reasons import Layer, ReasonCode
-from tests.contract.registry import ContractRegistry, VersionChannel, VersionLine
+from core.protocol import files, pipeline
+from core.protocol.context import TrustedContext
+from core.protocol.reasons import Layer, ReasonCode
+from core.protocol.registry import ContractRegistry, VersionChannel, VersionLine
 
 POSITIVE_CASES = [case for case in files.read_json("fixtures/cases.json")["cases"]
                   if case["expect"]["outcome"] == "accept"]
