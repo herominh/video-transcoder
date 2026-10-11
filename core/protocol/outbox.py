@@ -88,7 +88,9 @@ def deliver(
 ) -> bool:
     """POST the message to the callback address; True when the Hub answered 2xx. It never raises for a failed delivery.
 
-    Sent again only after a transport failure or a `hub.error` the Hub called retryable.
+    Sent again only after a transport failure or a `hub.error` the Hub called retryable. Unlike a claim, a
+    delivery is not sent again after a gateway's 502, 503 or 504 without a `hub.error`: the job output
+    carries the same bytes, so the Hub loses nothing but time.
     """
     if sealed.kind not in _CALLBACK_KINDS:
         raise ValueError(f"a {sealed.kind.value} never goes to the callback address")

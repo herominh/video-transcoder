@@ -241,7 +241,7 @@ def _hub_to_worker_keys(env: Mapping[str, str]) -> dict[str, bytes]:
             raise SettingsInvalid(HUB_KEYS_VARIABLE, f"{where}repeats a key id")
         key = _key(HUB_KEYS_VARIABLE, key_hex, where)
         if key in keys.values():
-            # Two ids for one key would make a rotation rotate nothing, and a message's key id name nothing.
+            # Two ids for the same key bytes would make a rotation rotate nothing, and a message's key id name nothing.
             raise SettingsInvalid(HUB_KEYS_VARIABLE, f"{where}repeats a key")
         keys[key_id] = key
     return keys

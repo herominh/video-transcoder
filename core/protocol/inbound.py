@@ -3,7 +3,7 @@
 The order is stricter than the live receiver order of README section 12: nothing of the body is parsed
 before the exact bytes verified under one of the worker's Hub-to-worker keys, and an accepted message
 must name, in its `key_id`, a key under which its bytes verified: a body that names one key and is
-signed with another is refused (the settings refuse two key ids that hold the same key). A refusal names
+signed with another is refused (the settings refuse two key ids that hold the same key bytes). A refusal names
 the step and, for a verdict, its layer and reason: never the pointer, the body, the signature or a key.
 
 A `hub.error` is unsigned (README section 12): accept_hub_error() only validates it, and the worker never
