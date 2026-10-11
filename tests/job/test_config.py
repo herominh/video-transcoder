@@ -3,7 +3,12 @@ scratch directories in. Whole or refused; a refusal names the variable and the r
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
 import tempfile
+import traceback
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -13,8 +18,18 @@ from core.protocol.settings import SettingsInvalid
 
 DIGEST_VARIABLE = "VH_IMAGE_DIGEST"
 SCRATCH_VARIABLE = "VH_SCRATCH_DIR"
+# The variable an operator sets to give the system a temporary directory.
+TEMPORARY_DIRECTORY_VARIABLE = "TMPDIR"
 VALID_DIGEST = "sha256:" + "0123456789abcdef" * 4
 HEX_DIGITS = 64
+# A directory the system's own error names when it finds no temporary directory: no refusal may show it.
+TRIED_DIRECTORY = "/CANARY/tried/for/a/temporary/directory"
+CLOSED_DIRECTORY_NAME = "closed-scratch"
+# The worker image runs the suite as root, which no permission bits keep out of a directory.
+needs_permission_bits_to_bind = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="permission bits close no directory to root, nor to a process off POSIX",
+)
 
 
 def _env(tmp_path: Path, **changes: object) -> dict[str, object]:
@@ -27,6 +42,20 @@ def _refusal(env: object) -> SettingsInvalid:
     with pytest.raises(SettingsInvalid) as raised:
         JobSettings.from_env(env)  # type: ignore[arg-type]
     return raised.value
+
+
+def _no_temporary_directory() -> str:
+    """tempfile.gettempdir() on a system without a usable temporary directory: its error lists what it tried."""
+    raise FileNotFoundError(errno.ENOENT, f"No usable temporary directory found in ['{TRIED_DIRECTORY}']")
+
+
+@pytest.fixture
+def closed_directory(tmp_path: Path) -> Iterator[Path]:
+    """An existing directory for a test to take permissions from; they are given back, so it can be removed."""
+    directory = tmp_path / CLOSED_DIRECTORY_NAME
+    directory.mkdir()
+    yield directory
+    directory.chmod(stat.S_IRWXU)
 
 
 def test_from_env_when_both_variables_are_valid_should_hold_the_digest_and_the_scratch_directory(tmp_path):
@@ -144,6 +173,29 @@ def test_from_env_when_the_scratch_directory_is_a_file_should_refuse_it(tmp_path
     assert "a-file" not in str(refusal)
 
 
+@needs_permission_bits_to_bind
+@pytest.mark.parametrize(
+    "mode",
+    [
+        pytest.param(stat.S_IRUSR | stat.S_IXUSR, id="not-writable"),
+        pytest.param(stat.S_IRUSR | stat.S_IWUSR, id="not-searchable"),
+    ],
+)
+def test_from_env_when_the_process_cannot_make_a_directory_in_the_scratch_directory_should_refuse_it(
+    tmp_path, closed_directory, mode
+):
+    # Arrange: the directory exists, and its permissions keep this process from making one in it
+    closed_directory.chmod(mode)
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: str(closed_directory)}))
+
+    # Assert: the variable and the rule, never the value
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "writable and searchable" in refusal.rule
+    assert CLOSED_DIRECTORY_NAME not in str(refusal)
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -163,6 +215,21 @@ def test_from_env_when_the_scratch_directory_holds_a_character_the_stages_refuse
 
     # Assert
     assert refusal.variable == SCRATCH_VARIABLE
+    assert name not in str(refusal)
+
+
+def test_from_env_when_the_scratch_directory_holds_a_double_quote_should_refuse_it_by_that_rule(tmp_path):
+    # Arrange: the directory exists, so only the character refuses it
+    name = 'scratch-"quoted"'
+    directory = tmp_path / name
+    directory.mkdir()
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: str(directory)}))
+
+    # Assert: the variable and the rule, never the value
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "double quote" in refusal.rule
     assert name not in str(refusal)
 
 
@@ -228,6 +295,30 @@ def test_from_env_when_the_default_temporary_directory_holds_a_non_ascii_charact
     assert refusal.variable == SCRATCH_VARIABLE
     assert "printable ASCII" in refusal.rule
     assert str(directory) not in str(refusal)
+
+
+@pytest.mark.parametrize(
+    "scratch_directory_is_set",
+    [pytest.param(True, id="scratch-directory-set"), pytest.param(False, id="scratch-directory-not-set")],
+)
+def test_from_env_when_the_system_has_no_temporary_directory_should_refuse_the_start_naming_tmpdir(
+    tmp_path, monkeypatch, scratch_directory_is_set
+):
+    # Arrange: the version check and the preflight work in the system's temporary directory, whatever
+    # the scratch directory is; this system has none
+    monkeypatch.setattr(tempfile, "gettempdir", _no_temporary_directory)
+    env = _env(tmp_path) if scratch_directory_is_set else {DIGEST_VARIABLE: VALID_DIGEST}
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert: TMPDIR and the rule in the module's words; nothing of the system's error, which lists
+    # directories: not in the text, not in the traceback a refused start prints, not riding along
+    printed = "".join(traceback.format_exception(type(refusal), refusal, refusal.__traceback__))
+    assert refusal.variable == TEMPORARY_DIRECTORY_VARIABLE
+    assert "temporary directory" in refusal.rule
+    assert TRIED_DIRECTORY not in str(refusal) + printed
+    assert refusal.__cause__ is None and refusal.__context__ is None
 
 
 @pytest.mark.parametrize("value", [pytest.param("", id="empty"), pytest.param(7, id="not-a-string")])

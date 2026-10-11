@@ -23,7 +23,9 @@ core/probe.py), by one question: would the next attempt, on a healthy host, succ
                                                       depends on the image alone: every start meets it again.
     resource_exhausted / ffmpeg_version_start_failed  Yes, retryable. Any other error while starting it (a
                                                       failed fork, no temporary directory, no descriptor
-                                                      left): a passing shortage of the worker's own.
+                                                      left): a passing shortage of the worker's own. Where
+                                                      the empty working directory could not be made, the
+                                                      detail and the log line say that, not a failed start.
     internal_error / ffmpeg_version_run_failed        Yes, retryable. The run passed the check's own limit
                                                       while the execution still had time, or ended on a
                                                       signal: an overloaded or dying host, not the tool.
@@ -66,6 +68,7 @@ UNKNOWN_ERRNO_NAME = "unknown"
 # The endings that give no version, as a log line names them.
 ENDING_NOT_INSTALLED = "not_installed"
 ENDING_NOT_STARTABLE = "not_startable"
+ENDING_NO_WORKING_DIRECTORY = "no_working_directory"
 ENDING_START_FAILED = "start_failed"
 ENDING_TIMED_OUT = "timed_out"
 ENDING_DEADLINE_EXCEEDED = "deadline_exceeded"
@@ -85,9 +88,18 @@ def _unavailable(ending: str, detail: str) -> WorkerFailure:
     return _failed(ending, Failure("configuration_error", "ffmpeg_unavailable", False, detail))
 
 
+def _shortage(ending: str, detail: str) -> WorkerFailure:
+    return _failed(ending, Failure("resource_exhausted", "ffmpeg_version_start_failed", True, detail))
+
+
 def _start_failed(errno_name: str) -> WorkerFailure:
-    detail = f"ffmpeg could not be started to state its version: {errno_name}"
-    return _failed(ENDING_START_FAILED, Failure("resource_exhausted", "ffmpeg_version_start_failed", True, detail))
+    return _shortage(ENDING_START_FAILED, f"ffmpeg could not be started to state its version: {errno_name}")
+
+
+def _no_working_directory(errno_name: str) -> WorkerFailure:
+    """Typed as a failed start is, and told apart from one by its ending's name and its words."""
+    detail = f"the empty working directory ffmpeg states its version in could not be made: {errno_name}"
+    return _shortage(ENDING_NO_WORKING_DIRECTORY, detail)
 
 
 def _run_failed(ending: str, detail: str) -> WorkerFailure:
@@ -149,7 +161,7 @@ def _run_version(executable: str, deadline: Deadline) -> BoundedResult:
         # The directory could not be made. Always a passing shortage, FileNotFoundError included: mkdtemp
         # reports exhausted descriptors as "No usable temporary directory found". (What _run_in raises
         # is a WorkerFailure, which this lets through.)
-        raise _start_failed(_errno_name(error)) from None
+        raise _no_working_directory(_errno_name(error)) from None
 
 
 def _run_in(executable: str, empty_dir: str, deadline: Deadline) -> BoundedResult:

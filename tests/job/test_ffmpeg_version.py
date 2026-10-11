@@ -1,7 +1,8 @@
 """The version of the installed ffmpeg, as a result's `encoder.ffmpeg_version` states it, and how each
 way of not getting it is typed: what a retry cannot cure, a passing shortage, a run that did not end, an
 execution whose own deadline passed. The check runs under the execution's deadline; only a version it
-got is remembered for the process.
+got is remembered for the process. Its run of ffmpeg gets nothing of this process's: an environment
+cleared of it, an empty working directory of its own, and a cap on what is kept of its output.
 
 The stand-in ffmpegs are small shell scripts named by FFMPEG_PATH, the variable the stages resolve their
 ffmpeg from; they run under the same bounded process as the real one (POSIX only). The endings no script
@@ -17,9 +18,11 @@ import os
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -44,8 +47,15 @@ DEADLINE_EXCEEDED = ("deadline_exceeded", "ffmpeg_version_deadline_exceeded", Tr
 CHECK_LIMIT_S = 10.0
 LESS_THAN_THE_CHECK_LIMIT_MS = 9_000
 PATH_CANARY = "/CANARY/path/in/an/os/error"
+# A place for temporary directories that is no directory: nothing can be made in it, by root either.
+MISSING_DIRECTORY_NAME = "no-such-temporary-directory"
 WORKING_FFMPEG = "echo 'ffmpeg version 7.1.1 Copyright'"
 OUTPUT_CAP_BYTES = 16 * 1024
+# More than a pipe holds (64 KiB on Linux), so a stand-in that writes this much cannot end before all
+# but a pipe's worth of it was read: what is kept of it is then full, however busy the host is.
+MORE_THAN_A_PIPE_HOLDS_BYTES = 16 * OUTPUT_CAP_BYTES
+# A variable of this process alone, as a storage secret is one.
+PROCESS_VARIABLE = "VH_TEST_VARIABLE_OF_THE_PROCESS"
 REAL_START = ffmpeg_version_module.run_bounded
 TIMED_OUT = BoundedResult(
     returncode=None, stdout=b"", stderr_tail=b"", timed_out=True, stdout_overflow=False, stderr_truncated=False
@@ -123,6 +133,23 @@ def _start_that(outcome: BaseException | BoundedResult) -> Callable[..., Bounded
         return outcome
 
     return start
+
+
+def _start_noting_endings(endings: list[BoundedResult]) -> Callable[..., BoundedResult]:
+    """The real bounded process start, which also notes the ending of each run it makes."""
+
+    def start(*arguments: Any, **named_arguments: Any) -> BoundedResult:
+        ending = REAL_START(*arguments, **named_arguments)
+        endings.append(ending)
+        return ending
+
+    return start
+
+
+def _stating_its_version_in(directory: Path, output_bytes: int) -> Path:
+    """A stand-in ffmpeg whose whole output is one version statement of exactly `output_bytes` bytes."""
+    padded_to = output_bytes - len("\n")
+    return _stand_in(directory, f"printf '%-{padded_to}s\\n' 'ffmpeg version 7.1.1 Copyright'")
 
 
 def test_version_when_ffmpeg_states_it_should_be_the_token_after_ffmpeg_version(tmp_path, monkeypatch):
@@ -361,6 +388,42 @@ def test_version_when_no_working_directory_can_be_made_should_fail_retryable_and
     assert PATH_CANARY not in failure.detail
 
 
+def test_version_when_no_working_directory_can_be_made_should_say_so_and_not_name_a_failed_start(
+    tmp_path, monkeypatch
+):
+    # Arrange: a working ffmpeg, while temporary directories are to be made where no directory is
+    script = _stand_in(tmp_path, WORKING_FFMPEG)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / MISSING_DIRECTORY_NAME))
+
+    # Act
+    failure = _unavailable(monkeypatch, script).failure
+
+    # Assert: typed as a failed start is, in words of its own; the errno's name, nothing of the path
+    assert _typed(failure) == START_FAILED
+    assert "working directory" in failure.detail
+    assert "started" not in failure.detail
+    assert "ENOENT" in failure.detail
+    assert str(tmp_path) not in failure.detail
+
+
+def test_version_when_no_working_directory_can_be_made_should_log_that_ending_once_and_no_failed_start(
+    tmp_path, monkeypatch, caplog
+):
+    # Arrange
+    caplog.set_level(logging.DEBUG, logger=ffmpeg_version_module.__name__)
+    script = _stand_in(tmp_path, WORKING_FFMPEG)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / MISSING_DIRECTORY_NAME))
+
+    # Act
+    _unavailable(monkeypatch, script)
+
+    # Assert
+    (logged,) = [record for record in caplog.records if record.name == ffmpeg_version_module.__name__]
+    assert "(no_working_directory)" in logged.getMessage()
+    assert "start" not in logged.getMessage()
+    assert str(tmp_path) not in caplog.text
+
+
 def test_version_when_the_run_passes_the_checks_own_limit_with_time_left_should_fail_retryable_as_a_run_failure(
     tmp_path, monkeypatch
 ):
@@ -429,6 +492,88 @@ def test_version_when_it_cannot_be_determined_should_log_the_ending_once_by_its_
     assert f"({ending})" in logged.getMessage()
     assert PATH_CANARY not in caplog.text
     assert str(tmp_path) not in caplog.text
+
+
+# --- what the run of ffmpeg is given, and what is kept of its output --------------------------------
+
+
+def test_version_when_the_process_holds_variables_should_run_ffmpeg_with_none_of_them(tmp_path, monkeypatch):
+    # Arrange: the stand-in notes the environment it runs with; this process holds a variable of its
+    # own beside the one that names the binary
+    seen = tmp_path / "environment"
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(_stand_in(tmp_path, f"env > '{seen}'\n{WORKING_FFMPEG}")))
+    monkeypatch.setenv(PROCESS_VARIABLE, "of-this-process")
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert: it noted an environment, and neither variable is in it
+    seen_names = {line.partition("=")[0] for line in seen.read_text(encoding="ascii", errors="replace").splitlines()}
+    assert version == "7.1.1"
+    assert seen_names
+    assert not {PROCESS_VARIABLE, FFMPEG_PATH_VARIABLE} & seen_names
+
+
+def test_version_when_ffmpeg_runs_should_run_it_in_an_empty_directory_that_is_gone_afterwards(tmp_path, monkeypatch):
+    # Arrange: the stand-in notes where it runs and what it finds there; this process's own working
+    # directory holds files
+    where, found = tmp_path / "where", tmp_path / "found"
+    listing = f"ls -A > '{found}' || echo 'no listing was made' > '{found}'"
+    script = _stand_in(tmp_path, f"pwd > '{where}'\n{listing}\n{WORKING_FFMPEG}")
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(script))
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert
+    working_directory = Path(os.fsdecode(where.read_bytes()).rstrip("\n"))
+    assert version == "7.1.1"
+    assert found.read_bytes() == b""
+    assert working_directory.is_absolute()
+    assert not working_directory.exists()
+
+
+def test_version_when_ffmpeg_writes_exactly_the_output_cap_should_still_read_its_version(tmp_path, monkeypatch):
+    # Arrange: one version statement, padded to the cap and not a byte more
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(_stating_its_version_in(tmp_path, OUTPUT_CAP_BYTES)))
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert
+    assert version == "7.1.1"
+
+
+def test_version_when_ffmpeg_writes_one_byte_more_than_the_output_cap_should_fail_as_ffmpeg_unavailable(
+    tmp_path, monkeypatch
+):
+    # Arrange
+    script = _stating_its_version_in(tmp_path, OUTPUT_CAP_BYTES + 1)
+
+    # Act
+    failure = _unavailable(monkeypatch, script).failure
+
+    # Assert
+    assert _typed(failure) == UNAVAILABLE
+
+
+def test_version_when_ffmpeg_writes_more_than_the_output_cap_to_stderr_should_keep_the_caps_worth_of_it(
+    tmp_path, monkeypatch
+):
+    # Arrange: the stand-in writes far more than the cap to stderr before it states its version
+    endings: list[BoundedResult] = []
+    monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_noting_endings(endings))
+    script = _stand_in(tmp_path, f"head -c {MORE_THAN_A_PIPE_HOLDS_BYTES} /dev/zero >&2\n{WORKING_FFMPEG}")
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(script))
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert: what it wrote there costs the check nothing, and the cap's worth of it was kept, no more
+    (ending,) = endings
+    assert version == "7.1.1"
+    assert len(ending.stderr_tail) == OUTPUT_CAP_BYTES
 
 
 # --- under the execution's deadline -----------------------------------------------------------------

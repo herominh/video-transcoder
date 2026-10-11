@@ -41,7 +41,9 @@ Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are 
   learn its own digest, and a result reports it. Set the endpoint's container image by that same digest
   (`<repository>@sha256:<digest>`, not a tag such as `:latest`) and change the two together: a tag can be moved to
   another image while every result goes on reporting the old digest;
-- `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, printable ASCII only;
+- `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, which the worker's process can
+  write to and search; its path holds printable ASCII only, without `:`, `%` or a double quote; a usable system temporary
+  directory (`TMPDIR`) is required whatever the scratch directory is;
 - `FFMPEG_PATH` and `FFPROBE_PATH` (optional): the tools the stages run, when they are not `ffmpeg` and `ffprobe` on
   the `PATH` (the image links both into `/usr/local/bin`).
 
