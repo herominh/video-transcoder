@@ -255,6 +255,37 @@ def test_grant_when_shown_with_repr_should_not_show_the_media_key():
     assert grant.generation_id in shown
 
 
+def test_grant_when_its_media_key_is_dropped_should_hold_no_key_and_keep_the_keys_id_and_everything_else():
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    grant = _claim(dispatch, FakeTransport(_granted(), clock=clock), clock)
+    as_granted = dataclasses.replace(grant)
+
+    # Act
+    grant.drop_media_key()
+
+    # Assert
+    assert as_granted.media_key == bytes.fromhex(MEDIA_KEY_HEX)
+    assert grant.media_key is None
+    assert grant.media_key_id == as_granted.media_key_id is not None
+    assert dataclasses.replace(grant, media_key=as_granted.media_key) == as_granted
+
+
+@pytest.mark.parametrize("fixture", [GRANT_ENCRYPTED, GRANT_UNENCRYPTED], ids=["a-grant-with-a-key", "a-grant-without-one"])
+def test_grant_when_its_media_key_is_dropped_again_should_stay_without_a_key(fixture):
+    # Arrange: a grant whose key was dropped once already, or that never held one
+    request = REQUEST_ENCRYPTED if fixture == GRANT_ENCRYPTED else REQUEST_UNENCRYPTED
+    dispatch, clock = _dispatch(request), FakeClock()
+    grant = _claim(dispatch, FakeTransport(_granted(fixture), clock=clock), clock)
+    grant.drop_media_key()
+
+    # Act
+    grant.drop_media_key()
+
+    # Assert
+    assert grant.media_key is None
+
+
 @pytest.mark.parametrize(
     "answer",
     [

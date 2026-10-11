@@ -20,6 +20,7 @@ import dataclasses
 import json
 import logging
 import re
+import sys
 import time
 import types
 import uuid
@@ -677,6 +678,36 @@ def test_claimed_execution_when_shown_with_repr_should_show_neither_runtime_id_t
     assert execution.grant.media_key == key
     assert execution.grant.generation_id in shown
     assert [value for value in hidden if value in shown] == []
+
+
+@pytest.mark.parametrize("wall_time_ends_at", [10**400, -(10**400)], ids=["far-ahead", "far-back"])
+def test_claimed_execution_when_the_end_of_its_wall_time_is_an_integer_too_large_to_be_a_float_should_raise_value_error(
+    wall_time_ends_at,
+):
+    # Arrange
+    clock = FakeClock()
+    job = StandInJob()
+    handle(_job_input(), runtime=_runtime(_transport(clock, _granted()), clock), run_job=job)
+    ((execution, _),) = job.calls
+
+    # Act and Assert: refused as not finite, like an infinity, and not with the conversion's own OverflowError
+    with pytest.raises(ValueError, match="finite"):
+        dataclasses.replace(execution, wall_time_ends_at=wall_time_ends_at)
+
+
+def test_claimed_execution_when_the_end_of_its_wall_time_is_the_largest_whole_number_a_float_holds_should_hold_it():
+    # Arrange
+    clock = FakeClock()
+    job = StandInJob()
+    handle(_job_input(), runtime=_runtime(_transport(clock, _granted()), clock), run_job=job)
+    ((execution, _),) = job.calls
+    largest = int(sys.float_info.max)
+
+    # Act
+    held = dataclasses.replace(execution, wall_time_ends_at=largest)
+
+    # Assert: finite, however absurd as a reading of a clock
+    assert held.wall_time_ends_at == largest
 
 
 # --- what a start logs --------------------------------------------------------------------------

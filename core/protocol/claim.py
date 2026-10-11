@@ -32,6 +32,8 @@ answer cannot stretch either.
 
 The body of a claim and of a claim response is never logged, stored or put in an error, and the media key
 of a grant exists only inside the returned Grant, whose repr() does not show it (README 15.1, rules 4, 5).
+The Grant holds the key until whoever runs the execution drops it (Grant.drop_media_key): rule 4 gives a
+runtime the key until its encode and the encode's own checks are done, never past its execution.
 """
 
 from __future__ import annotations
@@ -67,7 +69,10 @@ CLAIM_BACKOFF_S = (1, 2, 4, 8, 15)
 
 @dataclass(frozen=True)
 class Grant:
-    """An accepted `transcode.claim.granted`: the execution, its generation, where it writes and its media key."""
+    """An accepted `transcode.claim.granted`: the execution, its generation, where it writes and its media key.
+
+    Nothing of it changes but the key, which drop_media_key() lets go of.
+    """
 
     identity: ExecutionIdentity
     generation_id: str
@@ -75,6 +80,14 @@ class Grant:
     output_prefix: str
     media_key_id: str | None
     media_key: bytes | None = field(repr=False)
+
+    def drop_media_key(self) -> None:
+        """Let go of the media key: `media_key` is None from here on, however often this is called.
+
+        The id of the key stays. Python cannot erase the key's bytes: no longer holding them is what a
+        runtime can do (README 15.1, rule 4).
+        """
+        object.__setattr__(self, "media_key", None)
 
 
 @dataclass(frozen=True)

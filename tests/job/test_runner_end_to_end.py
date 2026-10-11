@@ -3,6 +3,8 @@
 A small generated MP4 is the source object in conftest's fake S3 client. The dispatch is the fixtures'
 (P01 encrypted, P02 unencrypted) adapted to that object, the grant the fixtures' (P24, P27). The run is
 the real one from the preflight's loopback probe to the last PutObject: nothing of the job is replaced.
+(One test, of a read that never returns, states the ffmpeg version instead of asking the installed
+ffmpeg for it, so that the little wall time it leaves the job is the preflight's alone.)
 
 The pilot profile's smallest rung is as large as the 320x240 source, so the worker is given a test
 profile instead: the pilot at x264's fastest preset with two small rungs. It is registered by replacing
@@ -16,9 +18,11 @@ import json
 import logging
 import os
 import subprocess
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +41,7 @@ from tests.job.conftest import (
     COMPLETED_KIND,
     DELIVERED,
     FAILED_KIND,
+    HANG_RELEASE_S,
     IMAGE_DIGEST,
     MANIFEST_NAME,
     FakeS3,
@@ -68,6 +73,10 @@ MEDIA_KEY_ID = "77777777-7777-7777-8777-777777777777"
 TS_SYNC_BYTE = 0x47
 AES_BLOCK_BYTES = 16
 JPEG_START = b"\xff\xd8"
+# What is left of a start's wall time where a test has the job wait it out, and the version a test
+# states for the ffmpeg where the installed one's must not take any of that time.
+WALL_TIME_LEFT_S = 0.5
+STATED_FFMPEG_VERSION = "7.1-stated"
 
 
 @dataclass(frozen=True)
@@ -121,12 +130,9 @@ def _everything_logged() -> Iterator[list[str]]:
         root.removeHandler(collector)
 
 
-def _run_job(root: Path, media: Path, *, encrypted: bool, stored_etag: str = SOURCE_ETAG) -> _Run:
-    scratch_root = root / "scratch"
-    scratch_root.mkdir()
-    s3 = FakeS3()
-    s3.hold(SOURCE_BUCKET, SOURCE_KEY, media, stored_etag)
-    claimed = claimed_execution(
+def _claimed(media: Path, *, encrypted: bool) -> ClaimedExecution:
+    """The fixtures' dispatch adapted to the source object and the test profile, claimed with the fixtures' grant."""
+    return claimed_execution(
         encrypted=encrypted,
         request_changes={
             "/source/size_bytes": media.stat().st_size,
@@ -135,6 +141,14 @@ def _run_job(root: Path, media: Path, *, encrypted: bool, stored_etag: str = SOU
             "/profile": {"id": PROFILE.profile_id, "version": PROFILE.version, "sha256": profile_digest(PROFILE)},
         },
     )
+
+
+def _run_job(root: Path, media: Path, *, encrypted: bool, stored_etag: str = SOURCE_ETAG) -> _Run:
+    scratch_root = root / "scratch"
+    scratch_root.mkdir()
+    s3 = FakeS3()
+    s3.hold(SOURCE_BUCKET, SOURCE_KEY, media, stored_etag)
+    claimed = _claimed(media, encrypted=encrypted)
     clock = FakeClock()
     transport = FakeTransport(then=DELIVERED, clock=clock)
     runner = JobRunner(
@@ -361,3 +375,53 @@ def test_job_when_the_stored_source_has_another_etag_than_the_dispatch_should_fa
     assert "source" not in run.result
     assert list(run.scratch_root.iterdir()) == []
 
+
+def test_job_when_a_read_of_the_real_preflight_never_returns_should_fail_for_good_at_probing_once_the_wall_time_ends(
+    source_media: Path, tmp_path: Path
+) -> None:
+    # Arrange: a storage that takes every read and never answers it, and a start with half a second of
+    # its wall time left. The real preflight reads on the threads of its loopback server while the
+    # job's own thread waits for ffprobe: the read and ffprobe are given up at the same deadline, and
+    # which of the two is noticed first names the failure. The ffmpeg version is a stated one, so
+    # that asking the installed ffmpeg takes none of the half second.
+    never_answered = threading.Event()
+    threads_before = set(threading.enumerate())
+    s3 = FakeS3()
+    s3.hold(SOURCE_BUCKET, SOURCE_KEY, source_media, SOURCE_ETAG)
+    answer = s3.get_object
+
+    def get_object_that_hangs(**request: Any) -> Any:
+        never_answered.wait(HANG_RELEASE_S)
+        return answer(**request)
+
+    s3.get_object = get_object_that_hangs
+    scratch_root = tmp_path / "scratch"
+    scratch_root.mkdir()
+    clock = FakeClock()
+    claimed = replace(_claimed(source_media, encrypted=True), wall_time_ends_at=clock.monotonic() + WALL_TIME_LEFT_S)
+    runner = JobRunner(
+        job_settings(scratch_root),
+        source_client_factory=lambda access: s3,
+        output_client_factory=lambda access: s3,
+        ffmpeg_version=lambda deadline: STATED_FFMPEG_VERSION,
+    )
+    started = time.monotonic()
+
+    # Act
+    try:
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(profile_module, "SUPPORTED_PROFILES", (PROFILE,))
+            sealed = runner.run(claimed, runtime_of(FakeTransport(then=DELIVERED, clock=clock), clock))
+        took_s = time.monotonic() - started
+    finally:
+        never_answered.set()
+        for thread in set(threading.enumerate()) - threads_before:
+            thread.join(HANG_RELEASE_S)
+
+    # Assert: given up at the deadline, not waited out; final, as a stage that runs out of wall time is
+    error = accepted_by_the_hub(sealed, claimed, now=clock())["error"]
+    assert (error["class"], error["retryable"], error["stage"]) == ("deadline_exceeded", False, "probing")
+    assert error["code"] in {"source_read_deadline_exceeded", "probe_deadline_exceeded"}
+    assert took_s < HANG_RELEASE_S
+    assert s3.put_calls == []
+    assert list(scratch_root.iterdir()) == []

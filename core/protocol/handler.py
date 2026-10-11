@@ -66,7 +66,8 @@ class ClaimedExecution:
     `wall_time_ends_at` is the reading of the runtime's monotonic clock at which the start's wall time
     ends: the reading handle() took first, plus the dispatch's limit. It is only ever compared with
     another reading of that clock. Anything but a finite number is refused: TypeError for another type
-    (a bool included), ValueError for a number that is not finite.
+    (a bool included), ValueError for a number that is not finite, an integer too large to be a float
+    included.
     """
 
     dispatch: AcceptedDispatch
@@ -78,7 +79,12 @@ class ClaimedExecution:
         ends_at = self.wall_time_ends_at
         if isinstance(ends_at, bool) or not isinstance(ends_at, (int, float)):
             raise TypeError("wall_time_ends_at must be a number: a reading of the monotonic clock")
-        if not math.isfinite(ends_at):
+        try:
+            finite = math.isfinite(ends_at)
+        except OverflowError:
+            # An integer too large to be a float: no reading of a clock, and nothing can be counted to it.
+            finite = False
+        if not finite:
             raise ValueError("wall_time_ends_at must be finite")
 
 

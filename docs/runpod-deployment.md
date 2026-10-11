@@ -43,7 +43,11 @@ Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are 
   another image while every result goes on reporting the old digest;
 - `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, which the worker's process can
   write to and search; its path holds printable ASCII only, without `:`, `%` or a double quote; a usable system temporary
-  directory (`TMPDIR`) is required whatever the scratch directory is;
+  directory (`TMPDIR`) is required whatever the scratch directory is. The scratch directory (this one, or the system's
+  temporary directory when the variable is not set) must be on a local file system on which a directory can be locked
+  with `flock`, and must not be shared between hosts: every job locks its own directory in it, and that lock tells a
+  running job's directory from one a killed process left behind only between processes of one host. Where a directory
+  cannot be locked, every job ends as the retryable `resource_exhausted/scratch_create_failed`;
 - `FFMPEG_PATH` and `FFPROBE_PATH` (optional): the tools the stages run, when they are not `ffmpeg` and `ffprobe` on
   the `PATH` (the image links both into `/usr/local/bin`).
 
