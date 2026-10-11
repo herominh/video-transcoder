@@ -24,6 +24,7 @@ import logging
 import shutil
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -123,6 +124,12 @@ STAGE_FUNCTIONS = {
     "uploading": "upload_generation",
 }
 STAGE_FAILURE = Failure("encoder_failed", "stand_in_stage_failed", True, "The stand-in stage of the test failed.")
+# A stand-in stage that ran out of time, and a start of ten minutes of which the claim took 12.5 s.
+STAGE_DEADLINE = Failure(
+    "deadline_exceeded", "stand_in_deadline_exceeded", False, "The stand-in stage ran out of time."
+)
+TEN_MINUTES_MS = 600_000
+CLAIM_TOOK_S = 12.5
 SEGMENT_BYTES = 400
 NO_THUMBNAIL_DETAIL = "the stand-in thumbnail encoder wrote no image"
 PERCENT_STEPS_PER_STAGE = 10
@@ -140,6 +147,11 @@ CLIENT_CANARY = "CANARYendpointInAClientError.example.invalid/bucket?X-Amz-Signa
 WALL_TIME_POINTER = "/limits/max_wall_time_ms"
 HTTP_UNAVAILABLE = 503
 PROGRESS_KIND = "transcode.progress"
+# The factor every wait between two attempts is multiplied by where a test states the waits, in place of
+# the jitter's draw: the nominal 0.5, 2 and 8 s times it are 0.375, 1.5 and 6 s, each exact in binary.
+FIXED_FACTOR = 0.75
+# A storage request's ceiling a test waits out, where the worker's own is half a minute and more.
+SHORT_CEILING_S = 0.05
 
 
 def _video(index: int = 0, **changes: Any) -> VideoStreamFacts:
@@ -450,6 +462,25 @@ class Harness:
 @pytest.fixture
 def harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Harness:
     return Harness(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def fixed_factor(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Every wait between two attempts is its nominal seconds times FIXED_FACTOR: the jitter's draw is replaced."""
+    monkeypatch.setattr(storage_module, "_jitter_factor", lambda: FIXED_FACTOR)
+    return FIXED_FACTOR
+
+
+@pytest.fixture
+def never_answered() -> Iterator[threading.Event]:
+    """What a storage stand-in that never answers waits on. It is set when the test ends, and the request
+    threads the test started are then waited for, so that none outlives its test."""
+    threads_before = set(threading.enumerate())
+    let_go = threading.Event()
+    yield let_go
+    let_go.set()
+    for thread in set(threading.enumerate()) - threads_before:
+        thread.join(HANG_RELEASE_S)
 
 
 def _error_of(result: Mapping[str, Any]) -> tuple[str, str, bool, str | None]:
@@ -977,6 +1008,128 @@ def test_run_when_the_wall_time_ends_before_the_ffmpeg_version_is_known_should_f
     assert _error_of(result) == ("deadline_exceeded", "ffmpeg_version_deadline_exceeded", True, None)
     assert harness.s3.request_count == 0
     assert "encoder" not in result
+
+
+# --- what a deadline failure tells of the start's time ----------------------------------------------
+
+
+def test_run_when_a_transfer_runs_out_of_time_should_say_how_much_of_the_start_was_gone_before_the_execution_began(
+    tmp_path, monkeypatch
+):
+    # Arrange: a start of 100.9 s on the test's clock whose claim took 90.4 s of them; the preflight takes
+    # 11 s, more than the 10.5 s that were left
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 100_900})
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    harness.clock.advance(90.4)
+    harness.stages.after_preflight = lambda: harness.clock.advance(11)
+
+    # Act: the runner seals the result only if the worker's own validator accepts it, and result() returns
+    # it once the Hub's validator accepted the signed bytes too
+    result = harness.result()
+
+    # Assert: the failure's own detail, whole, then both numbers in whole seconds rounded down
+    assert _error_of(result) == ("deadline_exceeded", "download_deadline_exceeded", False, "downloading")
+    assert result["error"]["detail"] == (
+        "the job ran out of time while it downloaded the source"
+        "; the start had spent 90 s of its 100 s before the execution began"
+    )
+
+
+@pytest.mark.parametrize("stage", [None, *STAGES], ids=["before-any-stage", *STAGES])
+def test_run_when_it_ends_on_a_deadline_failure_should_tell_the_starts_time_whatever_ran_out_of_it(
+    tmp_path, monkeypatch, stage
+):
+    # Arrange: a start of ten minutes whose claim took 12.5 s; the ffmpeg check, or one stage, runs out of time
+    ran_out_of_time = _raising(WorkerFailure(STAGE_DEADLINE))
+    harness = Harness(
+        tmp_path,
+        monkeypatch,
+        request_changes={WALL_TIME_POINTER: TEN_MINUTES_MS},
+        **({"ffmpeg_version": ran_out_of_time} if stage is None else {}),
+    )
+    if stage is not None:
+        monkeypatch.setattr(runner_module, STAGE_FUNCTIONS[stage], ran_out_of_time)
+    harness.clock.advance(CLAIM_TOOK_S)
+
+    # Act
+    result = harness.result()
+
+    # Assert
+    assert result["error"] == {
+        "class": "deadline_exceeded",
+        "code": "stand_in_deadline_exceeded",
+        "retryable": False,
+        "stage": stage,
+        "detail": (
+            "The stand-in stage ran out of time."
+            "; the start had spent 12 s of its 600 s before the execution began"
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("spent_before_the_run_s", "expected_detail"),
+    [
+        pytest.param(
+            5.0,
+            "the start's wall time was spent before the execution could begin"
+            "; the start had spent 5 s of its 5 s before the execution began",
+            id="exactly-the-wall-time",
+        ),
+        pytest.param(
+            65.0,
+            "the start's wall time was spent before the execution could begin"
+            "; the start had spent 65 s of its 5 s before the execution began",
+            id="a-minute-more-than-the-wall-time",
+        ),
+        pytest.param(
+            4.9996,
+            "the start's wall time was spent before the execution could begin"
+            "; the start had spent 5 s of its 5 s before the execution began",
+            id="all-but-less-than-a-millisecond",
+        ),
+    ],
+)
+def test_run_when_the_starts_wall_time_is_spent_should_say_how_much_of_it_the_start_had_spent(
+    tmp_path, monkeypatch, spent_before_the_run_s, expected_detail
+):
+    # Arrange: a start of 5 s whose claim took them all, or more than them
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 5_000})
+    harness.clock.advance(spent_before_the_run_s)
+
+    # Act
+    result = harness.result()
+
+    # Assert: the true numbers, also where the claim overran the limit; less than a millisecond left
+    # counts as spent, as the execution itself counts it
+    assert _error_of(result) == ("deadline_exceeded", "wall_time_spent_before_start", True, None)
+    assert result["error"]["detail"] == expected_detail
+
+
+@pytest.mark.parametrize(
+    ("own_chars", "expected_chars"),
+    [
+        pytest.param(935, 1000, id="just-room-for-the-numbers"),
+        pytest.param(936, 936, id="one-character-too-many"),
+    ],
+)
+def test_run_when_a_deadline_failures_detail_leaves_no_room_for_the_numbers_should_keep_it_whole_and_without_them(
+    tmp_path, monkeypatch, own_chars, expected_chars
+):
+    # Arrange: a detail may hold 1000 characters and the numbers of this start take 65; a stage runs out
+    # of time with a detail of its own of `own_chars` characters
+    own_detail = "x" * own_chars
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: TEN_MINUTES_MS})
+    out_of_room = Failure("deadline_exceeded", "stand_in_deadline_exceeded", False, own_detail)
+    monkeypatch.setattr(runner_module, "encode_rendition", _raising(WorkerFailure(out_of_room)))
+
+    # Act: result() returns once both validators accepted the result
+    detail = harness.result()["error"]["detail"]
+
+    # Assert: never cut, and with the numbers only where they fit
+    assert detail.startswith(own_detail)
+    assert len(detail) == expected_chars
+    assert detail.endswith("; the start had spent 0 s of its 600 s before the execution began") == (own_chars == 935)
 
 
 # --- settled before anything is read ----------------------------------------------------------------
@@ -1516,6 +1669,101 @@ def test_run_when_the_storage_keeps_failing_a_write_for_now_should_fail_retryabl
     # Assert: worth another dispatch, and the manifest was never stored
     assert _error_of(result) == ("output_write_failed", "upload_failed", True, "uploading")
     assert harness.s3.stored == []
+
+
+def test_run_when_a_put_fails_once_should_wait_on_the_runtimes_clock_and_complete(harness, fixed_factor):
+    # Arrange: the storage answers the first write with an error of its own, and takes every later one
+    harness.s3.fail_put(1, client_error("InternalError", HTTP_INTERNAL_SERVER_ERROR, "PutObject"))
+
+    # Act
+    result = harness.result()
+
+    # Assert: the wait before the second request (0.5 s times the factor 0.75) was made through the
+    # runtime's `sleep`, so it passed on the runtime's clock and not on the real one
+    assert result["message_kind"] == COMPLETED_KIND
+    assert harness.clock.waits == [0.375]
+    assert MANIFEST_NAME in harness.uploaded
+
+
+def test_run_when_a_read_of_the_download_fails_once_should_wait_on_the_runtimes_clock_and_complete(
+    harness, fixed_factor
+):
+    # Arrange: the preflight's read arrives; the first read of the download is answered with an error of
+    # the storage's own, and every later one arrives
+    harness.s3.fail_get(2, client_error("InternalError", HTTP_INTERNAL_SERVER_ERROR, "GetObject"))
+
+    # Act
+    result = harness.result()
+
+    # Assert
+    assert result["message_kind"] == COMPLETED_KIND
+    assert harness.clock.waits == [0.375]
+    assert result["source"]["bytes_read"] == len(SOURCE_OBJECT)
+
+
+def test_run_when_every_put_stalls_should_fail_retryable_as_stalled_at_uploading_without_the_manifest(
+    harness, monkeypatch, fixed_factor, never_answered
+):
+    # Arrange: a storage that takes every write and never answers it. From the upload on, a request may
+    # take some 50 ms where the worker allows half a minute and more: only requests that are kept run
+    # under it
+    real_upload = runner_module.upload_generation
+    answer = harness.s3.put_object
+    put_started = threading.Event()
+
+    def upload_under_a_short_ceiling(*arguments: Any, **named_arguments: Any) -> int:
+        monkeypatch.setattr(storage_module, "REQUEST_BASE_S", SHORT_CEILING_S)
+        return real_upload(*arguments, **named_arguments)
+
+    def put_object_that_hangs(**request: Any) -> Any:
+        put_started.set()
+        never_answered.wait(HANG_RELEASE_S)
+        return answer(**request)
+
+    monkeypatch.setattr(runner_module, "upload_generation", upload_under_a_short_ceiling)
+    harness.s3.put_object = put_object_that_hangs
+    started = time.monotonic()
+
+    # Act: result() returns once the worker's own validator sealed the result and the Hub's accepted it
+    result = harness.result()
+
+    # Assert: a passing fault of the storage, worth another dispatch, not a deadline that would be final;
+    # the three waits between the four requests passed on the runtime's clock
+    assert _error_of(result) == ("output_write_failed", "upload_stalled", True, "uploading")
+    assert result["error"]["detail"] == "an upload did not end within the time an object of its size may take"
+    assert put_started.is_set()
+    assert harness.clock.waits == [0.375, 1.5, 6.0]
+    assert harness.s3.stored == []
+    assert time.monotonic() - started < HANG_RELEASE_S
+    assert harness.left_in_scratch == []
+
+
+def test_run_when_the_preflights_read_stalls_should_fail_retryable_as_stalled_at_probing(
+    harness, monkeypatch, never_answered
+):
+    # Arrange: a storage that takes the preflight's read, the first request of the execution, and never
+    # answers it; a request may take some 50 ms, and the start has its whole wall time left
+    answer = harness.s3.get_object
+    read_started = threading.Event()
+
+    def get_object_that_hangs(**request: Any) -> Any:
+        read_started.set()
+        never_answered.wait(HANG_RELEASE_S)
+        return answer(**request)
+
+    harness.s3.get_object = get_object_that_hangs
+    monkeypatch.setattr(storage_module, "REQUEST_BASE_S", SHORT_CEILING_S)
+    started = time.monotonic()
+
+    # Act
+    result = harness.result()
+
+    # Assert: the read was given up at its own ceiling, long before the deadline, and passes
+    assert _error_of(result) == ("source_unavailable", "source_read_stalled", True, "probing")
+    assert result["error"]["detail"] == "a read of the source did not end within the time a read of its size may take"
+    assert read_started.wait(HANG_RELEASE_S)
+    assert time.monotonic() - started < HANG_RELEASE_S
+    assert harness.stages.encodes == [] and harness.s3.stored == []
 
 
 def test_run_when_a_read_of_the_preflight_never_returns_should_fail_at_probing_once_the_wall_time_ends(harness):

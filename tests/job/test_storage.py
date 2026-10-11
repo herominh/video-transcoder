@@ -9,6 +9,13 @@ A request that "never returns" is one a test double keeps until the test lets it
 deadline is then a real, short one, and a test asserts how the job ended and only a generous bound on
 how long that took.
 
+No test waits between two attempts for real: every transfer is handed a stand-in for `sleep` that
+records the waits it is asked for (_Waits) and takes no time. Where a test states its waits exactly,
+the jitter's draw is replaced by one fixed factor (the `fixed_factor` fixture). No test waits out the
+half minute and more a request may take either: where a request must outlast its ceiling, the ceiling
+is made tens of milliseconds long, and only for requests the test keeps (the `short_ceiling` fixture,
+_StalledFirst), so that no other request can stall on a loaded host.
+
 The last section sends an upload through the real boto3 client that upload_client() makes: a hook on
 the client answers every prepared request before it leaves the process, so no connection is opened.
 """
@@ -67,6 +74,13 @@ KEPT_AT_MOST_S = 20.0
 # The generous bound: on how long a job may take to give up at a short deadline, and on how long a
 # request that was let go may take to end.
 PROMPT_S = 10.0
+# The factor every wait is multiplied by where a test states its waits exactly, in place of the jitter's
+# draw. The nominal waits of 0.5, 2 and 8 s times it are 0.375, 1.5 and 6 s, each exact in binary.
+FIXED_FACTOR = 0.75
+# A request ceiling a test waits out, where the worker's own is half a minute and more; and one no
+# request of a test reaches.
+SHORT_CEILING_S = 0.05
+GENEROUS_CEILING_S = 60.0
 HTTP_OK = 200
 HTTP_MULTIPLE_CHOICES = 300
 HTTP_MOVED_PERMANENTLY = 301
@@ -176,6 +190,115 @@ class _HandPassedDeadline(Deadline):
         return self._passed.is_set() or super().expired()
 
 
+class _TimeLeft(Deadline):
+    """A Deadline that has `seconds` left whenever it is asked and never passes: what a test measures
+    the next wait against, without a clock."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(time.monotonic() + GENEROUS_MS / 1000)
+        object.__setattr__(self, "_seconds", seconds)
+
+    def remaining_s(self) -> float:
+        return self._seconds
+
+    def expired(self) -> bool:
+        return False
+
+
+class _PassedOnceAsked(Deadline):
+    """A Deadline that has plenty of time left the first time it is asked how much, and none from then
+    on: it passes while the first request it was asked for is in flight, whichever thread is quicker."""
+
+    def __init__(self) -> None:
+        super().__init__(time.monotonic() + GENEROUS_MS / 1000)
+        object.__setattr__(self, "_asked", threading.Event())
+
+    def remaining_s(self) -> float:
+        # The first ask comes from the thread that is about to start a request, before that request's own.
+        if self._asked.is_set():
+            return 0.0
+        self._asked.set()
+        return GENEROUS_MS / 1000
+
+    def expired(self) -> bool:
+        return self._asked.is_set()
+
+
+class _Waits:
+    """Stands where a transfer is handed `sleep`: it records every wait it is asked for, in order, and
+    takes no time."""
+
+    def __init__(self) -> None:
+        self.asked: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self.asked.append(seconds)
+
+
+class _KeptRequests:
+    """A pause for a request double: it keeps every request that reaches it until the test lets it go
+    (a _Hold's keep()). `arrived` counts them, whatever thread each came on."""
+
+    def __init__(self, hold: _Hold) -> None:
+        self._hold = hold
+        self._arrivals: list[None] = []
+
+    @property
+    def arrived(self) -> int:
+        return len(self._arrivals)
+
+    def __call__(self) -> None:
+        # One append per request: a list takes them whole from any number of threads.
+        self._arrivals.append(None)
+        self._hold.keep()
+
+
+class _StalledFirst:
+    """Makes the first attempt of a request stall and every later request run free, however loaded the
+    host is. One object stands in three places:
+
+    request() is called by a request double on the request's own thread and keeps the first request
+    that arrives (a _Hold's keep()). ceiling_s() stands in for storage._request_ceiling_s: a ceiling of
+    SHORT_CEILING_S until the first wait was made, a generous one from then on, so that no request but
+    the kept one can outlast its ceiling. sleep() is the stand-in the transfer waits through: it records
+    the wait in `asked`, and returns only once the kept request has arrived, so that the next attempt
+    cannot overtake it.
+    """
+
+    def __init__(self, hold: _Hold) -> None:
+        self._hold = hold
+        self._arrived = 0
+        self.asked: list[float] = []
+
+    def request(self) -> None:
+        # Never two threads at once: the second request starts only after sleep() saw the first arrive.
+        self._arrived += 1
+        if self._arrived == 1:
+            self._hold.keep()
+
+    def ceiling_s(self, size_bytes: int) -> float:
+        return GENEROUS_CEILING_S if self.asked else SHORT_CEILING_S
+
+    def sleep(self, seconds: float) -> None:
+        self.asked.append(seconds)
+        assert self._hold.entered.wait(PROMPT_S), "the request that was to stall never started"
+
+
+@pytest.fixture
+def fixed_factor(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Every wait is its nominal seconds times FIXED_FACTOR: the jitter's draw is replaced."""
+    monkeypatch.setattr(storage, "_jitter_factor", lambda: FIXED_FACTOR)
+    return FIXED_FACTOR
+
+
+@pytest.fixture
+def short_ceiling(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Every request's ceiling starts from SHORT_CEILING_S where the worker's starts from half a minute.
+    Only for a test all of whose requests are kept: any other request could stall on a loaded host."""
+    monkeypatch.setattr(storage, "REQUEST_BASE_S", SHORT_CEILING_S)
+    return SHORT_CEILING_S
+
+
 def _change_in_place(path: Path) -> None:
     """Give a file other bytes of the same length: a change its recorded size cannot tell."""
     path.write_bytes(path.read_bytes().translate(OTHER_BYTES))
@@ -215,6 +338,16 @@ def _source(fake: FakeS3, *, size_bytes: int = len(OBJECT)) -> S3RangeSource:
     return S3RangeSource(fake, bucket=BUCKET, key=KEY, size_bytes=size_bytes, etag=ETAG)
 
 
+def _never_answered(hold: _Hold) -> Callable[[int, int], bytes]:
+    """An answer of a _StubSource that never comes: the read is kept until the test lets it go."""
+
+    def never(start: int, length: int) -> bytes:
+        hold.keep()
+        return bytes(length)
+
+    return never
+
+
 class _StubSource:
     """A RangeSource that answers every read with what its `answer` function gives."""
 
@@ -235,7 +368,7 @@ def test_download_when_the_source_spans_several_chunks_should_write_exactly_its_
     destination = tmp_path / "source"
 
     # Act
-    written = download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+    written = download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
 
     # Assert
     assert destination.read_bytes() == OBJECT
@@ -249,7 +382,7 @@ def test_download_when_it_reads_the_source_should_make_every_read_conditional_on
     tmp_path, fake_s3, small_chunks
 ):
     # Act
-    download_source(_source(fake_s3), destination=tmp_path / "source", deadline=_deadline())
+    download_source(_source(fake_s3), destination=tmp_path / "source", deadline=_deadline(), sleep=_Waits())
 
     # Assert
     assert len(fake_s3.get_calls) > 1
@@ -261,7 +394,7 @@ def test_download_when_it_creates_the_file_should_make_it_readable_by_its_owner_
     destination = tmp_path / "source"
 
     # Act
-    download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+    download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
 
     # Assert
     assert stat.S_IMODE(destination.stat().st_mode) & ~OWNER_ONLY == 0
@@ -275,7 +408,7 @@ def test_download_when_a_read_fails_retryably_should_read_that_chunk_again_and_f
     destination = tmp_path / "source"
 
     # Act
-    written = download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+    written = download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
 
     # Assert
     assert destination.read_bytes() == OBJECT
@@ -284,18 +417,85 @@ def test_download_when_a_read_fails_retryably_should_read_that_chunk_again_and_f
 
 
 def test_download_when_a_chunk_keeps_failing_retryably_should_give_up_after_two_more_reads(
-    tmp_path, fake_s3, small_chunks
+    tmp_path, fake_s3, small_chunks, fixed_factor, caplog
 ):
     # Arrange: every read from the second on fails
+    caplog.set_level(logging.DEBUG)
     fake_s3.fail_get(2, UNREACHABLE, and_every_later_one=True)
     destination = tmp_path / "source"
+    waits = _Waits()
 
     # Act
-    failure = _failure_of(lambda: download_source(_source(fake_s3), destination=destination, deadline=_deadline()))
+    failure = _failure_of(
+        lambda: download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=waits)
+    )
 
-    # Assert
+    # Assert: the source's own failure after three reads of the chunk, a wait before the second and the
+    # third (the nominal 0.5 s and 2 s, each times the factor 0.75), and one warning for each that says so
     assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "storage_unreachable", True)
     assert [call["Range"] for call in fake_s3.get_calls] == ["bytes=0-999"] + ["bytes=1000-1999"] * 3
+    assert waits.asked == [0.375, 1.5]
+    warnings = [record.getMessage() for record in caplog.records]
+    assert [record.levelno for record in caplog.records] == [logging.WARNING, logging.WARNING]
+    assert "0.375 s" in warnings[0] and "1.500 s" in warnings[1]
+    assert all("source_unavailable/storage_unreachable" in warning for warning in warnings)
+    assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("failed_reads", "expected_waits"),
+    [
+        pytest.param(1, [0.375], id="once"),
+        pytest.param(2, [0.375, 1.5], id="twice"),
+    ],
+)
+def test_download_when_a_chunk_fails_retryably_and_then_arrives_should_wait_before_each_further_read_and_write_it_once(
+    tmp_path, fake_s3, small_chunks, fixed_factor, failed_reads, expected_waits
+):
+    # Arrange: the read of the second chunk fails `failed_reads` times before it arrives
+    for call_number in range(2, 2 + failed_reads):
+        fake_s3.fail_get(call_number, UNREACHABLE)
+    destination = tmp_path / "source"
+    waits = _Waits()
+
+    # Act
+    written = download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=waits)
+
+    # Assert: the nominal 0.5 s, then 2 s, each times the factor 0.75; the chunk is in the file once
+    assert waits.asked == expected_waits
+    assert [call["Range"] for call in fake_s3.get_calls].count("bytes=1000-1999") == failed_reads + 1
+    assert destination.read_bytes() == OBJECT
+    assert written == len(OBJECT)
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "expected_waits", "expected_reads"),
+    [
+        pytest.param(0.3, [], 1, id="less-than-the-first-wait"),
+        pytest.param(0.375, [], 1, id="exactly-the-first-wait"),
+        pytest.param(1.0, [0.375], 2, id="less-than-the-second-wait"),
+    ],
+)
+def test_download_when_the_next_wait_would_not_end_before_the_deadline_should_neither_wait_nor_read_again(
+    tmp_path, fake_s3, small_chunks, fixed_factor, seconds_left, expected_waits, expected_reads
+):
+    # Arrange: every read fails retryably, and the deadline has `seconds_left` whenever it is asked; the
+    # waits due are 0.375 s, then 1.5 s
+    fake_s3.fail_get(1, UNREACHABLE, and_every_later_one=True)
+    destination = tmp_path / "source"
+    waits = _Waits()
+
+    # Act
+    failure = _failure_of(
+        lambda: download_source(
+            _source(fake_s3), destination=destination, deadline=_TimeLeft(seconds_left), sleep=waits
+        )
+    )
+
+    # Assert: the last read's own retryable failure, not a deadline failure
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "storage_unreachable", True)
+    assert waits.asked == expected_waits
+    assert len(fake_s3.get_calls) == expected_reads
     assert not destination.exists()
 
 
@@ -303,13 +503,17 @@ def test_download_when_a_read_fails_for_good_should_not_read_again(tmp_path, sma
     # Arrange: the storage holds no such object, which no retry changes
     empty = FakeS3()
     destination = tmp_path / "source"
+    waits = _Waits()
 
     # Act
-    failure = _failure_of(lambda: download_source(_source(empty), destination=destination, deadline=_deadline()))
+    failure = _failure_of(
+        lambda: download_source(_source(empty), destination=destination, deadline=_deadline(), sleep=waits)
+    )
 
-    # Assert
+    # Assert: read once, and waited for nothing
     assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "source_missing", False)
     assert len(empty.get_calls) == 1
+    assert waits.asked == []
     assert not destination.exists()
 
 
@@ -325,7 +529,11 @@ def test_download_when_the_source_changes_between_two_chunks_should_fail_as_an_i
     # Act
     failure = _failure_of(
         lambda: download_source(
-            _source(fake_s3), destination=destination, deadline=_deadline(), on_bytes=replace_the_object
+            _source(fake_s3),
+            destination=destination,
+            deadline=_deadline(),
+            sleep=_Waits(),
+            on_bytes=replace_the_object,
         )
     )
 
@@ -345,7 +553,9 @@ def test_download_when_the_source_is_shorter_than_recorded_should_fail_as_an_int
     source = _source(fake_s3, size_bytes=len(OBJECT) + CHUNK_BYTES)
 
     # Act
-    failure = _failure_of(lambda: download_source(source, destination=destination, deadline=_deadline()))
+    failure = _failure_of(
+        lambda: download_source(source, destination=destination, deadline=_deadline(), sleep=_Waits())
+    )
 
     # Assert
     assert (failure.error_class, failure.retryable) == ("source_integrity_mismatch", False)
@@ -362,7 +572,9 @@ def test_download_when_a_read_gives_another_length_than_asked_should_fail_as_a_s
     destination = tmp_path / "source"
 
     # Act
-    failure = _failure_of(lambda: download_source(source, destination=destination, deadline=_deadline()))
+    failure = _failure_of(
+        lambda: download_source(source, destination=destination, deadline=_deadline(), sleep=_Waits())
+    )
 
     # Assert
     assert (failure.error_class, failure.code, failure.retryable) == (
@@ -378,7 +590,7 @@ def test_download_when_the_deadline_has_passed_should_fail_before_it_reads(tmp_p
 
     # Act
     failure = _failure_of(
-        lambda: download_source(_source(fake_s3), destination=destination, deadline=_passed_deadline())
+        lambda: download_source(_source(fake_s3), destination=destination, deadline=_passed_deadline(), sleep=_Waits())
     )
 
     # Assert
@@ -396,7 +608,7 @@ def test_download_when_the_deadline_passes_between_two_chunks_should_stop_readin
     destination = tmp_path / "source"
 
     # Act
-    failure = _failure_of(lambda: download_source(source, destination=destination, deadline=deadline))
+    failure = _failure_of(lambda: download_source(source, destination=destination, deadline=deadline, sleep=_Waits()))
 
     # Assert
     assert failure.code == "download_deadline_exceeded"
@@ -420,7 +632,9 @@ def test_download_when_a_read_never_returns_should_fail_at_the_deadline_and_remo
 
     # Act
     failure = _failure_of(
-        lambda: download_source(source, destination=destination, deadline=Deadline.after_ms(SHORT_MS))
+        lambda: download_source(
+            source, destination=destination, deadline=Deadline.after_ms(SHORT_MS), sleep=_Waits()
+        )
     )
 
     # Assert
@@ -444,7 +658,7 @@ def test_download_when_a_read_ends_after_the_deadline_passed_should_fail_and_kee
     destination = tmp_path / "source"
 
     # Act
-    failure = _failure_of(lambda: download_source(source, destination=destination, deadline=deadline))
+    failure = _failure_of(lambda: download_source(source, destination=destination, deadline=deadline, sleep=_Waits()))
 
     # Assert
     assert (failure.error_class, failure.code, failure.retryable) == (
@@ -452,6 +666,111 @@ def test_download_when_a_read_ends_after_the_deadline_passed_should_fail_and_kee
     )
     assert source.reads == [(0, CHUNK_BYTES)]
     assert not destination.exists()
+
+
+def test_download_when_a_read_stalls_and_the_next_one_arrives_should_wait_read_the_chunk_again_and_finish(
+    tmp_path, small_chunks, hold, fixed_factor, monkeypatch
+):
+    # Arrange: the first read of the first chunk never returns, with a minute left on the deadline and
+    # a ceiling of 50 ms; every later read answers at once
+    stalled = _StalledFirst(hold)
+
+    def first_read_never_returns(start: int, length: int) -> bytes:
+        stalled.request()
+        return OBJECT[start : start + length]
+
+    source = _StubSource(len(OBJECT), first_read_never_returns)
+    monkeypatch.setattr(storage, "_request_ceiling_s", stalled.ceiling_s)
+    destination = tmp_path / "source"
+
+    # Act: the kept read is let go only once the download has finished without it
+    written = download_source(source, destination=destination, deadline=_deadline(), sleep=stalled.sleep)
+    hold.release()
+
+    # Assert: the chunk was read again after the first wait (0.5 s times the factor 0.75), and whatever
+    # the abandoned read returned in the end is in no file
+    assert hold.entered.is_set()
+    assert stalled.asked == [0.375]
+    assert source.reads[:2] == [(0, CHUNK_BYTES), (0, CHUNK_BYTES)]
+    assert destination.read_bytes() == OBJECT
+    assert written == len(OBJECT)
+
+
+def test_download_when_a_read_stalls_on_every_attempt_should_fail_retryable_as_stalled_after_three_reads(
+    tmp_path, small_chunks, hold, fixed_factor, short_ceiling
+):
+    # Arrange: no read of the first chunk ever returns, with a minute left on the deadline and a ceiling
+    # of some 50 ms
+    kept = _KeptRequests(hold)
+
+    def never(start: int, length: int) -> bytes:
+        kept()
+        return bytes(length)
+
+    source = _StubSource(3 * CHUNK_BYTES, never)
+    destination = tmp_path / "source"
+    waits = _Waits()
+    started_at = time.monotonic()
+
+    # Act
+    failure = _failure_of(
+        lambda: download_source(source, destination=destination, deadline=_deadline(), sleep=waits)
+    )
+    gave_up_after_s = time.monotonic() - started_at
+    assert hold.entered.wait(PROMPT_S)
+    hold.release()
+
+    # Assert: a failed attempt that passes, not a deadline; read three times, with both waits between
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "source_read_stalled", True)
+    assert waits.asked == [0.375, 1.5]
+    assert source.reads == [(0, CHUNK_BYTES)] * 3
+    assert kept.arrived == 3
+    assert gave_up_after_s < PROMPT_S
+    assert not destination.exists()
+
+
+def test_download_when_the_deadline_passes_under_a_read_that_outlasts_its_ceiling_should_fail_as_a_deadline(
+    tmp_path, small_chunks, hold, short_ceiling
+):
+    # Arrange: a read that never returns under a ceiling of some 50 ms, and a deadline that has a minute
+    # left when the read starts and none by the time the ceiling is reached
+    source = _StubSource(3 * CHUNK_BYTES, _never_answered(hold))
+    destination = tmp_path / "source"
+    waits = _Waits()
+
+    # Act
+    failure = _failure_of(
+        lambda: download_source(source, destination=destination, deadline=_PassedOnceAsked(), sleep=waits)
+    )
+    assert hold.entered.wait(PROMPT_S)
+    hold.release()
+
+    # Assert: the deadline failure, final as ever, whatever the ceiling: no wait and no second read
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "deadline_exceeded", "download_deadline_exceeded", False
+    )
+    assert waits.asked == []
+    assert source.reads == [(0, CHUNK_BYTES)]
+    assert not destination.exists()
+
+
+def test_download_when_it_reads_a_chunk_should_hold_each_read_to_the_ceiling_of_its_own_length(
+    tmp_path, fake_s3, small_chunks, monkeypatch
+):
+    # Arrange: note the size each ceiling is asked for; three whole chunks and a fourth of 332 bytes
+    sizes: list[int] = []
+
+    def noted_ceiling(size_bytes: int) -> float:
+        sizes.append(size_bytes)
+        return GENEROUS_CEILING_S
+
+    monkeypatch.setattr(storage, "_request_ceiling_s", noted_ceiling)
+
+    # Act
+    download_source(_source(fake_s3), destination=tmp_path / "source", deadline=_deadline(), sleep=_Waits())
+
+    # Assert
+    assert sizes == [1000, 1000, 1000, 332]
 
 
 def test_download_when_no_thread_can_be_started_for_a_read_should_fail_retryably_and_remove_the_file(
@@ -467,7 +786,7 @@ def test_download_when_no_thread_can_be_started_for_a_read_should_fail_retryably
     with monkeypatch.context() as patched:
         patched.setattr(threading.Thread, "start", no_thread)
         with pytest.raises(WorkerFailure) as raised:
-            download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+            download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
 
     # Assert
     failure = raised.value.failure
@@ -515,6 +834,108 @@ def test_deadline_source_when_a_read_never_returns_should_fail_at_the_deadline(h
     )
     assert hold.entered.is_set()
     assert time.monotonic() - started_at < PROMPT_S
+
+
+@pytest.mark.parametrize(
+    ("deadline_ms", "ceiling_s", "expected"),
+    [
+        pytest.param(
+            60_000, 0.05, ("source_unavailable", "source_read_stalled", True), id="the-ceiling-comes-first"
+        ),
+        pytest.param(
+            500, 60.0, ("deadline_exceeded", "source_read_deadline_exceeded", False), id="the-deadline-comes-first"
+        ),
+    ],
+)
+def test_deadline_source_when_a_read_never_returns_should_fail_by_whichever_of_its_ceiling_and_the_deadline_is_nearer(
+    hold, monkeypatch, deadline_ms, ceiling_s, expected
+):
+    # Arrange: a read that never returns, held to a deadline and to a ceiling of its own
+    inner = _StubSource(len(OBJECT), _never_answered(hold))
+    monkeypatch.setattr(storage, "REQUEST_BASE_S", ceiling_s)
+    source = DeadlineSource(inner, Deadline.after_ms(deadline_ms))
+    started_at = time.monotonic()
+
+    # Act
+    failure = _failure_of(lambda: source.read(0, CHUNK_BYTES))
+    gave_up_after_s = time.monotonic() - started_at
+    assert hold.entered.wait(PROMPT_S)
+    hold.release()
+
+    # Assert: stalled passes and is worth another attempt, a deadline is final; neither is read again here
+    assert (failure.error_class, failure.code, failure.retryable) == expected
+    assert inner.reads == [(0, CHUNK_BYTES)]
+    assert gave_up_after_s < PROMPT_S
+
+
+def test_deadline_source_when_the_deadline_passes_under_a_read_that_outlasts_its_ceiling_should_fail_as_a_deadline(
+    hold, short_ceiling
+):
+    # Arrange: a read that never returns under a ceiling of some 50 ms, and a deadline that has a minute
+    # left when the read starts and none by the time the ceiling is reached
+    inner = _StubSource(len(OBJECT), _never_answered(hold))
+    source = DeadlineSource(inner, _PassedOnceAsked())
+
+    # Act
+    failure = _failure_of(lambda: source.read(0, CHUNK_BYTES))
+    assert hold.entered.wait(PROMPT_S)
+
+    # Assert
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "deadline_exceeded", "source_read_deadline_exceeded", False
+    )
+
+
+def test_within_when_a_call_that_is_given_no_ceiling_never_returns_should_fail_at_the_deadline_as_before(hold):
+    # Arrange: a request held to the deadline alone, as a caller that names no ceiling holds it
+    expired = Failure("deadline_exceeded", "request_deadline_exceeded", False, "the test's request ran out of time")
+    started_at = time.monotonic()
+
+    # Act
+    failure = _failure_of(lambda: storage._within(Deadline.after_ms(100), hold.keep, expired=expired))
+    gave_up_after_s = time.monotonic() - started_at
+    assert hold.entered.wait(PROMPT_S)
+
+    # Assert: the caller's own deadline failure, once the deadline's tenth of a second has passed
+    assert failure is expired
+    assert gave_up_after_s < PROMPT_S
+
+
+def test_deadline_source_when_it_reads_should_hold_the_read_to_the_ceiling_of_its_length(monkeypatch):
+    # Arrange: note the size the ceiling is asked for
+    sizes: list[int] = []
+
+    def noted_ceiling(size_bytes: int) -> float:
+        sizes.append(size_bytes)
+        return GENEROUS_CEILING_S
+
+    monkeypatch.setattr(storage, "_request_ceiling_s", noted_ceiling)
+    source = DeadlineSource(_StubSource(len(OBJECT), lambda start, length: OBJECT[start : start + length]), _deadline())
+
+    # Act
+    source.read(1000, 24)
+
+    # Assert
+    assert sizes == [24]
+
+
+@pytest.mark.parametrize(
+    ("size_bytes", "expected_s"),
+    [
+        pytest.param(0, 30.0, id="no-bytes"),
+        pytest.param(256 * 1024, 31.0, id="256-kib"),
+        pytest.param(8 * 1024 * 1024, 62.0, id="an-8-mib-chunk"),
+        pytest.param(1024 * 1024 * 1024, 4126.0, id="a-1-gib-object"),
+    ],
+)
+def test_request_ceiling_when_a_request_has_more_bytes_should_be_30_s_and_a_second_more_for_each_256_kib(
+    size_bytes, expected_s
+):
+    # Act
+    ceiling_s = storage._request_ceiling_s(size_bytes)
+
+    # Assert
+    assert ceiling_s == expected_s
 
 
 @pytest.mark.parametrize(
@@ -655,7 +1076,7 @@ def test_download_when_the_destination_exists_should_refuse_it_and_leave_it_alon
 
     # Act
     with pytest.raises(ValueError):
-        download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+        download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
 
     # Assert
     assert destination.read_bytes() == b"an earlier file"
@@ -670,7 +1091,7 @@ def test_download_when_the_destination_is_a_link_should_refuse_it_and_write_noth
 
     # Act
     with pytest.raises(ValueError):
-        download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+        download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
 
     # Assert
     assert not target.exists()
@@ -703,7 +1124,7 @@ def test_download_when_a_write_fails_should_fail_typed_and_remove_the_partial_fi
     with monkeypatch.context() as patched:
         patched.setattr(os, "write", failing_second_write)
         failure = _failure_of(
-            lambda: download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+            lambda: download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
         )
 
     # Assert
@@ -720,7 +1141,9 @@ def test_download_when_progress_is_asked_for_should_report_the_running_total_aft
     totals: list[int] = []
 
     # Act
-    download_source(_source(fake_s3), destination=tmp_path / "source", deadline=_deadline(), on_bytes=totals.append)
+    download_source(
+        _source(fake_s3), destination=tmp_path / "source", deadline=_deadline(), sleep=_Waits(), on_bytes=totals.append
+    )
 
     # Assert
     assert totals == [1000, 2000, 3000, len(OBJECT)]
@@ -734,7 +1157,9 @@ def test_download_when_the_progress_callback_raises_should_still_finish(tmp_path
         raise RuntimeError("the progress display broke")
 
     # Act
-    written = download_source(_source(fake_s3), destination=destination, deadline=_deadline(), on_bytes=broken_callback)
+    written = download_source(
+        _source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits(), on_bytes=broken_callback
+    )
 
     # Assert
     assert written == len(OBJECT)
@@ -747,6 +1172,8 @@ def test_download_when_the_progress_callback_raises_should_still_finish(tmp_path
         pytest.param("destination", Path("relative/source"), ValueError, id="relative-destination"),
         pytest.param("destination", "/tmp/source-as-text", ValueError, id="destination-as-text"),
         pytest.param("deadline", 60_000, TypeError, id="deadline-as-a-number"),
+        pytest.param("sleep", 0.5, TypeError, id="sleep-not-callable"),
+        pytest.param("sleep", None, TypeError, id="sleep-as-nothing"),
         pytest.param("on_bytes", "not-callable", TypeError, id="progress-not-callable"),
     ],
 )
@@ -754,7 +1181,9 @@ def test_download_when_an_argument_is_invalid_should_refuse_it_before_it_reads(
     tmp_path, fake_s3, argument, value, error
 ):
     # Arrange
-    arguments: dict[str, Any] = {"destination": tmp_path / "source", "deadline": _deadline(), "on_bytes": None}
+    arguments: dict[str, Any] = {
+        "destination": tmp_path / "source", "deadline": _deadline(), "sleep": _Waits(), "on_bytes": None
+    }
     arguments[argument] = value
 
     # Act
@@ -763,6 +1192,19 @@ def test_download_when_an_argument_is_invalid_should_refuse_it_before_it_reads(
 
     # Assert
     assert fake_s3.get_calls == []
+
+
+def test_download_when_no_sleep_is_given_should_refuse_it_before_it_reads(tmp_path, fake_s3):
+    # Arrange
+    destination = tmp_path / "source"
+
+    # Act
+    with pytest.raises(TypeError):
+        download_source(_source(fake_s3), destination=destination, deadline=_deadline())
+
+    # Assert
+    assert fake_s3.get_calls == []
+    assert not destination.exists()
 
 
 # --- the generation --------------------------------------------------------------------------------
@@ -787,6 +1229,8 @@ class _Generation:
             (self.output_root / path).write_bytes(data)
         (self.output_root / MANIFEST_NAME).write_bytes(self.MANIFEST)
         self.artifacts = [artifact_of(path, data) for path, data in self.FILES.items()]
+        # What every upload of this generation waits through, unless a test hands it another `sleep`.
+        self.waits = _Waits()
         self.manifest = ManifestOutput(
             path=MANIFEST_NAME,
             sha256=hashlib.sha256(self.MANIFEST).hexdigest(),
@@ -803,6 +1247,7 @@ class _Generation:
             "artifacts": self.artifacts,
             "manifest": self.manifest,
             "deadline": _deadline(),
+            "sleep": self.waits,
         }
         arguments.update(changes)
         return upload_generation(client, **arguments)
@@ -1079,6 +1524,8 @@ def test_upload_when_the_prefix_is_no_contract_object_key_should_refuse_it_befor
         pytest.param("artifacts", [{"path": "master.m3u8"}], TypeError, id="artifacts-as-mappings"),
         pytest.param("manifest", MANIFEST_NAME, TypeError, id="manifest-as-text"),
         pytest.param("deadline", 60_000, TypeError, id="deadline-as-a-number"),
+        pytest.param("sleep", 0.5, TypeError, id="sleep-not-callable"),
+        pytest.param("sleep", None, TypeError, id="sleep-as-nothing"),
     ],
 )
 def test_upload_when_an_argument_is_invalid_should_refuse_it_before_any_request(generation, argument, value, error):
@@ -1756,12 +2203,13 @@ def test_upload_when_a_put_is_refused_for_good_should_not_send_it_again_and_fail
     with pytest.raises(WorkerFailure) as raised:
         generation.upload(client)
 
-    # Assert: sent once, nothing after it, and named by its class and its code only
+    # Assert: sent once, waited for nothing, nothing after it, and named by its class and its code only
     failure = raised.value.failure
     assert (failure.error_class, failure.code, failure.retryable) == ("output_write_failed", "upload_refused", False)
     assert [call.key.removeprefix(f"{PREFIX}/") for call in client.put_calls] == [
         "master.m3u8", "thumbnail.jpg", "360p/playlist.m3u8"
     ]
+    assert generation.waits.asked == []
     assert failure.detail == f"an object could not be stored: {named}"
     assert [record.levelno for record in caplog.records] == [logging.WARNING]
     for told in (failure.detail, str(raised.value), caplog.text):
@@ -1787,8 +2235,8 @@ def test_upload_when_a_put_fails_once_in_a_way_that_can_pass_should_send_it_agai
 
 
 @pytest.mark.parametrize(("error", "named"), PASSING_FAILURES)
-def test_upload_when_a_put_keeps_failing_should_give_up_after_two_more_requests_and_never_put_the_manifest(
-    generation, caplog, error, named
+def test_upload_when_a_put_keeps_failing_should_give_up_after_three_more_requests_and_never_put_the_manifest(
+    generation, caplog, fixed_factor, error, named
 ):
     # Arrange: every request from the third on fails
     caplog.set_level(logging.DEBUG)
@@ -1799,18 +2247,277 @@ def test_upload_when_a_put_keeps_failing_should_give_up_after_two_more_requests_
     with pytest.raises(WorkerFailure) as raised:
         generation.upload(client)
 
-    # Assert
+    # Assert: four requests of the object, a wait before the second, third and fourth (the nominal 0.5,
+    # 2 and 8 s, each times the factor 0.75), and one warning for each that says how long
     failure = raised.value.failure
     assert (failure.error_class, failure.code, failure.retryable) == ("output_write_failed", "upload_failed", True)
     assert [call.key.removeprefix(f"{PREFIX}/") for call in client.put_calls] == [
-        "master.m3u8", "thumbnail.jpg", "360p/playlist.m3u8", "360p/playlist.m3u8", "360p/playlist.m3u8"
+        "master.m3u8",
+        "thumbnail.jpg",
+        "360p/playlist.m3u8",
+        "360p/playlist.m3u8",
+        "360p/playlist.m3u8",
+        "360p/playlist.m3u8",
     ]
+    assert generation.waits.asked == [0.375, 1.5, 6.0]
+    warnings = [record.getMessage() for record in caplog.records]
+    assert [record.levelno for record in caplog.records] == [logging.WARNING] * 3
+    assert "0.375 s" in warnings[0] and "1.500 s" in warnings[1] and "6.000 s" in warnings[2]
     assert named in failure.detail
     for told in (failure.detail, str(raised.value), caplog.text):
         assert "example.invalid" not in told
         assert SECRET_CANARY not in told
         assert "://" not in told
     assert raised.value.__cause__ is None and raised.value.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("failed_requests", "expected_waits"),
+    [
+        pytest.param(1, [0.375], id="once"),
+        pytest.param(2, [0.375, 1.5], id="twice"),
+        pytest.param(3, [0.375, 1.5, 6.0], id="three-times"),
+    ],
+)
+def test_upload_when_a_put_fails_in_a_passing_way_and_is_then_taken_should_wait_before_each_request_and_finish(
+    generation, fixed_factor, failed_requests, expected_waits
+):
+    # Arrange: the put of the third object fails `failed_requests` times before the storage takes it
+    client = FakeS3()
+    for call_number in range(3, 3 + failed_requests):
+        client.fail_put(call_number, UNREACHABLE)
+
+    # Act
+    uploaded = generation.upload(client)
+
+    # Assert: the nominal 0.5 s, then 2 s, then 8 s, each times the factor 0.75; the generation is stored
+    assert generation.waits.asked == expected_waits
+    requested = [call.key.removeprefix(f"{PREFIX}/") for call in client.put_calls]
+    assert requested.count("360p/playlist.m3u8") == failed_requests + 1
+    assert [call.key for call in client.stored][-1] == f"{PREFIX}/{MANIFEST_NAME}"
+    assert len(client.stored) == len(_Generation.FILES) + 1
+    assert uploaded == sum(len(call.body) for call in client.stored)
+
+
+def test_upload_when_it_waits_should_draw_the_factor_of_each_wait_anew_between_a_half_and_one(generation):
+    # Arrange: fifty uploads whose third put fails three times, each wait with the jitter's own draw
+    runs = 50
+
+    # Act
+    for _ in range(runs):
+        client = FakeS3()
+        for call_number in (3, 4, 5):
+            client.fail_put(call_number, UNREACHABLE)
+        generation.upload(client)
+
+    # Assert: every wait is its nominal 0.5, 2 or 8 s times a factor of its own from 0.5 to 1
+    waits = generation.waits.asked
+    factors = [wait / nominal for wait, nominal in zip(waits, [0.5, 2.0, 8.0] * runs)]
+    assert len(waits) == 3 * runs
+    assert all(0.5 <= factor <= 1.0 for factor in factors)
+    assert min(factors) < 0.6 and max(factors) > 0.9
+    assert len(set(factors)) > runs
+
+
+def _slow_down(retry_after: object) -> ClientError:
+    """A `SlowDown` answer (503) to a PutObject whose headers, kept as botocore keeps them (the names in
+    lower case, in the answer's metadata), hold `retry_after` as their `Retry-After`."""
+    error = _refused("SlowDown", HTTP_SERVICE_UNAVAILABLE)
+    error.response["ResponseMetadata"]["HTTPHeaders"] = {"retry-after": retry_after, "content-length": "0"}
+    return error
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_wait"),
+    [
+        pytest.param("5", 5.0, id="five-seconds"),
+        pytest.param("0005", 5.0, id="five-seconds-with-leading-zeros"),
+        pytest.param("30", 30.0, id="exactly-the-most"),
+        pytest.param("31", 30.0, id="a-second-more-than-the-most"),
+        pytest.param("3600", 30.0, id="an-hour"),
+        pytest.param("9" * 5000, 30.0, id="more-digits-than-python-converts"),
+        pytest.param("0", 0.375, id="no-seconds-at-all"),
+    ],
+)
+def test_upload_when_a_failed_puts_answer_asks_to_retry_after_whole_seconds_should_wait_that_long_and_30_s_at_most(
+    generation, fixed_factor, retry_after, expected_wait
+):
+    # Arrange: the storage answers the third put once with a `SlowDown` that asks for a wait; without it
+    # the wait would be 0.375 s
+    client = FakeS3()
+    client.fail_put(3, _slow_down(retry_after))
+
+    # Act
+    generation.upload(client)
+
+    # Assert
+    assert generation.waits.asked == [expected_wait]
+    assert len(client.stored) == len(_Generation.FILES) + 1
+
+
+@pytest.mark.parametrize(
+    "retry_after",
+    [
+        pytest.param("-5", id="a-negative-number"),
+        pytest.param("+5", id="a-signed-number"),
+        pytest.param("5.5", id="a-fraction"),
+        pytest.param("5s", id="a-number-with-a-unit"),
+        pytest.param(" 5", id="a-number-after-a-space"),
+        pytest.param("Wed, 21 Oct 2026 07:28:00 GMT", id="an-http-date"),
+        pytest.param("", id="empty"),
+        pytest.param("٥", id="a-digit-outside-ascii"),
+        pytest.param(5, id="a-number-that-is-no-text"),
+        pytest.param(None, id="nothing"),
+        pytest.param(["5"], id="a-list"),
+    ],
+)
+def test_upload_when_a_failed_puts_retry_after_is_no_whole_number_of_seconds_should_ignore_it(
+    generation, fixed_factor, retry_after
+):
+    # Arrange
+    client = FakeS3()
+    client.fail_put(3, _slow_down(retry_after))
+
+    # Act
+    generation.upload(client)
+
+    # Assert: the wait that was due anyway, 0.5 s times the factor 0.75
+    assert generation.waits.asked == [0.375]
+    assert len(client.stored) == len(_Generation.FILES) + 1
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param(None, id="no-headers"),
+        pytest.param("retry-after: 5", id="headers-as-text"),
+        pytest.param([("retry-after", "5")], id="headers-as-a-list"),
+        pytest.param({}, id="headers-without-it"),
+    ],
+)
+def test_upload_when_a_failed_puts_answer_holds_its_headers_in_no_known_shape_should_wait_as_without_them(
+    generation, fixed_factor, headers
+):
+    # Arrange
+    slow_down = _refused("SlowDown", HTTP_SERVICE_UNAVAILABLE)
+    slow_down.response["ResponseMetadata"]["HTTPHeaders"] = headers
+    client = FakeS3()
+    client.fail_put(3, slow_down)
+
+    # Act
+    generation.upload(client)
+
+    # Assert
+    assert generation.waits.asked == [0.375]
+    assert len(client.stored) == len(_Generation.FILES) + 1
+
+
+def test_upload_when_the_storage_asks_for_less_than_the_wait_that_is_due_should_keep_the_longer_wait(
+    generation, fixed_factor
+):
+    # Arrange: the third put fails three times, and each answer asks for one second
+    client = FakeS3()
+    for call_number in (3, 4, 5):
+        client.fail_put(call_number, _slow_down("1"))
+
+    # Act
+    generation.upload(client)
+
+    # Assert: one second where 0.375 s was due, then the 1.5 s and the 6 s that were due anyway
+    assert generation.waits.asked == [1.0, 1.5, 6.0]
+
+
+def test_upload_when_a_failed_puts_answer_carries_headers_should_tell_nothing_of_them(
+    generation, fixed_factor, caplog
+):
+    # Arrange: every put of the third object is answered with headers that hold what must never be told,
+    # one of them where the seconds to wait would stand
+    caplog.set_level(logging.DEBUG)
+    slow_down = _refused("SlowDown", HTTP_SERVICE_UNAVAILABLE)
+    slow_down.response["ResponseMetadata"]["HTTPHeaders"] = {
+        "retry-after": ERROR_TEXT_CANARY,
+        "location": f"{ENDPOINT_CANARY}/{OUTPUT_BUCKET}/{PREFIX}/360p/playlist.m3u8",
+    }
+    client = FakeS3()
+    client.fail_put(3, slow_down, and_every_later_one=True)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        generation.upload(client)
+
+    # Assert: the warnings of the three further attempts and the failure name the error and the waits only
+    assert generation.waits.asked == [0.375, 1.5, 6.0]
+    assert len(caplog.records) == 3
+    for told in (raised.value.failure.detail, str(raised.value), caplog.text):
+        assert "example.invalid" not in told
+        assert SECRET_CANARY not in told
+        assert "://" not in told
+        assert PREFIX not in told
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "expected_waits", "expected_requests"),
+    [
+        pytest.param(0.3, [], 1, id="less-than-the-first-wait"),
+        pytest.param(0.375, [], 1, id="exactly-the-first-wait"),
+        pytest.param(1.0, [0.375], 2, id="less-than-the-second-wait"),
+        pytest.param(5.0, [0.375, 1.5], 3, id="less-than-the-third-wait"),
+    ],
+)
+def test_upload_when_the_next_wait_would_not_end_before_the_deadline_should_neither_wait_nor_send_again(
+    generation, fixed_factor, seconds_left, expected_waits, expected_requests
+):
+    # Arrange: every put of the first object fails in a passing way, and the deadline has `seconds_left`
+    # whenever it is asked; the waits due are 0.375 s, 1.5 s, then 6 s
+    client = FakeS3()
+    client.fail_put(1, UNREACHABLE, and_every_later_one=True)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        generation.upload(client, deadline=_TimeLeft(seconds_left))
+
+    # Assert: the last request's own retryable failure, not a deadline failure, and no manifest
+    failure = raised.value.failure
+    assert (failure.error_class, failure.code, failure.retryable) == ("output_write_failed", "upload_failed", True)
+    assert generation.waits.asked == expected_waits
+    assert [call.key for call in client.put_calls] == [f"{PREFIX}/master.m3u8"] * expected_requests
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+
+
+def test_upload_when_the_storage_asks_for_a_wait_that_would_not_end_before_the_deadline_should_not_send_again(
+    generation, fixed_factor
+):
+    # Arrange: the storage asks for five seconds, and the deadline has three left
+    client = FakeS3()
+    client.fail_put(1, _slow_down("5"), and_every_later_one=True)
+
+    # Act
+    failure = _failure_of(lambda: generation.upload(client, deadline=_TimeLeft(3.0)))
+
+    # Assert
+    assert (failure.error_class, failure.code, failure.retryable) == ("output_write_failed", "upload_failed", True)
+    assert generation.waits.asked == []
+    assert len(client.put_calls) == 1
+
+
+def test_upload_when_no_sleep_is_given_should_refuse_it_before_any_request(generation):
+    # Arrange
+    client = FakeS3()
+
+    # Act
+    with pytest.raises(TypeError):
+        upload_generation(
+            client,
+            bucket=OUTPUT_BUCKET,
+            prefix=PREFIX,
+            output_root=generation.output_root,
+            artifacts=generation.artifacts,
+            manifest=generation.manifest,
+            deadline=_deadline(),
+        )
+
+    # Assert
+    assert client.put_calls == []
 
 
 def test_upload_when_the_deadline_has_passed_should_fail_before_any_request(generation):
@@ -1921,6 +2628,130 @@ def test_upload_when_a_put_was_abandoned_at_the_deadline_should_close_its_file_a
     assert caplog.records == []
     shown = capfd.readouterr()
     assert (shown.out, shown.err) == ("", "")
+
+
+def test_upload_when_a_put_stalls_and_the_next_one_is_taken_should_wait_send_the_object_again_and_finish(
+    generation, hold, fixed_factor, monkeypatch
+):
+    # Arrange: the storage never answers the first put of the first object, with a minute left on the
+    # deadline and a ceiling of 50 ms; it takes every later put at once
+    stalled = _StalledFirst(hold)
+    client = _PausingS3(stalled.request, f"{PREFIX}/master.m3u8")
+    monkeypatch.setattr(storage, "_request_ceiling_s", stalled.ceiling_s)
+
+    # Act: the kept request is let go only once the upload has finished without it
+    uploaded = generation.upload(client, sleep=stalled.sleep)
+    hold.release()
+
+    # Assert: sent again after the first wait (0.5 s times the factor 0.75); the abandoned request got
+    # none of the file, so the object the storage holds is the one request that was waited for
+    expected = {f"{PREFIX}/{path}": data for path, data in _Generation.FILES.items()}
+    expected[f"{PREFIX}/{MANIFEST_NAME}"] = _Generation.MANIFEST
+    assert hold.entered.is_set()
+    assert stalled.asked == [0.375]
+    assert {call.key: call.body for call in client.stored} == expected
+    assert [call.key for call in client.put_calls].count(f"{PREFIX}/master.m3u8") == 1
+    assert uploaded == sum(len(data) for data in expected.values())
+
+
+def test_upload_when_a_put_stalls_on_every_attempt_should_fail_retryable_as_stalled_and_close_its_file(
+    generation, hold, fixed_factor, short_ceiling, caplog, capfd, monkeypatch
+):
+    # Arrange: the storage never answers a put of the first object, with a minute left on the deadline
+    # and a ceiling of some 50 ms
+    caplog.set_level(logging.DEBUG)
+    kept = _KeptRequests(hold)
+    client = _PausingS3(kept, f"{PREFIX}/master.m3u8")
+    printed_by_a_thread: list[Any] = []
+    started_at = time.monotonic()
+
+    # Act: the upload gives up while its requests still run; only then are they let go
+    with monkeypatch.context() as patched:
+        patched.setattr(threading, "excepthook", printed_by_a_thread.append)
+        with pytest.raises(WorkerFailure) as raised:
+            generation.upload(client)
+        gave_up_after_s = time.monotonic() - started_at
+        held_open_under_the_running_requests = _holds_open(generation.output_root / "master.m3u8")
+        assert hold.entered.wait(PROMPT_S)
+        hold.release()
+
+    # Assert: a plain typed failure that passes, not a deadline, after four requests of the object with
+    # the three waits between them
+    failure = raised.value.failure
+    assert type(raised.value) is WorkerFailure
+    assert (failure.error_class, failure.code, failure.retryable) == ("output_write_failed", "upload_stalled", True)
+    assert generation.waits.asked == [0.375, 1.5, 6.0]
+    assert kept.arrived == 4
+    assert gave_up_after_s < PROMPT_S
+    # The file was closed at once; no request got a byte of it, and nothing follows, the manifest included
+    assert not held_open_under_the_running_requests
+    assert client.put_calls == []
+    # Nothing surfaces of the abandoned requests: the only lines are the three warnings of the attempts
+    assert printed_by_a_thread == []
+    assert [record.levelno for record in caplog.records] == [logging.WARNING] * 3
+    assert all("upload_stalled" in record.getMessage() for record in caplog.records)
+    shown = capfd.readouterr()
+    assert (shown.out, shown.err) == ("", "")
+    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+
+
+def test_upload_when_a_put_stalls_and_the_next_ones_fail_should_give_them_one_count_of_attempts_together(
+    generation, hold, fixed_factor, monkeypatch
+):
+    # Arrange: the storage never answers the first put of the first object, and no later put reaches it
+    stalled = _StalledFirst(hold)
+    client = _PausingS3(stalled.request, f"{PREFIX}/master.m3u8")
+    client.fail_put(1, UNREACHABLE, and_every_later_one=True)
+    monkeypatch.setattr(storage, "_request_ceiling_s", stalled.ceiling_s)
+
+    # Act
+    failure = _failure_of(lambda: generation.upload(client, sleep=stalled.sleep))
+
+    # Assert: four requests in all, the stalled one and three that failed, and the last one's own failure
+    assert (failure.error_class, failure.code, failure.retryable) == ("output_write_failed", "upload_failed", True)
+    assert stalled.asked == [0.375, 1.5, 6.0]
+    assert [(call.key, call.failed) for call in client.put_calls] == [(f"{PREFIX}/master.m3u8", True)] * 3
+
+
+def test_upload_when_the_deadline_passes_under_a_put_that_outlasts_its_ceiling_should_fail_as_a_deadline(
+    generation, hold, short_ceiling
+):
+    # Arrange: a put that is never answered under a ceiling of some 50 ms, and a deadline that has a
+    # minute left when the put starts and none by the time the ceiling is reached
+    client = _PausingS3(hold.keep, f"{PREFIX}/master.m3u8")
+
+    # Act
+    failure = _failure_of(lambda: generation.upload(client, deadline=_PassedOnceAsked()))
+    assert hold.entered.wait(PROMPT_S)
+    hold.release()
+
+    # Assert: the deadline failure, final as ever, whatever the ceiling: no wait and no second request
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "deadline_exceeded", "upload_deadline_exceeded", False
+    )
+    assert generation.waits.asked == []
+    assert client.put_calls == []
+
+
+def test_upload_when_it_puts_an_object_should_hold_each_request_to_the_ceiling_of_its_recorded_size(
+    generation, monkeypatch
+):
+    # Arrange: note the size each ceiling is asked for
+    sizes: list[int] = []
+
+    def noted_ceiling(size_bytes: int) -> float:
+        sizes.append(size_bytes)
+        return GENEROUS_CEILING_S
+
+    monkeypatch.setattr(storage, "_request_ceiling_s", noted_ceiling)
+    client = FakeS3()
+
+    # Act
+    generation.upload(client)
+
+    # Assert: the recorded size of each file, in upload order, the manifest's last
+    assert sizes == [len(data) for data in (*_Generation.FILES.values(), _Generation.MANIFEST)]
+    assert sizes[0] == 25 and len(sizes) == 6
 
 
 class _FileClosedUnderARead:
@@ -2317,6 +3148,34 @@ def test_upload_when_a_file_changes_after_the_upload_client_signed_it_should_ref
     assert sent.headers["x-amz-content-sha256"] == hashlib.sha256(LARGE_SEGMENT).hexdigest()
     assert sent.body == LARGE_SEGMENT.translate(OTHER_BYTES)
     assert (failure.error_class, failure.code) == ("internal_error", "artifact_changed_before_upload")
+
+
+def test_upload_when_the_upload_clients_answer_asks_to_retry_after_seconds_should_wait_that_long_and_send_again(
+    generation, fixed_factor
+):
+    # Arrange: the real client's first request is answered with a 503 that asks for five seconds, as a
+    # storage sends the header; every later request is answered with a 200
+    client = upload_client(ACCESS_PROFILE)
+    answered: list[str] = []
+
+    def answer(request: Any, **named_arguments: Any) -> AWSResponse:
+        answered.append(request.url)
+        if len(answered) == 1:
+            return AWSResponse(request.url, HTTP_SERVICE_UNAVAILABLE, {"Retry-After": "5"}, _EmptyRawResponse())
+        request.body.read()
+        return AWSResponse(request.url, HTTP_OK, {}, _EmptyRawResponse())
+
+    client.meta.events.register("before-send.s3.PutObject", answer)
+    first_address = f"https://storage.test.invalid/{OUTPUT_BUCKET}/{PREFIX}/master.m3u8"
+
+    # Act
+    uploaded = generation.upload(client)
+
+    # Assert: five seconds where 0.375 s was due, then the same object again and the rest of the generation
+    assert generation.waits.asked == [5.0]
+    assert answered[:2] == [first_address, first_address]
+    assert len(answered) == len(_Generation.FILES) + 2
+    assert uploaded == sum(len(data) for data in (*_Generation.FILES.values(), _Generation.MANIFEST))
 
 
 def test_upload_client_when_given_an_access_profile_should_reach_its_endpoint_as_the_source_reader_does():

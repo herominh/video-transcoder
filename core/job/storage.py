@@ -3,15 +3,30 @@
 Each side has its own client of an access profile: storage_client() reads the source, upload_client()
 stores the generation.
 
-Every request is held to the execution's deadline while it is in flight. The client's read time-out
-bounds a silence only, so a storage that trickles a body or withholds its answer would hold a billed
-worker without limit. Each request therefore runs on a helper thread, and the job waits for it no
-longer than the deadline leaves (_within). A request that has not ended by then is abandoned: the job
-goes on to its typed failure, the helper thread ends when its request does, and whatever the request
-returns or raises afterwards is dropped with it, unseen. A request that ends after the deadline is
-dropped the same way, however soon after it ends. An abandoned upload is given no more of its file,
-which the job's own thread closes as it stops waiting. DeadlineSource holds to the same rule the reads
-this module does not make itself (the preflight's).
+Every request is held to the execution's deadline while it is in flight, and to a time ceiling of its
+own. The client's read time-out bounds a silence only, so a storage that trickles a body or withholds
+its answer would hold a billed worker without limit. Each request therefore runs on a helper thread,
+and the job waits for it no longer than the deadline leaves, nor longer than a request of its size may
+take (_within, _request_ceiling_s). A request that has not ended by then is abandoned: the job goes on
+to its typed failure, the helper thread ends when its request does, and whatever the request returns
+or raises afterwards is dropped with it, unseen. A request that ends after the deadline is dropped the
+same way, however soon after it ends. An abandoned upload is given no more of its file, which the
+job's own thread closes as it stops waiting. A request abandoned at the deadline is the deadline
+failure, which is final. One abandoned at its ceiling while the deadline still has time left has
+stalled, which passes: it is a failed attempt (source_read_stalled, upload_stalled, both retryable).
+DeadlineSource holds to the same rules the reads this module does not make itself (the preflight's).
+
+A failed attempt that can pass is made again, but only after a wait: a storage that throttles or
+stumbles is not helped by a request that comes back at once. The waits grow from attempt to attempt
+(DOWNLOAD_RETRY_WAITS_S, UPLOAD_RETRY_WAITS_S), each is shortened by a factor drawn at random, so that
+workers that failed together do not come back together, and an upload waits at least as long as the
+storage's answer asks (`Retry-After`, RETRY_AFTER_MAX_S at most). No wait goes past the deadline: when
+the next one would, the request is not made again and its last failure stands. Because a request that
+stalled at its ceiling is made again, a further attempt can start while an abandoned request for the
+same object still runs. That is safe. An abandoned
+read's bytes are dropped, whenever they arrive. An abandoned PutObject and its repeat can only ever
+store the recorded bytes of the same file under the same key (a body whose bytes are not the recorded
+ones is refused), so whichever of them lands, and in whatever order, the object is the same.
 
 download_source() copies the source into the scratch directory through RangeSource.read(), so every byte
 arrives through the reader's own checks: in production an S3RangeSource, whose ranged reads are each
@@ -28,10 +43,12 @@ them, and an object counts as stored only when they have the size and the SHA-25
 A pass over a file that ends with other bytes is refused where it ends: before anything is sent, with a
 client that reads a body through to sign it.
 A refusal that sending the object again cannot change (the credentials may not write, the bucket does
-not exist) ends the upload at once and for good; every other failed request is sent again.
+not exist) ends the upload at once and for good; every other failed request is sent again, after its
+wait.
 
 No log line and no failure detail holds an endpoint, a URL, a credential or the storage client's own
-error text: a storage error is named by its class and, for an answer of the storage, its error code.
+error text: a storage error is named by its class and, for an answer of the storage, its error code,
+and of a `Retry-After` header nothing is kept but its number of seconds.
 """
 
 from __future__ import annotations
@@ -41,9 +58,10 @@ import functools
 import hashlib
 import logging
 import os
+import random
 import stat
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, TypeVar
@@ -56,7 +74,7 @@ from core.bounded_process import Deadline
 from core.encode import ArtifactFile
 from core.failure import Failure, WorkerFailure, make_detail
 from core.package import ManifestOutput
-from core.profile import MIB
+from core.profile import KIB, MIB
 from core.protocol import schema
 from core.protocol.settings import StorageProfile
 from core.source_reader import (
@@ -70,10 +88,23 @@ from core.source_reader import (
 logger = logging.getLogger(__name__)
 
 DOWNLOAD_CHUNK_BYTES = 8 * MIB
-# How many more times one chunk's read is tried after a failure the source calls retryable, and one
-# object's upload after a failed request.
-DOWNLOAD_EXTRA_ATTEMPTS = 2
-UPLOAD_EXTRA_ATTEMPTS = 2
+# How long the job waits before it makes a failed request again, in seconds: one entry for each further
+# attempt. So one chunk's read is tried twice more at most after a failure the source calls retryable,
+# and one object's upload three times more after a failed request (a failed upload throws away a
+# finished encode). These are the nominal waits: each is multiplied by a factor drawn between
+# RETRY_JITTER_MIN and RETRY_JITTER_MAX (_jitter_factor).
+DOWNLOAD_RETRY_WAITS_S = (0.5, 2.0)
+UPLOAD_RETRY_WAITS_S = (0.5, 2.0, 8.0)
+RETRY_JITTER_MIN = 0.5
+RETRY_JITTER_MAX = 1.0
+# The most seconds a storage's `Retry-After` can ask one wait to last, and the name botocore keeps that
+# header under: lower case, among the answer's other headers.
+RETRY_AFTER_MAX_S = 30.0
+RETRY_AFTER_HEADER = "retry-after"
+# What one storage request may take, whatever the deadline leaves (_request_ceiling_s): a base, and the
+# time its bytes take at the slowest rate that still counts as moving.
+REQUEST_BASE_S = 30.0
+REQUEST_MIN_BYTES_PER_S = 256 * KIB
 SOURCE_FILE_FLAGS = (
     os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 )
@@ -141,6 +172,16 @@ SOURCE_READ_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "source_read_deadline_exceeded", False,
     "the job ran out of time while it read the source",
 )
+# A request that outlasted its own ceiling while the deadline still had time left: a failed attempt
+# that passes, unlike a deadline (a slow network or storage, not a limit that is too small).
+SOURCE_READ_STALLED = Failure(
+    "source_unavailable", "source_read_stalled", True,
+    "a read of the source did not end within the time a read of its size may take",
+)
+UPLOAD_STALLED = Failure(
+    "output_write_failed", "upload_stalled", True,
+    "an upload did not end within the time an object of its size may take",
+)
 STORAGE_REQUEST_START_FAILED = Failure(
     "resource_exhausted", "storage_request_start_failed", True,
     "a storage request could not be started: no thread could be made for it",
@@ -205,11 +246,62 @@ def _notify(on_bytes: Callable[[int], None] | None, total_bytes: int) -> None:
         logger.warning("a transfer's progress callback failed: %s", type(error).__name__)
 
 
-def _require_transfer_arguments(deadline: object, on_bytes: object) -> None:
+def _require_transfer_arguments(deadline: object, sleep: object, on_bytes: object) -> None:
     if not isinstance(deadline, Deadline):
         raise TypeError("deadline must be a Deadline")
+    if not callable(sleep):
+        raise TypeError("sleep must be callable")
     if on_bytes is not None and not callable(on_bytes):
         raise TypeError("on_bytes must be callable or None")
+
+
+# --- the wait before a failed request is made again -------------------------------------------------
+
+
+def _jitter_factor() -> float:
+    """The factor one wait is multiplied by, drawn anew for every wait: workers whose requests failed
+    together then do not all come back together."""
+    # `random` will do: the draw spreads load, it protects nothing.
+    return random.uniform(RETRY_JITTER_MIN, RETRY_JITTER_MAX)
+
+
+def _next_wait_s(nominal_waits_s: Iterator[float], deadline: Deadline, *, at_least_s: float = 0.0) -> float | None:
+    """How many seconds to wait before a failed request is made again; None when it is not made again:
+    its attempts are used up, or the wait would not end before the deadline.
+
+    `nominal_waits_s` gives the nominal wait before each further attempt of one request and ends with
+    the last of them. The wait is the nominal one times the drawn factor, or `at_least_s` when that is
+    longer (what the storage's answer asked for). Whoever gets None raises the request's last failure as
+    it is: time too short for another attempt is not a deadline the request ran into.
+    """
+    nominal_s = next(nominal_waits_s, None)
+    if nominal_s is None:
+        return None
+    wait_s = max(nominal_s * _jitter_factor(), at_least_s)
+    return wait_s if wait_s < deadline.remaining_s() else None
+
+
+def _retry_after_s(error: BotoCoreError | ClientError) -> float:
+    """The seconds the storage's answer asks the next request to wait, RETRY_AFTER_MAX_S at most; 0 when
+    the error is no answer of the storage, or its answer asks for none.
+
+    Only a `Retry-After` of whole seconds counts, a string of ASCII digits and nothing else: an HTTP
+    date, a fraction, a negative number or an answer of any other shape asks for nothing. Nothing of
+    the header is kept but that number.
+    """
+    if not isinstance(error, ClientError):
+        return 0.0
+    metadata = error.response.get("ResponseMetadata")
+    headers = metadata.get("HTTPHeaders") if isinstance(metadata, Mapping) else None
+    asked = headers.get(RETRY_AFTER_HEADER) if isinstance(headers, Mapping) else None
+    if not isinstance(asked, str) or not (asked.isascii() and asked.isdigit()):
+        return 0.0
+    significant = asked.lstrip("0")
+    # More digits than the most seconds have is more seconds than that, whatever the digits. So no
+    # number of any length is converted: Python's int() refuses a very long one (3.11, and 3.10 from 3.10.7).
+    if len(significant) > len(str(int(RETRY_AFTER_MAX_S))):
+        return RETRY_AFTER_MAX_S
+    return min(float(significant or "0"), RETRY_AFTER_MAX_S)
 
 
 # --- a request in flight -------------------------------------------------------------------------
@@ -239,7 +331,22 @@ class _Request:
             self.ended.set()
 
 
-def _within(deadline: Deadline, call: Callable[[], _Returned], *, expired: Failure) -> _Returned:
+def _request_ceiling_s(size_bytes: int) -> float:
+    """The seconds one storage request of `size_bytes` may take, whatever the deadline leaves:
+    REQUEST_BASE_S for the exchange itself, and the time its bytes take at REQUEST_MIN_BYTES_PER_S, the
+    slowest rate that still counts as moving. A request that takes longer has stalled. (A size below
+    zero is a caller's bug, which the request itself refuses: it gets the base.)"""
+    return REQUEST_BASE_S + max(size_bytes, 0) / REQUEST_MIN_BYTES_PER_S
+
+
+def _within(
+    deadline: Deadline,
+    call: Callable[[], _Returned],
+    *,
+    expired: Failure,
+    stalled: Failure | None = None,
+    ceiling_s: float | None = None,
+) -> _Returned:
     """What `call()` returns, or raises, when it ends before `deadline`; WorkerFailure(expired) when it does not.
 
     Nothing can cut short a request the storage client is in the middle of, so the call runs on a helper
@@ -250,6 +357,15 @@ def _within(deadline: Deadline, call: Callable[[], _Returned], *, expired: Failu
     at the call's ending whether time was left, and this thread goes by that note, not by when it came
     to look. When no time is left, no request is started. A helper thread that cannot be started is a
     retryable WorkerFailure.
+
+    `ceiling_s` and `stalled`, given together, hold the call to a time of its own as well: this thread
+    then waits no longer than the ceiling, and a call that has not ended at its ceiling while the
+    deadline still has time left is abandoned in the same way and raises WorkerFailure(stalled), a
+    failed attempt its caller may make again. A call that has not ended when the deadline passes is
+    WorkerFailure(expired) whatever its ceiling: when the deadline leaves no more time than the ceiling,
+    this thread waits for the deadline, and a ceiling the deadline passed under counts for nothing. A
+    call that ended, in time or not, is judged as without a ceiling: the ceiling bounds this thread's
+    wait, so a call that has ended by the time this thread looks counts as ended, even a moment past it.
     """
     remaining_s = deadline.remaining_s()
     if remaining_s <= 0:
@@ -262,8 +378,15 @@ def _within(deadline: Deadline, call: Callable[[], _Returned], *, expired: Failu
     except RuntimeError:
         # `from None`: the interpreter's own text says nothing the typed failure does not.
         raise WorkerFailure(STORAGE_REQUEST_START_FAILED) from None
+    # The ceiling counts only where it is the nearer bound. A wait that was for the deadline ends as the
+    # deadline failure, even should a clock's grain then show a sliver of time left.
+    wait_s = remaining_s
+    if stalled is not None and ceiling_s is not None and ceiling_s < remaining_s:
+        wait_s = ceiling_s
     # A wait longer than TIMEOUT_MAX is refused by the lock it waits on (OverflowError).
-    ended = request.ended.wait(min(remaining_s, threading.TIMEOUT_MAX))
+    ended = request.ended.wait(min(wait_s, threading.TIMEOUT_MAX))
+    if not ended and stalled is not None and wait_s < remaining_s and deadline.remaining_s() > 0:
+        raise WorkerFailure(stalled)
     if not ended or not request.ended_in_time:
         raise WorkerFailure(expired)
     if request.raised is not None:
@@ -272,12 +395,16 @@ def _within(deadline: Deadline, call: Callable[[], _Returned], *, expired: Failu
 
 
 class DeadlineSource:
-    """A RangeSource whose every read returns or fails by a deadline: for the reads of a source that
-    this module does not make itself (the preflight's).
+    """A RangeSource whose every read returns or fails by a deadline, and within the time a read of its
+    length may take: for the reads of a source that this module does not make itself (the preflight's).
 
     A read that has not ended by the deadline raises WorkerFailure (deadline_exceeded /
     source_read_deadline_exceeded, not retryable) and is abandoned, as _within describes. A read that
-    ends in time returns what the inner source returned or raises what it raised, unchanged.
+    has not ended at the ceiling of its length (_request_ceiling_s) while the deadline still has time
+    left is abandoned in the same way and raises WorkerFailure (source_unavailable /
+    source_read_stalled, retryable). It is not read again here: that is its caller's to decide, and
+    whatever an abandoned read still fetches is dropped. A read that ends in time returns what the
+    inner source returned or raises what it raised, unchanged.
     """
 
     def __init__(self, inner: RangeSource, deadline: Deadline) -> None:
@@ -297,7 +424,11 @@ class DeadlineSource:
 
     def read(self, start: int, length: int) -> bytes:
         return _within(
-            self._deadline, functools.partial(self._inner.read, start, length), expired=SOURCE_READ_DEADLINE_EXCEEDED
+            self._deadline,
+            functools.partial(self._inner.read, start, length),
+            expired=SOURCE_READ_DEADLINE_EXCEEDED,
+            stalled=SOURCE_READ_STALLED,
+            ceiling_s=_request_ceiling_s(length),
         )
 
 
@@ -309,22 +440,31 @@ def download_source(
     *,
     destination: Path,
     deadline: Deadline,
+    sleep: Callable[[float], None],
     on_bytes: Callable[[int], None] | None = None,
 ) -> int:
     """Copy the whole source object to the new file `destination` and return the bytes written.
 
     The object is read in order, DOWNLOAD_CHUNK_BYTES at a time, only through `source.read()`. A chunk
-    whose read fails with a retryable WorkerFailure is read again, DOWNLOAD_EXTRA_ATTEMPTS times at
-    most; every other failure of a read ends the download at once. No read starts once `deadline` has
-    passed, and a read still in flight when it passes is abandoned (_within). `on_bytes` is called with
-    the bytes written so far after each chunk.
+    whose read fails with a retryable WorkerFailure is read again, once for each entry of
+    DOWNLOAD_RETRY_WAITS_S at most and each time only after a wait: that entry's seconds times a factor
+    drawn between RETRY_JITTER_MIN and RETRY_JITTER_MAX, waited through `sleep(seconds)`. A wait that
+    would not end before `deadline` is not made: the chunk is not read again, and its read's last
+    failure is raised as it is. Every other failure of a read ends the download at once, with no wait.
+
+    No read starts once `deadline` has passed, and a read still in flight when it passes is abandoned
+    (_within). A read that has not ended at the ceiling of its length (_request_ceiling_s) while the
+    deadline still has time left is abandoned as well and is a failed attempt of the retryable kind
+    (source_unavailable / source_read_stalled). The chunk may then be read again while the abandoned
+    read still runs, which is safe: whatever an abandoned read returns is dropped. `on_bytes` is called
+    with the bytes written so far after each chunk.
 
     Raises WorkerFailure for a failed read, a chunk of another length than asked (the object is not the
     recorded size), a passed deadline and a failed write; the partial file is removed first. Raises
     TypeError or ValueError for invalid arguments or an existing destination, before anything is read.
     """
     size_bytes = _validated_download(source, destination)
-    _require_transfer_arguments(deadline, on_bytes)
+    _require_transfer_arguments(deadline, sleep, on_bytes)
     try:
         descriptor = os.open(destination, SOURCE_FILE_FLAGS, SOURCE_FILE_MODE)
     except OSError as error:
@@ -332,7 +472,7 @@ def download_source(
         raise _source_write_failure(error) from None
     try:
         try:
-            return _copy_source(source, size_bytes, descriptor, deadline, on_bytes)
+            return _copy_source(source, size_bytes, descriptor, deadline, sleep, on_bytes)
         finally:
             os.close(descriptor)
     except BaseException:
@@ -359,12 +499,13 @@ def _copy_source(
     size_bytes: int,
     descriptor: int,
     deadline: Deadline,
+    sleep: Callable[[float], None],
     on_bytes: Callable[[int], None] | None,
 ) -> int:
     written = 0
     while written < size_bytes:
         length = min(DOWNLOAD_CHUNK_BYTES, size_bytes - written)
-        data = _read_chunk(source, written, length, deadline)
+        data = _read_chunk(source, written, length, deadline, sleep)
         if len(data) != length:
             raise WorkerFailure(
                 Failure(
@@ -381,25 +522,37 @@ def _copy_source(
     return written
 
 
-def _read_chunk(source: RangeSource, start: int, length: int, deadline: Deadline) -> bytes:
-    """One chunk through the source's own checks, each read held to the deadline, read again only after
-    a failure it calls retryable."""
-    extra_attempts_left = DOWNLOAD_EXTRA_ATTEMPTS
+def _read_chunk(
+    source: RangeSource, start: int, length: int, deadline: Deadline, sleep: Callable[[float], None]
+) -> bytes:
+    """One chunk through the source's own checks, each read held to the deadline and to the ceiling of
+    its length, read again only after a failure it calls retryable and the wait that follows it.
+
+    A read that stalled (it outlasted its ceiling while the deadline had time left) is such a failure.
+    It may still be running when the chunk is read again: its bytes are dropped, so only the read
+    that is waited for can give the chunk. When no attempt is left, or the next wait would not end
+    before the deadline, the last failure is raised as it is, a stalled read's included."""
+    nominal_waits_s = iter(DOWNLOAD_RETRY_WAITS_S)
     while True:
         if deadline.expired():
             raise WorkerFailure(DOWNLOAD_DEADLINE_EXCEEDED)
         try:
             return _within(
-                deadline, functools.partial(source.read, start, length), expired=DOWNLOAD_DEADLINE_EXCEEDED
+                deadline,
+                functools.partial(source.read, start, length),
+                expired=DOWNLOAD_DEADLINE_EXCEEDED,
+                stalled=SOURCE_READ_STALLED,
+                ceiling_s=_request_ceiling_s(length),
             )
         except WorkerFailure as failed:
-            if not failed.failure.retryable or extra_attempts_left == 0:
+            wait_s = _next_wait_s(nominal_waits_s, deadline) if failed.failure.retryable else None
+            if wait_s is None:
                 raise
-            extra_attempts_left -= 1
             logger.warning(
-                "a read of the source failed and is tried again: %s/%s",
-                failed.failure.error_class, failed.failure.code,
+                "a read of the source failed and is tried again after %.3f s: %s/%s",
+                wait_s, failed.failure.error_class, failed.failure.code,
             )
+        sleep(wait_s)
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -458,26 +611,39 @@ def upload_generation(
     artifacts: Sequence[ArtifactFile],
     manifest: ManifestOutput,
     deadline: Deadline,
+    sleep: Callable[[float], None],
     on_bytes: Callable[[int], None] | None = None,
 ) -> int:
     """Store the generation in `bucket` and return the bytes uploaded: `artifacts` in order, then the manifest.
 
     Every key is `prefix`, `/` and the file's path relative to `output_root`. Each object is one
     PutObject of the file, whose size on disk must still be the recorded one and whose bytes, as the
-    client read them, must have the recorded size and SHA-256. A failed request is sent again,
-    UPLOAD_EXTRA_ATTEMPTS times at most, from the start of the file, unless it was refused for good: an
-    answer with an HTTP status from 300 to 499 that is none of PASSING_REFUSAL_STATUSES and carries none
-    of PASSING_REFUSAL_CODES, or parameters the client itself refuses, is final. No request starts once
-    `deadline` has passed; a request still in flight when it passes is abandoned (_within), its file is
-    closed and it is given no more of it; a request that ends after it has passed does not count
-    either. `on_bytes` is called with the bytes uploaded so far after each object.
+    client read them, must have the recorded size and SHA-256. A failed request is sent again, from the
+    start of the file, once for each entry of UPLOAD_RETRY_WAITS_S at most and each time only after a
+    wait, unless it was refused for good: an answer with an HTTP status from 300 to 499 that is none of
+    PASSING_REFUSAL_STATUSES and carries none of PASSING_REFUSAL_CODES, or parameters the client itself
+    refuses, is final and waits for nothing. The wait is that entry's seconds times a factor drawn
+    between RETRY_JITTER_MIN and RETRY_JITTER_MAX, and at least the whole seconds a `Retry-After` header
+    of the storage's answer names, RETRY_AFTER_MAX_S at most; it is waited through `sleep(seconds)`. A
+    wait that would not end before `deadline` is not made: the object is not sent again, and its
+    request's last failure is raised as it is.
+
+    No request starts once `deadline` has passed; a request still in flight when it passes is abandoned
+    (_within), its file is closed and it is given no more of it; a request that ends after it has passed
+    does not count either. A request that has not ended at the ceiling of its object's recorded size
+    (_request_ceiling_s) while the deadline still has time left is abandoned in the same way, its file
+    closed, and is a failed attempt that passes (upload_stalled). The object may then be sent again
+    while the abandoned request still runs. That is safe: both can only ever store the recorded bytes of
+    the same file under the same key (a body whose bytes are not the recorded ones is refused), so
+    whichever of them lands, the object is the same. `on_bytes` is called with the bytes uploaded so far
+    after each object.
 
     Raises TypeError or ValueError, before any request, for anything that would put an object where the
     generation does not belong (a wiring bug): a prefix that is no contract object key, a path that is
     no contract rel_path, two files with one path, a file that is not a regular file of the output root
     or has no content type here; a ValueError about a file names its relative path only. Raises
     WorkerFailure for a file that changed, a passed deadline, a refusal (not retryable) and an upload
-    that kept failing (retryable): no later object is then put, so the manifest is stored only after
+    that kept failing or stalling (retryable): no later object is then put, so the manifest is stored only after
     every artifact was. With a client that reads a body through before it sends it (botocore does, to
     sign the payload), a file whose bytes are not the recorded ones is refused before a byte of it is
     sent, the manifest included; a file that changes between that pass and the sending pass is refused
@@ -490,11 +656,11 @@ def upload_generation(
         raise TypeError("client must be an S3 client")
     if not isinstance(bucket, str) or not bucket:
         raise ValueError("bucket must be a non-empty string")
-    _require_transfer_arguments(deadline, on_bytes)
+    _require_transfer_arguments(deadline, sleep, on_bytes)
     uploads = _planned_uploads(prefix, output_root, artifacts, manifest)
     uploaded = 0
     for upload in uploads:
-        _store(client, bucket, upload, deadline)
+        _store(client, bucket, upload, deadline, sleep)
         uploaded += upload.size_bytes
         _notify(on_bytes, uploaded)
     return uploaded
@@ -565,39 +731,64 @@ def _is_regular_file_below(root: Path, local_path: Path) -> bool:
         return False
 
 
-def _store(client: Any, bucket: str, upload: _Upload, deadline: Deadline) -> None:
-    """Put one object, each request held to the deadline. A failed request is sent again,
-    UPLOAD_EXTRA_ATTEMPTS times at most; one that was refused for good is not."""
-    extra_attempts_left = UPLOAD_EXTRA_ATTEMPTS
+def _store(client: Any, bucket: str, upload: _Upload, deadline: Deadline, sleep: Callable[[float], None]) -> None:
+    """Put one object, each request held to the deadline and to the ceiling of the object's size. A
+    failed request is sent again, once for each entry of UPLOAD_RETRY_WAITS_S at most and each time
+    only after its wait; one that was refused for good is not, and waits for nothing.
+
+    A request that stalled (it outlasted its ceiling while the deadline had time left) is a failed
+    request like one the storage or the connection failed: it is sent again after the wait, and when no
+    attempt is left, or the next wait would not end before the deadline, the upload ends with the last
+    failure as it is (upload_stalled or upload_failed, both retryable). The abandoned request may still
+    be running when the object is sent again. Its file is closed, so it gets no more of it, and it and
+    its repeat can only ever store the recorded bytes of this one file under this one key: whichever of
+    them lands, the object is the same."""
+    nominal_waits_s = iter(UPLOAD_RETRY_WAITS_S)
     while True:
         if deadline.expired():
             raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
         try:
             _send(client, bucket, upload, deadline)
             return
+        except WorkerFailure as stalled:
+            # Every other typed failure of a request ends the upload as it is: the deadline, a file that
+            # changed, a request no thread could be made for.
+            if stalled.failure is not UPLOAD_STALLED:
+                raise
+            failed, name, asked_s = stalled, UPLOAD_STALLED.code, 0.0
         except (BotoCoreError, ClientError) as error:
             name = _storage_error_name(error)
-            # `from None`, both times: the client's own error names the endpoint, and must not travel with ours.
             if _refused_for_good(error):
                 logger.warning("an upload was refused for good and is not sent again: %s", name)
+                # `from None`: the client's own error names the endpoint, and must not travel with ours.
                 raise _upload_refused(name) from None
-            if extra_attempts_left == 0:
-                raise _upload_failed(name) from None
-            extra_attempts_left -= 1
-            logger.warning("an upload failed and is tried again: %s", name)
+            failed, asked_s = _upload_failed(name), _retry_after_s(error)
+        wait_s = _next_wait_s(nominal_waits_s, deadline, at_least_s=asked_s)
+        if wait_s is None:
+            # `from None` here too: nothing of the client's error travels with the failure of the upload.
+            raise failed from None
+        logger.warning("an upload failed and is tried again after %.3f s: %s", wait_s, name)
+        sleep(wait_s)
 
 
 def _send(client: Any, bucket: str, upload: _Upload, deadline: Deadline) -> None:
     """One request of the file as it is on disk now, opened anew so that every attempt sends it from
-    its start, and held to the deadline.
+    its start, held to the deadline and to the ceiling of the object's recorded size.
 
     The file is opened and closed here, on the thread that waits, whatever becomes of the request. A
-    request that was abandoned at the deadline goes on for as long as the storage lets it: it must not
-    keep the file open until then, nor the disk space of a scratch file that was removed meanwhile.
-    Closing waits for a local read of the file that request has under way, never for the storage.
+    request that was abandoned, at the deadline or at its ceiling, goes on for as long as the storage
+    lets it: it must not keep the file open until then, nor the disk space of a scratch file that was
+    removed meanwhile. Closing waits for a local read of the file that request has under way, never for
+    the storage.
     """
     with _CheckedBody(_opened_artifact(upload), deadline, upload.size_bytes, upload.sha256) as body:
-        _within(deadline, functools.partial(_put, client, bucket, upload, body), expired=UPLOAD_DEADLINE_EXCEEDED)
+        _within(
+            deadline,
+            functools.partial(_put, client, bucket, upload, body),
+            expired=UPLOAD_DEADLINE_EXCEEDED,
+            stalled=UPLOAD_STALLED,
+            ceiling_s=_request_ceiling_s(upload.size_bytes),
+        )
 
 
 def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
@@ -608,7 +799,8 @@ def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
     read after the deadline, then a pass over the file that ended with other bytes than the recorded
     ones. An error of the client's own comes next, raised again as it is: a pass it had read only a
     part of says nothing about the file. A request that returned is judged by its last pass. (The step
-    for a read after the deadline is a belt: such a request also ended out of time, and _within's own
+    for a read after the deadline is a belt: such a request also ended out of time or was abandoned at
+    its ceiling, its outcome is dropped either way, and _within's own
     note of that already makes it the deadline failure.)
     """
     try:

@@ -26,6 +26,12 @@ the ending. The media key of the grant goes to the encode and nowhere else, and 
 to the two client factories (one for the source, one for the output) and nowhere else: neither is
 logged, put in a message or written by this module (README 15.1, rules 4 and 5). A bug is logged by its
 class and its stack only: an unexpected error's own text can quote anything, so it reaches no log line.
+
+A stage that runs out of time ends the execution for good (`deadline_exceeded` is not retryable there: a
+limit that is too small must not become a paid retry loop). So that the Hub and an operator can tell a
+limit that is too small from a start whose claim took most of the time, the detail of a failed result
+of that class ends with how much of the start's wall time was gone before the execution began, in
+whole seconds: the failure's own detail first, never cut, so one that leaves no room goes without.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ import tempfile
 import time
 import traceback
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -45,7 +51,7 @@ from core.admission import RequestLimits
 from core.bounded_process import MS_PER_SECOND, Deadline
 from core.encode import ArtifactFile, OutputAllowance, RenditionOutput, encode_rendition
 from core.encode_command import EncodeSource
-from core.failure import Diagnostic, Failure, WorkerFailure, make_detail
+from core.failure import DETAIL_MAX_CHARS, Diagnostic, Failure, WorkerFailure, make_detail
 from core.hls_key import KEY_BYTES
 from core.package import (
     CONTRACT_MAX_DIAGNOSTICS,
@@ -102,6 +108,10 @@ SIDE_OUTPUT = "output"
 UNKNOWN_ERRNO_NAME = "unknown"
 # How many errors of a chain (an error, its cause or the error it interrupted, and so on) a bug's log follows.
 MAX_CHAINED_ERRORS = 8
+# The class of the failures whose detail says what the start had spent before the execution began, and
+# what that detail is made of: the failure's own, then the two numbers in whole seconds.
+DEADLINE_EXCEEDED_CLASS = "deadline_exceeded"
+SPENT_BEFORE_START_DETAIL = "{detail}; the start had spent {spent_s} s of its {limit_s} s before the execution began"
 
 UNSUPPORTED_PROFILE = Failure(
     "configuration_error", "unsupported_profile", False,
@@ -295,6 +305,11 @@ class _Execution:
         # once, from that duration.
         left_ms = int((claimed.wall_time_ends_at - runtime.monotonic()) * MS_PER_SECOND)
         self._wall_time_spent = left_ms < 1
+        # Kept for a deadline failure's detail, in whole seconds rounded down: the dispatch's limit, and
+        # what the start had spent of it by now (more than the limit when the claim overran it).
+        limit_ms = claimed.dispatch.limits.max_wall_time_ms
+        self._wall_time_limit_s = limit_ms // MS_PER_SECOND
+        self._spent_before_start_s = max(0, limit_ms - left_ms) // MS_PER_SECOND
         # With no time left the execution ends at its first step, and its deadline is one that has passed.
         self._deadline = Deadline(time.monotonic()) if self._wall_time_spent else Deadline.after_ms(left_ms)
         self._progress = ProgressReporter(claimed, runtime)
@@ -322,10 +337,31 @@ class _Execution:
             # No `exc_info`: a traceback ends with the error's own text. The class and the stack say where.
             logger.error("execution %s ended on an unexpected %s", execution_id, _stack_report(error))
             failure = Failure("internal_error", "unexpected_error", True, make_detail(type(error).__name__))
+        failure = self._with_the_time_spent_before_start(failure)
         logger.warning(
             "execution %s failed at stage %s: %s/%s", execution_id, self._stage, failure.error_class, failure.code
         )
         return self._failed(failure)
+
+    def _with_the_time_spent_before_start(self, failure: Failure) -> Failure:
+        """A deadline failure, its detail followed by how much of the start's wall time was gone before
+        the execution began; every other failure as it is.
+
+        Whatever ran out of time (a stage, a transfer, the ffmpeg check, or the start before the execution
+        could begin), the two numbers tell a limit that is too small for the job from a start whose claim
+        took most of it. (Where a stage's own budget ran out with wall time left, the code names that
+        budget, and the numbers only show that the wall time was not what ran out.) The failure's own
+        detail is never cut: one that leaves no room for the numbers within what a detail may hold stays
+        as it is.
+        """
+        if failure.error_class != DEADLINE_EXCEEDED_CLASS:
+            return failure
+        detail = SPENT_BEFORE_START_DETAIL.format(
+            detail=failure.detail, spent_s=self._spent_before_start_s, limit_s=self._wall_time_limit_s
+        )
+        if len(detail) > DETAIL_MAX_CHARS:
+            return failure
+        return replace(failure, detail=detail)
 
     # --- the stages --------------------------------------------------------------------------------
 
@@ -491,7 +527,13 @@ class _Execution:
             self._bytes_read = probed_bytes + total_bytes
             self._progress.downloaded(total_bytes, source.size_bytes)
 
-        download_source(source, destination=scratch.source_path, deadline=self._deadline, on_bytes=downloaded)
+        download_source(
+            source,
+            destination=scratch.source_path,
+            deadline=self._deadline,
+            sleep=self._runtime.sleep,
+            on_bytes=downloaded,
+        )
         return scratch
 
     def _make_scratch(self) -> _Scratch:
@@ -627,6 +669,7 @@ class _Execution:
             artifacts=generation.artifacts,
             manifest=manifest,
             deadline=self._deadline,
+            sleep=self._runtime.sleep,
             on_bytes=uploaded,
         )
 
