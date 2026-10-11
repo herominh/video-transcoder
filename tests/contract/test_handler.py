@@ -6,8 +6,9 @@ the claimed execution to the job runner exactly once; unclaimed, it does no work
 message is the job's output and is also posted to the callback address, the same signed bytes both ways,
 and no failure of the callback costs the output; a job runner that fails, or returns what is no job
 output, posts nothing there. Every start draws its own runtime id. load_runtime() checks the contract
-tree before it reads the configuration. Nothing of a message, a signature, the bootstrap token or a key
-is logged.
+tree before it reads the configuration. Nothing of a message, a signature, the bootstrap token, a key or
+a storage credential is logged, and an error of the callback is logged by its class only once it is no
+longer being handled, so that a log handler failing on that line reports nothing of the error's own text.
 
 One start has one wall-time budget, counted from the moment handle() begins: the claiming ends by it,
 the job is told when it ends, and the callback is not attempted once it is spent (the output still is
@@ -16,7 +17,9 @@ returned).
 The transport and the clock are the test's own (v2_support): no network, no real waiting.
 """
 
+import contextlib
 import dataclasses
+import io
 import json
 import logging
 import re
@@ -25,12 +28,15 @@ import time
 import types
 import uuid
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import pytest
 
 from core.failure import Failure
-from core.protocol import files, handler, messages, pipeline, signing
+from core.protocol import claim as claim_module
+from core.protocol import files, handler, messages
+from core.protocol import outbox as outbox_module
+from core.protocol import pipeline, signing
 from core.protocol.claim import Grant
 from core.protocol.dispatch import DispatchRefused
 from core.protocol.files import ContractTreeInvalid
@@ -46,6 +52,7 @@ from tests.contract.v2_support import (
     GRANT_ENCRYPTED,
     HUB_KEY,
     HUB_UNCLAIMED_POLL_CONTEXT,
+    LOG_PROBE,
     MEDIA_KEY_HEX,
     REQUEST_ENCRYPTED,
     RUNTIME_ID,
@@ -102,6 +109,10 @@ SHORT_WALL_TIME_S = 30.0
 UPTIME_S = 1234.5
 CLAIM_TOOK_S = 7
 ACCEPTING_TOOK_S = 2.0
+# In a start of 30 s: how long the Hub has the first claim wait, and how long the job then takes. They
+# leave 10 s of the start to the second claim and 4 s to the callback, each less than its own time-out.
+LATE_CLAIM_WAIT_S = 20
+LATE_JOB_TOOK_S = 6.0
 # The callback's own time-out, and how long a POST that times out takes on the fake clock.
 CALLBACK_TIMEOUT_S = 10.0
 SLOW_POST_S = 15.0
@@ -110,7 +121,15 @@ CALLBACK_REFUSAL_CODE = "conflicting_terminal_result"
 CALLBACK_REFUSED = hub_error_answer(HTTP_CONFLICT, CALLBACK_REFUSAL_CODE, retryable=False)
 # A value no log line may show, placed in the text of the error a broken callback transport raises.
 CALLBACK_ERROR_CANARY = "CANARY-callback-error-text"
-LOG_PROBE = "probe: the capture sees this module's logger at DEBUG"
+# The text of the error a log handler's stream raises when a line cannot be written.
+LOG_FAILURE_CANARY = "CANARY-log-failure-text"
+# The loggers a start writes on: its own, the claiming's and the delivery's. A line that showed a
+# message, the token or a key would come from the last two.
+START_LOGGERS = (handler.__name__, claim_module.__name__, outbox_module.__name__)
+# The storage credentials the settings hold: no line of a start may show either.
+STORAGE_KEY_ID_VARIABLE = "VH_STORAGE_DEFAULT_ACCESS_KEY_ID"
+STORAGE_SECRET_VARIABLE = "VH_STORAGE_DEFAULT_SECRET_ACCESS_KEY"
+STORAGE_CREDENTIALS = (worker_env()[STORAGE_KEY_ID_VARIABLE], worker_env()[STORAGE_SECRET_VARIABLE])
 UUID_VERSION_RANDOM = 4
 
 
@@ -612,29 +631,30 @@ def test_handle_when_claiming_spent_the_starts_wall_time_should_return_the_uncla
     assert transport.calls_to(CALLBACK_URL) == []
 
 
-def test_handle_when_it_claims_and_delivers_should_hand_both_the_runtimes_own_monotonic_clock(monkeypatch):
-    # Arrange: the claiming and the delivery as they are, with a look at the clock each is handed
-    clock = FakeClock()
-    runtime = _runtime(_transport(clock, _granted()), clock)
-    handed: dict[str, Any] = {}
-
-    def looked_at(step: str, real: Callable[..., Any]) -> Callable[..., Any]:
-        def call(*arguments: Any, **named: Any) -> Any:
-            handed[step] = named["monotonic"]
-            return real(*arguments, **named)
-
-        return call
-
-    monkeypatch.setattr(handler, "claim_execution", looked_at("the claim", handler.claim_execution))
-    monkeypatch.setattr(handler, "deliver", looked_at("the delivery", handler.deliver))
+def test_handle_when_its_monotonic_clock_reads_unlike_its_wall_clock_should_hold_the_claim_and_the_callback_to_that_clock():
+    # Arrange: a process that has been up for a while, so its monotonic clock reads nothing like its
+    # wall clock. A start of 30 s: the Hub has the first claim wait 20 s and grants the second, and the
+    # job then takes 6 s
+    clock = _clock_of_a_process_up_for_a_while()
+    wait_then_grant = hub_error_answer(
+        HTTP_UNAVAILABLE, RETRYABLE_REFUSAL_CODE, retryable=True, retry_after_s=LATE_CLAIM_WAIT_S
+    )
+    transport = _transport(clock, wait_then_grant, _granted())
+    job = StandInJob()
+    job.work = lambda: clock.advance(LATE_JOB_TOOK_S)
 
     # Act
-    handle(_job_input(), runtime=runtime, run_job=StandInJob())
+    output = handle(_job_input_with_wall_time(SHORT_WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
 
-    # Assert: the start's wall time ends at a reading of this clock, so both are held to it on this clock
-    assert set(handed) == {"the claim", "the delivery"}
-    assert handed["the claim"] is runtime.monotonic
-    assert handed["the delivery"] is runtime.monotonic
+    # Assert: the start's wall time ends at a reading of the runtime's own monotonic clock, and each
+    # request got what that clock then left of it, less than its own time-out: 10 s for the second
+    # claim, 4 s for the callback. No other clock's reading gives these two numbers
+    (sealed,) = job.returned
+    _, second_claim = transport.calls_to(CLAIM_URL)
+    (callback_call,) = transport.calls_to(CALLBACK_URL)
+    assert output == {"vh_message": sealed.body.decode("ascii"), "vh_signature": sealed.signature}
+    assert second_claim.timeout_s == SHORT_WALL_TIME_S - LATE_CLAIM_WAIT_S == 10.0
+    assert callback_call.timeout_s == SHORT_WALL_TIME_S - LATE_CLAIM_WAIT_S - LATE_JOB_TOOK_S == 4.0
 
 
 # --- the runtime id -----------------------------------------------------------------------------
@@ -750,6 +770,51 @@ def test_handle_when_the_callback_has_ended_should_log_one_line_naming_the_kind_
     assert CALLBACK_ERROR_CANARY not in line
 
 
+class _FailingStream(io.TextIOBase):
+    """A standard error that fails every write."""
+
+    def write(self, text: str) -> int:
+        raise OSError(LOG_FAILURE_CANARY)
+
+
+@contextlib.contextmanager
+def _start_log_through(log_handler: logging.Handler) -> Iterator[None]:
+    """Inside, the logger of a start (core.protocol.handler) hands its records to `log_handler` as well."""
+    start_logger = logging.getLogger(handler.__name__)
+    start_logger.addHandler(log_handler)
+    try:
+        yield
+    finally:
+        start_logger.removeHandler(log_handler)
+        log_handler.close()
+
+
+def test_handle_when_a_log_handler_fails_on_the_line_of_a_broken_callback_should_keep_the_errors_text_out_of_standard_error(
+    monkeypatch, capsys
+):
+    # Arrange: a handler of the kind the process's log has (a stream handler) fails on every line. Such
+    # a handler does not raise: Python's logging prints a report of its own to standard error
+    # (raiseExceptions, its default), with every error the failure is chained to. The callback's
+    # transport breaks on an error whose text is a canary
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+    transport.route(CALLBACK_URL, then=RuntimeError(CALLBACK_ERROR_CANARY))
+    job = StandInJob()
+
+    # Act
+    with _start_log_through(logging.StreamHandler(_FailingStream())):
+        output = handle(_job_input(), runtime=_runtime(transport, clock), run_job=job)
+    written = capsys.readouterr().err
+
+    # Assert: logging did report the handler's failure, its report holds nothing of the callback
+    # error's own text, and the output is still returned
+    (sealed,) = job.returned
+    assert LOG_FAILURE_CANARY in written
+    assert CALLBACK_ERROR_CANARY not in written
+    assert output == {"vh_message": sealed.body.decode("ascii"), "vh_signature": sealed.signature}
+
+
 @pytest.mark.parametrize(
     ("claim_answers", "claim_then", "callback"),
     [
@@ -779,7 +844,8 @@ def test_handle_when_it_ends_any_way_should_log_nothing_of_a_message_a_signature
 
     # Act
     output = handle(job_input, runtime=_runtime(transport, clock), run_job=StandInJob())
-    logging.getLogger(handler.__name__).debug(LOG_PROBE)
+    for name in START_LOGGERS:
+        logging.getLogger(name).debug(LOG_PROBE)
     logged = caplog.text
 
     # Assert
@@ -790,7 +856,9 @@ def test_handle_when_it_ends_any_way_should_log_nothing_of_a_message_a_signature
     # A key is held as bytes, so it is looked for as bytes are printed too, not as hex alone.
     keys = [bytes.fromhex(MEDIA_KEY_HEX), WORKER_KEY, HUB_KEY]
     secrets = [request["claim"]["bootstrap_token"], RUNTIME_ID, *(form for key in keys for form in key_forms(key))]
-    secrets += ["vh_", "bootstrap_token", "key_hex", CALLBACK_ERROR_CANARY, *signatures]
+    secrets += ["vh_", "bootstrap_token", "key_hex", CALLBACK_ERROR_CANARY, *STORAGE_CREDENTIALS, *signatures]
+    # The capture sees every logger a start writes on, each down to DEBUG.
+    assert [record.name for record in caplog.records if record.getMessage() == LOG_PROBE] == list(START_LOGGERS)
     assert LOG_PROBE in logged
     assert [secret for secret in secrets if secret in logged] == []
     assert [piece for body in bodies for piece in slices_shown(logged, body, nameable)] == []

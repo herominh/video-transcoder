@@ -6,7 +6,9 @@ checks the contract tree the image ships and reads the worker's whole configurat
 be trusted stops the process there (ContractTreeInvalid, SettingsInvalid: each names the file or the
 variable and the rule, never a value), so a worker never serves with either. With the configuration read,
 it removes the scratch directories a killed process left in the scratch root
-(core.job.scratch.remove_leftover_scratch, which never raises, so it cannot stop a start).
+(core.job.scratch.remove_leftover_scratch). That removal cannot stop a start: it passes over whatever it
+cannot remove, and what it still raises, when one of its own log lines cannot be written, is dropped here
+without a line about it.
 
 For each job the SDK calls the handler with its job, a mapping that has `id` and `input`. Nothing of the
 job is trusted here: the value of `input` (None when the job is no mapping or has no input) goes to
@@ -57,6 +59,7 @@ import os
 import sys
 import traceback
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 # Ensure project root is on path so `core` package is importable.
@@ -132,14 +135,27 @@ def build_handler(env: Mapping[str, str]) -> SdkHandler:
     could be taken: each names the file or the variable and the rule, never a value.
 
     Once the configuration was read, and before the handler is returned, the scratch directories a
-    killed process left in the configured scratch root are removed. That removal never raises: a
-    leftover that stays never keeps a process from starting.
+    killed process left in the configured scratch root are removed. That removal cannot stop a start: a
+    leftover that stays never keeps a process from starting, and whatever the removal still raises (one
+    of its own log lines that cannot be written) is dropped, without a line about it.
     """
     runtime = load_runtime(env)
     job_settings = JobSettings.from_env(env)
-    remove_leftover_scratch(job_settings.scratch_root)
+    _remove_leftover_scratch(job_settings.scratch_root)
     runner = JobRunner(job_settings)
     return job_handler(runtime, runner.run)
+
+
+def _remove_leftover_scratch(scratch_root: Path) -> None:
+    """Remove the scratch directories a killed process left in `scratch_root`
+    (core.job.scratch.remove_leftover_scratch). It never raises: the removal passes over whatever it
+    cannot remove, and what it still raises, when one of its own log lines cannot be written, is dropped,
+    because a leftover that stays must not keep a process from starting."""
+    try:
+        remove_leftover_scratch(scratch_root)
+    except Exception:  # noqa: BLE001 - dropped, see the docstring
+        # Nothing can be done about a log line that cannot be written: saying so would need the log.
+        return
 
 
 def job_handler(runtime: Runtime, run_job: RunJob) -> SdkHandler:

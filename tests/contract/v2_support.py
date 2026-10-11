@@ -71,6 +71,10 @@ GENERATED_UUID_FORMAT: Final = "00000000-0000-4000-8000-{:012x}"
 REMOVED: Final = object()
 # A log may name an id or a kind; any slice of a message this long that it shows besides is a leak.
 LEAK_SLICE_CHARS: Final = 16
+# What a test of the log writes at DEBUG on a logger it reads, to prove that its capture sees that logger's lines.
+LOG_PROBE: Final = "probe: the capture sees this module's logger at DEBUG"
+# A whole number too large to be a float: no reading of a clock, and math.isfinite() of it raises OverflowError.
+TOO_LARGE_FOR_A_FLOAT: Final = 10**400
 
 _VALID_ENV: Final[Mapping[str, str]] = {
     "VH_ACCEPTED_PROTOCOL_VERSIONS": PROTOCOL_VERSION,
@@ -171,11 +175,15 @@ def slices_shown(logged: str, body: str, nameable: Sequence[str] = ()) -> list[s
 
 
 def key_forms(key: bytes) -> list[str]:
-    """Every form a key would take in a log line or an error: its hex in either case, and its bytes as
-    Python prints them, with and without the `b'...'` around them. The worker holds a key as bytes, so a
-    line that showed one would show the last two, never the hex."""
+    """The forms a key is looked for in, in a log line or an error: its hex in either case, its bytes as
+    Python prints them, with and without the `b'...'` around them, and those printed bytes with every
+    backslash doubled, as they stand inside the repr of a text that holds the key's repr (a list of
+    such texts, or an error shown with `%r` whose text quotes the key). The worker holds a key as bytes,
+    so a line that showed one would show one of the last three, never the hex. No other form is looked
+    for: its numbers one by one, base64, hex with separators, a part of the key."""
     printed = repr(key)
-    return [key.hex(), key.hex().upper(), printed, printed[2:-1]]
+    unwrapped = printed[2:-1]
+    return [key.hex(), key.hex().upper(), printed, unwrapped, unwrapped.replace("\\", "\\\\")]
 
 
 # --- signing what the Hub sends -----------------------------------------------------------------

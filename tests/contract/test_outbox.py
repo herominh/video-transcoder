@@ -44,7 +44,9 @@ from tests.contract.v2_support import (
     HUB_ERROR_MESSAGE_ID,
     HUB_ERROR_TEXT,
     HUB_KEY,
+    LOG_PROBE,
     MEDIA_KEY_HEX,
+    TOO_LARGE_FOR_A_FLOAT,
     UNCLAIMED_REFUSED,
     WORKER_KEY,
     FakeClock,
@@ -73,6 +75,8 @@ KIND_MEMBER = "message_kind"
 SIGNATURE_HEX_DIGITS = 64
 HTTP_OK = 200
 HTTP_NO_CONTENT = 204
+# The last status that is a success: every 2xx is a delivery.
+HTTP_LAST_SUCCESS = 299
 HTTP_FOUND = 302
 HTTP_NOT_MODIFIED = 304
 HTTP_CONFLICT = 409
@@ -87,6 +91,9 @@ HTTP_VERSION_NOT_SUPPORTED = 505
 HTTP_LAST_BEFORE_THE_ERRORS = 399
 HTTP_BAD_REQUEST = 400
 HTTP_LAST_ERROR = 599
+# The first status after the error statuses, and the last one a status line can hold.
+HTTP_FIRST_AFTER_THE_ERRORS = 600
+HTTP_LAST_STATUS = 999
 # What a gateway in front of the Hub answers while it cannot reach it.
 GATEWAY_STATUSES = [HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
 HTML_BODY = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
@@ -117,7 +124,6 @@ SECOND_WAIT_S = 2.0
 LEAST_POST_TIMEOUT_S = 1.0
 FAILED_RESULT_KIND = "transcode.result.failed"
 STOPPED_FOR_WANT_OF_TIME = "no time is left"
-LOG_PROBE = "probe: the capture sees this module's logger at DEBUG"
 
 
 def _fixture(path: str) -> dict[str, Any]:
@@ -332,7 +338,7 @@ def test_runpod_output_when_given_a_message_that_is_never_a_job_output_should_ra
 # --- the callback -------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status", [HTTP_OK, HTTP_NO_CONTENT])
+@pytest.mark.parametrize("status", [HTTP_OK, HTTP_NO_CONTENT, HTTP_LAST_SUCCESS])
 @pytest.mark.parametrize(
     "sealed",
     [_sealed_unclaimed, _sealed_failed_result, _sealed_progress],
@@ -429,8 +435,14 @@ def test_deliver_when_the_answer_is_a_final_refusal_or_no_contract_answer_should
 
 @pytest.mark.parametrize(
     "status",
-    [HTTP_FOUND, HTTP_NOT_MODIFIED, HTTP_LAST_BEFORE_THE_ERRORS],
-    ids=["a-redirect", "not-modified", "the-last-status-before-the-error-statuses"],
+    [HTTP_FOUND, HTTP_NOT_MODIFIED, HTTP_LAST_BEFORE_THE_ERRORS, HTTP_FIRST_AFTER_THE_ERRORS, HTTP_LAST_STATUS],
+    ids=[
+        "a-redirect",
+        "not-modified",
+        "the-last-status-before-the-error-statuses",
+        "the-first-status-after-the-error-statuses",
+        "the-last-status-there-is",
+    ],
 )
 def test_deliver_when_a_retryable_hub_error_comes_under_a_status_that_is_no_error_should_not_send_again(status):
     # Arrange: the body alone would have the message sent again (RETRY_LATER); the Hub would then take it
@@ -469,8 +481,13 @@ def test_deliver_when_a_gateway_failure_precedes_the_hubs_2xx_should_wait_the_fi
 
 @pytest.mark.parametrize(
     ("attempts", "waits"),
-    [(2, [FIRST_WAIT_S]), (3, [FIRST_WAIT_S, SECOND_WAIT_S])],
-    ids=["two-attempts", "three-attempts"],
+    [
+        (2, [FIRST_WAIT_S]),
+        (3, [FIRST_WAIT_S, SECOND_WAIT_S]),
+        # More attempts than the back-off has waits: the last wait is made again.
+        (4, [FIRST_WAIT_S, SECOND_WAIT_S, SECOND_WAIT_S]),
+    ],
+    ids=["two-attempts", "three-attempts", "four-attempts"],
 )
 @pytest.mark.parametrize("status", GATEWAY_STATUSES)
 def test_deliver_when_a_gateway_answers_every_attempt_should_post_exactly_the_allowed_attempts_and_return_false(
@@ -541,6 +558,7 @@ def test_deliver_when_allowed_one_attempt_should_post_exactly_once():
         pytest.param(-1, id="negative"),
         pytest.param(True, id="a-bool"),
         pytest.param(1.5, id="a-fraction"),
+        pytest.param(2.0, id="a-whole-float"),
         pytest.param("3", id="text"),
         pytest.param(None, id="none"),
     ],
@@ -818,6 +836,14 @@ def test_deliver_when_it_stops_for_want_of_time_should_log_once_and_name_the_kin
         pytest.param({"give_up_at": float("nan"), "monotonic": FakeClock().monotonic}, id="not-a-number"),
         pytest.param({"give_up_at": float("inf"), "monotonic": FakeClock().monotonic}, id="infinite"),
         pytest.param({"give_up_at": float("-inf"), "monotonic": FakeClock().monotonic}, id="minus-infinite"),
+        pytest.param(
+            {"give_up_at": TOO_LARGE_FOR_A_FLOAT, "monotonic": FakeClock().monotonic},
+            id="an-integer-too-large-to-be-a-float",
+        ),
+        pytest.param(
+            {"give_up_at": -TOO_LARGE_FOR_A_FLOAT, "monotonic": FakeClock().monotonic},
+            id="a-negative-integer-too-large-to-be-a-float",
+        ),
         pytest.param({"give_up_at": True, "monotonic": FakeClock().monotonic}, id="a-bool"),
         pytest.param({"give_up_at": "5.0", "monotonic": FakeClock().monotonic}, id="text"),
     ],
@@ -891,6 +917,7 @@ def test_deliver_when_given_no_end_should_post_with_a_time_out_below_one_second_
             f"refused: status {HTTP_INTERNAL_ERROR}, code none",
             id="an-html-500",
         ),
+        pytest.param(GATEWAY_FAILURE, f"did not reach the Hub: status {HTTP_BAD_GATEWAY}", id="a-gateway-failure"),
     ],
 )
 def test_deliver_when_an_attempt_is_not_delivered_should_log_one_line_naming_the_kind_and_the_outcome(
@@ -963,6 +990,16 @@ def test_deliver_when_it_ends_any_way_should_log_nothing_of_the_message_or_of_an
         pytest.param(
             lambda sealed: SealedMessage(kind=sealed.kind, body=b'{"never":"self-checked"}', signature=sealed.signature),
             id="of-bytes-that-passed-no-self-check",
+        ),
+        pytest.param(
+            lambda sealed: SealedMessage(sealed.kind, sealed.body, sealed.signature, object()),
+            id="with-a-made-up-fourth-argument",
+        ),
+        pytest.param(
+            lambda sealed: SealedMessage(
+                kind=sealed.kind, body=sealed.body, signature=sealed.signature, _construction=True
+            ),
+            id="with-true-as-its-fourth-argument",
         ),
     ],
 )

@@ -10,7 +10,8 @@ the refusal's words or the bug's class, and nothing of the job input, of a secre
 text.
 
 build_handler() is the real wiring: it refuses a contract tree or a configuration it cannot trust before
-it returns a handler, and removes the scratch directories a killed process left in the scratch root.
+it returns a handler, and removes the scratch directories a killed process left in the scratch root, a
+removal that cannot stop a start even when a log line of its own raises.
 configure_logging() sets up the process's log when the file is run: the worker's own loggers at INFO,
 and nothing from the HTTP library under the storage clients, whose warnings name the storage's host and
 a request's whole URL. Importing the module loads neither the SDK nor a v1 module, needs no
@@ -19,7 +20,7 @@ configuration and configures no logging.
 main() is what the file does when it is run as the program. It is driven here with a starter of the
 test's own in the place of the SDK's, and the file itself is run in a process of its own with a stand-in
 for the SDK first on that process's module path: neither needs the SDK, and both behave the same where
-it is installed.
+it is installed. A configuration that is not whole stops main() before the loop is started.
 
 The count of abandoned storage requests belongs to the process, and a test session abandons some long
 before these tests run. So every test here gives the wrapper a count of its own, which starts at zero
@@ -228,9 +229,13 @@ SCRATCH_DIR_VARIABLE = "VH_SCRATCH_DIR"
 IMAGE_DIGEST = "sha256:" + "5e" * 32
 # A value an operator mistyped into the configuration: a refusal names the variable, never this.
 CONFIG_CANARY = "CANARY-typed-into-the-configuration"
+# A required variable a test leaves out of a configuration that is otherwise whole.
+MISSING_VARIABLE = "VH_CLAIM_URL"
 TAMPERED_FILE = "limits.json"
 # How long ago a killed process's scratch directory was last changed: far longer than the least age of a leftover.
 LEFT_LONG_AGO_S = 2 * 60 * 60
+# The logger of the removal of leftover scratch directories (core/job/scratch.py).
+SCRATCH_LOGGER = "core.job.scratch"
 
 # A real deadline a test waits out, long enough for a loaded host to reach the request the test keeps.
 SHORT_MS = 500
@@ -1104,6 +1109,51 @@ def test_build_handler_when_a_killed_process_left_a_scratch_directory_should_rem
     assert list(tmp_path.iterdir()) == []
 
 
+class _RaisingLogHandler(logging.Handler):
+    """A log handler whose `emit` raises: unlike a stream that fails, its error comes out of the log
+    call itself. It counts the lines it was handed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines += 1
+        raise MemoryError(LOG_FAILURE_TEXT)
+
+
+@contextlib.contextmanager
+def _scratch_log_through(handler: logging.Handler) -> Iterator[None]:
+    """Inside, the logger of the leftover removal hands its records to `handler` as well."""
+    scratch_logger = logging.getLogger(SCRATCH_LOGGER)
+    scratch_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        scratch_logger.removeHandler(handler)
+        handler.close()
+
+
+def test_build_handler_when_a_log_line_of_the_leftover_removal_raises_should_still_return_a_handler(
+    tmp_path, caplog
+):
+    # Arrange: the log is written at INFO and above, as the process's is, and the removal's logger
+    # hands its lines to a handler whose emit raises: every line the removal writes, the count it
+    # always ends with included, raises out of the removal
+    caplog.set_level(logging.INFO)
+    raising = _RaisingLogHandler()
+
+    # Act
+    with _scratch_log_through(raising):
+        handler = build_handler(_whole_env(tmp_path))
+
+    # Assert: the removal did meet the failing log, and the start goes on all the same. Nothing is
+    # logged about it: the log is what failed
+    assert raising.lines >= 1
+    assert callable(handler)
+    assert [record for record in caplog.records if record.name == ENTRY_LOGGER] == []
+
+
 @pytest.mark.parametrize(
     ("changes", "variable"),
     [
@@ -1466,6 +1516,25 @@ def test_main_when_given_a_starter_and_an_environment_should_start_the_loop_once
     with pytest.raises(JobRefused) as raised:
         configuration[HANDLER_MEMBER](_job(signed_carrier(REQUEST_WITH_CANARY, UNCONFIGURED_KEY)))
     assert str(raised.value) == "the dispatch is refused at signature"
+
+
+def test_main_when_the_configuration_is_not_whole_should_raise_settings_invalid_and_never_call_the_starter(
+    tmp_path, monkeypatch
+):
+    # Arrange: a configuration that lacks one required variable. The SDK cannot be imported here,
+    # installed or not: the starter given is the only one there is to call
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    env = _changed(_whole_env(tmp_path), {MISSING_VARIABLE: None})
+    starter = _Starter()
+
+    # Act
+    with _logging_nobody_configured(), pytest.raises(SettingsInvalid) as raised:
+        runpod_handler.main(starter, env)
+
+    # Assert: the refusal of the configuration leaves main() as it is, and no loop was started that
+    # could take a job
+    assert raised.value.variable == MISSING_VARIABLE
+    assert starter.configurations == []
 
 
 def test_entry_point_when_run_as_the_program_should_set_up_the_log_then_import_the_sdk_and_start_it_with_a_handler(

@@ -19,7 +19,7 @@ import json
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
 import pytest
 
@@ -38,10 +38,12 @@ from tests.contract.v2_support import (
     GRANT_UNENCRYPTED,
     HUB_CLAIM_CONTEXT,
     HUB_KEY,
+    LOG_PROBE,
     MEDIA_KEY_HEX,
     REQUEST_ENCRYPTED,
     REQUEST_UNENCRYPTED,
     RUNTIME_ID,
+    TOO_LARGE_FOR_A_FLOAT,
     UNCONFIGURED_KEY,
     WORKER_GRANT_CONTEXT,
     WORKER_GRANT_CONTEXT_UNENCRYPTED,
@@ -53,12 +55,14 @@ from tests.contract.v2_support import (
     catalog_context,
     hub_error_answer,
     hub_error_body,
+    key_forms,
     modified_fixture,
     moment,
     padded_to,
     resigned_fixture,
     seconds_from_now,
     signed_answer,
+    slices_shown,
     uuid_source,
     worker_settings,
 )
@@ -139,9 +143,6 @@ TIME_FOR_ONE_SLOWLY_SEALED_CLAIM_S = 2.8
 ENDED_UNREACHABLE_AFTER = re.compile(r"ended unreachable after (\d+) claims")
 # Steps of the wall clock while the Hub does not answer: set back an hour, set forward a minute.
 WALL_CLOCK_STEPS_S = {"set-back-an-hour": -3600.0, "set-forward-a-minute": 60.0}
-# A log line may name these two ids; any longer slice of a claim or of a grant is a leak.
-LEAK_SLICE_CHARS = 16
-LOG_PROBE = "probe: the capture sees this module's logger at DEBUG"
 MILLISECONDS_PER_SECOND = 1000
 
 
@@ -1001,6 +1002,8 @@ def test_claim_execution_when_the_wall_clock_is_stepped_while_claiming_should_ke
         pytest.param(float("nan"), id="not-a-number"),
         pytest.param(float("inf"), id="infinite"),
         pytest.param(float("-inf"), id="minus-infinite"),
+        pytest.param(TOO_LARGE_FOR_A_FLOAT, id="an-integer-too-large-to-be-a-float"),
+        pytest.param(-TOO_LARGE_FOR_A_FLOAT, id="a-negative-integer-too-large-to-be-a-float"),
         pytest.param(True, id="a-bool"),
         pytest.param("30.0", id="text"),
         pytest.param(None, id="none"),
@@ -1242,14 +1245,6 @@ def test_claim_execution_when_its_one_claim_was_not_answered_should_log_unreacha
 # --- nothing of a claim or of an answer is logged -----------------------------------------------
 
 
-def _slices_shown(logged: str, body: str, nameable: Sequence[str]) -> list[str]:
-    """Every LEAK_SLICE_CHARS-character slice of `body` that `logged` shows, the ids a log line may name left out."""
-    for value in nameable:
-        logged = logged.replace(value, " ")
-    slices = (body[start : start + LEAK_SLICE_CHARS] for start in range(len(body) - LEAK_SLICE_CHARS + 1))
-    return [piece for piece in slices if piece in logged]
-
-
 @pytest.mark.parametrize(
     ("outcomes", "then", "expected"),
     [
@@ -1272,6 +1267,7 @@ def test_claim_execution_when_it_ends_any_way_should_log_nothing_of_a_claim_or_o
     dispatch, clock = _dispatch(), FakeClock()
     transport = FakeTransport(*outcomes, then=then, clock=clock)
     grant = json.loads(files.read_bytes(GRANT_ENCRYPTED))
+    # A line may name the dispatch and the execution, and nothing else of a claim or of a grant.
     nameable = (dispatch.identity.dispatch_id, grant["identity"]["execution_id"])
     signatures = [answer.signature for answer in outcomes if isinstance(answer, HttpAnswer) and answer.signature]
 
@@ -1284,9 +1280,11 @@ def test_claim_execution_when_it_ends_any_way_should_log_nothing_of_a_claim_or_o
     signatures += [call.signature for call in transport.calls]
     bodies = [call.body.decode("ascii") for call in transport.calls]
     bodies += [files.read_bytes(GRANT_ENCRYPTED).decode("ascii"), HTML_BODY.decode("ascii")]
-    secrets = [dispatch.bootstrap_token, MEDIA_KEY_HEX, RUNTIME_ID, "vh_", "bootstrap_token", "key_hex", *signatures]
-    secrets += [ERROR_PAGE_CANARY]
+    # A key is held as bytes, so it is looked for as bytes are printed too, not as hex alone.
+    keys = [bytes.fromhex(MEDIA_KEY_HEX), WORKER_KEY, HUB_KEY]
+    secrets = [dispatch.bootstrap_token, RUNTIME_ID, *(form for key in keys for form in key_forms(key))]
+    secrets += ["vh_", "bootstrap_token", "key_hex", ERROR_PAGE_CANARY, *signatures]
     assert isinstance(outcome, expected)
     assert LOG_PROBE in logged
     assert [secret for secret in secrets if secret in logged] == []
-    assert [piece for body in bodies for piece in _slices_shown(logged, body, nameable)] == []
+    assert [piece for body in bodies for piece in slices_shown(logged, body, nameable)] == []

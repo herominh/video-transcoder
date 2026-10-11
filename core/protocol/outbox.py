@@ -177,12 +177,19 @@ def _time_left(
 ) -> Callable[[], float] | None:
     """How many seconds a delivery has until `give_up_at`, to be asked whenever it matters; None when
     nothing bounds the delivery. ValueError unless both are given or neither, and unless `give_up_at` is
-    a finite number."""
+    a finite number, which an integer too large to be a float is not."""
     if give_up_at is None and monotonic is None:
         return None
     if give_up_at is None or monotonic is None:
         raise ValueError("give_up_at and monotonic are given together or not at all")
-    if isinstance(give_up_at, bool) or not isinstance(give_up_at, (int, float)) or not math.isfinite(give_up_at):
+    try:
+        finite = (
+            not isinstance(give_up_at, bool) and isinstance(give_up_at, (int, float)) and math.isfinite(give_up_at)
+        )
+    except OverflowError:
+        # An integer too large to be a float: no reading of a clock, and nothing can be counted to it.
+        finite = False
+    if not finite:
         raise ValueError("give_up_at must be a finite reading of the monotonic clock")
     ends_at, read_clock = give_up_at, monotonic
     return lambda: ends_at - read_clock()

@@ -172,6 +172,11 @@ def _deliver_best_effort(report: SealedMessage, runtime: Runtime, wall_time_ends
     """The callback is the fast path, the job output the one the Hub can always read: no failure here costs the output.
 
     No attempt of it starts at or after `wall_time_ends_at`, a reading of the runtime's monotonic clock.
+
+    An error of the delivery is logged by its class, and only once it is no longer being handled: when a
+    log handler fails on a line, Python's logging prints a report of its own to standard error with every
+    error that failure is chained to, and inside the `except` block that would be the caught error, with
+    its own text.
     """
     try:
         delivered = deliver(
@@ -183,6 +188,10 @@ def _deliver_best_effort(report: SealedMessage, runtime: Runtime, wall_time_ends
             monotonic=runtime.monotonic,
         )
     except Exception as error:  # noqa: BLE001 - whatever fails here, the output is still returned
-        logger.error("callback of a %s failed: %s", report.kind.value, type(error).__name__)
+        # All the line needs of the error, so that the error itself ends with this block.
+        failed_on = type(error).__name__
+    else:
+        logger.info("callback of a %s %s", report.kind.value, "delivered" if delivered else "not delivered")
         return
-    logger.info("callback of a %s %s", report.kind.value, "delivered" if delivered else "not delivered")
+    # Written here, after the `except` block has ended (see the docstring).
+    logger.error("callback of a %s failed: %s", report.kind.value, failed_on)

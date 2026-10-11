@@ -120,13 +120,19 @@ def claim_execution(
 
     `clock` gives the aware current time, `monotonic` seconds that only ever move forward, and `sleep` waits
     that many seconds. `wall_time_ends_at` is the reading of `monotonic`, a finite number, at which the
-    start's wall time ends (ValueError otherwise, before any claim): no claim is sent at or after it.
+    start's wall time ends (ValueError otherwise, an integer too large to be a float included, before
+    any claim): no claim is sent at or after it.
     """
-    if (
-        isinstance(wall_time_ends_at, bool)
-        or not isinstance(wall_time_ends_at, (int, float))
-        or not math.isfinite(wall_time_ends_at)
-    ):
+    try:
+        finite = (
+            not isinstance(wall_time_ends_at, bool)
+            and isinstance(wall_time_ends_at, (int, float))
+            and math.isfinite(wall_time_ends_at)
+        )
+    except OverflowError:
+        # An integer too large to be a float: no reading of a clock, and nothing can be counted to it.
+        finite = False
+    if not finite:
         raise ValueError("wall_time_ends_at must be a finite reading of the monotonic clock")
     claiming_ends_at = min(monotonic() + CLAIM_PATIENCE_S, wall_time_ends_at)
 
