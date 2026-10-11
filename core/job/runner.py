@@ -28,9 +28,11 @@ logged, put in a message or written by this module (README 15.1, rules 4 and 5).
 class and its stack only: an unexpected error's own text can quote anything, so it reaches no log line.
 
 A stage that runs out of time ends the execution for good (`deadline_exceeded` is not retryable there: a
-limit that is too small must not become a paid retry loop). So that the Hub and an operator can tell a
-limit that is too small from a start whose claim took most of the time, the detail of a failed result
-of that class ends with how much of the start's wall time was gone before the execution began, in
+limit that is too small must not become a paid retry loop). One exception lives in the preflight: when
+its own time budget ran out while the storage was the slow party, it fails retryable instead
+(core/probe.py, source_unavailable / probe_source_slow). So that the Hub and an operator can tell a
+limit that is too small from a start whose claim took most of the time, the detail of a failed
+`deadline_exceeded` result ends with how much of the start's wall time was gone before the execution began, in
 whole seconds: the failure's own detail first, never cut, so one that leaves no room goes without.
 """
 

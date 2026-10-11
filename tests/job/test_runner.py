@@ -41,7 +41,7 @@ from core.job import storage as storage_module
 from core.job.ffmpeg_version import forget_installed_ffmpeg_version, installed_ffmpeg_version
 from core.job.runner import JobRunner
 from core.package import reserve_package
-from core.probe import PreflightResult
+from core.probe import PROBE_SOURCE_SLOW, PreflightResult
 from core.profile import PILOT_PROFILE, MediaProfile, profile_digest
 from core.protocol import files, pipeline
 from core.protocol.handler import Runtime, handle
@@ -1764,6 +1764,30 @@ def test_run_when_the_preflights_read_stalls_should_fail_retryable_as_stalled_at
     assert read_started.wait(HANG_RELEASE_S)
     assert time.monotonic() - started < HANG_RELEASE_S
     assert harness.stages.encodes == [] and harness.s3.stored == []
+
+
+def test_run_when_the_preflight_runs_out_of_its_time_on_a_slow_storage_should_fail_retryable_at_probing(
+    harness, monkeypatch
+):
+    # Arrange: the preflight ends as the real one does when its own time budget ran out while the
+    # reads of the source took most of it, and the start has its whole wall time left
+    monkeypatch.setattr(runner_module, "run_preflight", _raising(WorkerFailure(PROBE_SOURCE_SLOW)))
+
+    # Act: result() returns once the worker's own validator sealed the result and the Hub's accepted it
+    result = harness.result()
+
+    # Assert: a passing fault of the storage, worth another dispatch, not a deadline that would be final;
+    # the detail is the preflight's own sentence, with nothing about the start's wall time added to it
+    assert result["message_kind"] == FAILED_KIND
+    assert result["error"] == {
+        "class": "source_unavailable",
+        "code": "probe_source_slow",
+        "retryable": True,
+        "stage": "probing",
+        "detail": "the preflight ran out of time while the storage was slow",
+    }
+    assert harness.stages.encodes == [] and harness.s3.stored == []
+    assert harness.left_in_scratch == []
 
 
 def test_run_when_a_read_of_the_preflight_never_returns_should_fail_at_probing_once_the_wall_time_ends(harness):

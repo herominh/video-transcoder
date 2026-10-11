@@ -98,6 +98,31 @@ class StallingSource(FileSource):
         return super().read(start, length)
 
 
+class SlowThenStallingSource(FileSource):
+    """The first `slow_reads` reads each take `slow_read_s`; every later read waits until the test
+    releases it, and `stalled` is set once one of them has begun."""
+
+    def __init__(self, path: Path, *, slow_reads: int, slow_read_s: float) -> None:
+        super().__init__(path)
+        self._slow_reads = slow_reads
+        self._slow_read_s = slow_read_s
+        self._count_lock = threading.Lock()
+        self._count = 0
+        self.stalled = threading.Event()
+        self.release = threading.Event()
+
+    def read(self, start: int, length: int) -> bytes:
+        with self._count_lock:
+            self._count += 1
+            number = self._count
+        if number <= self._slow_reads:
+            time.sleep(self._slow_read_s)
+        else:
+            self.stalled.set()
+            self.release.wait(timeout=30)
+        return super().read(start, length)
+
+
 class Canary:
     """A loopback listener that must never be contacted."""
 
@@ -306,10 +331,13 @@ def test_preflight_when_the_source_changes_during_the_probe_should_fail_as_sourc
     assert (failure.error_class, failure.code) == ("source_integrity_mismatch", "source_changed")
 
 
-def test_preflight_when_storage_stalls_should_end_at_its_deadline(media):
-    # Arrange
+def test_preflight_when_storage_stalls_should_end_at_its_deadline_as_a_slow_source_worth_a_retry(media):
+    # Arrange: a time budget of 4 s with the execution's deadline a minute away, and a read that never
+    # returns. The share of the time in reads is counted from the moment the reader is made, so what
+    # ffprobe takes to start and ask for its first byte is time outside the reads: the outcome holds
+    # while that start-up stays under half of the budget, 2 s here, where it normally takes some 50 ms
     source = StallingSource(media.mp4_faststart)
-    profile = _profile(max_wall_ms=1_500)
+    profile = _profile(max_wall_ms=4_000)
     started = time.monotonic()
 
     # Act
@@ -318,9 +346,36 @@ def test_preflight_when_storage_stalls_should_end_at_its_deadline(media):
     finally:
         source.release.set()
 
-    # Assert
-    assert (failure.error_class, failure.code) == ("deadline_exceeded", "probe_deadline_exceeded")
+    # Assert: the one read was in flight for nearly all of the preflight's time while the execution's
+    # deadline was a minute away, so the storage was the slow party, and another start may fare better
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "probe_source_slow", True)
     assert time.monotonic() - started < 10
+
+
+def test_preflight_when_a_read_stalls_after_two_slow_reads_should_fail_retryable_as_a_slow_source(media):
+    # Arrange: a time budget of 6 s with the execution's deadline a minute away. Two reads take a
+    # quarter of the budget each and the third never returns: no read alone outlasts the budget, the
+    # three together do. Chunks of 1 KiB, so that ffprobe cannot have the file's index after two reads.
+    # What ffprobe takes to start is time outside the reads (the share is counted from the moment the
+    # reader is made) and comes before the two slow reads: the third read is in flight before the
+    # budget ends, and the reads keep their half of the time, while that start-up stays under 3 s,
+    # where it normally takes some 50 ms
+    source = SlowThenStallingSource(media.mp4_moov_at_end, slow_reads=2, slow_read_s=1.5)
+    profile = _profile(max_wall_ms=6_000, chunk_bytes=KIB)
+    started = time.monotonic()
+
+    # Act
+    try:
+        failure = _failure_of(source, profile)
+        stalled_read_was_in_flight = source.stalled.is_set()
+    finally:
+        source.release.set()
+
+    # Assert: the storage used the time, so the failure is one another start may not meet
+    assert stalled_read_was_in_flight
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "probe_source_slow", True)
+    assert failure.detail == "the preflight ran out of time while the storage was slow"
+    assert time.monotonic() - started < 15
 
 
 @pytest.mark.parametrize(

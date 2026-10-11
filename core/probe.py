@@ -5,6 +5,14 @@ from a budgeted range source; every byte it asks for is fetched by `BudgetedSour
 enforces the byte, request and time budget independently of ffprobe. ffprobe itself may only
 speak HTTP and TCP (to reach that URL) and may only choose a demuxer of the profile, so a
 playlist or any other format that opens further URLs is refused before it opens one.
+
+A preflight that runs out of its time fails for good, with one exception: when the execution's own
+deadline still has time left and the reads of the source took at least PROBE_SOURCE_SLOW_SHARE of
+the time since the preflight's budget began, the storage was the slow party, and the failure is a
+retryable one (`_out_of_time` decides, for a prober that timed out and for a read the budgeted
+reader refused alike). A failure a read recorded wins over both, also one that a read still in
+flight recorded only while the loopback server shut down (`_ran_out_of_time` looks again then; a
+prober that ended by itself is judged by what was recorded before the shutdown).
 """
 
 from __future__ import annotations
@@ -28,7 +36,7 @@ from core.bounded_process import BoundedResult, Deadline, run_bounded
 from core.failure import Failure, WorkerFailure
 from core.profile import MediaProfile
 from core.source_facts import ProbeInconclusive, SourceFacts, parse_ffprobe_output
-from core.source_reader import BudgetedSource, RangeSource, ReadStats
+from core.source_reader import PROBE_DEADLINE_EXCEEDED, BudgetedSource, RangeSource, ReadStats
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,14 @@ UNKNOWN_ERRNO_NAME = "unknown"
 LOOPBACK_SERVER_FAILURE = Failure(
     error_class="internal_error", code="loopback_server_failed", retryable=True,
     detail="the preflight's loopback server failed",
+)
+# The share of the time since the preflight's budget began that the reads of the source must have
+# taken, at least, for a preflight that ran out of time to have failed on a slow storage: another
+# start may meet a faster one, where media that takes too long to probe would take as long again.
+PROBE_SOURCE_SLOW_SHARE = 0.5
+PROBE_SOURCE_SLOW = Failure(
+    error_class="source_unavailable", code="probe_source_slow", retryable=True,
+    detail="the preflight ran out of time while the storage was slow",
 )
 # The child's whole environment: no proxy variable can redirect its one HTTP request.
 FFPROBE_ENV = {"LC_ALL": "C", "PATH": os.defpath}
@@ -88,6 +104,14 @@ def run_preflight(
     Returns the facts and the decision when the facts could be established; raises WorkerFailure
     when they could not (storage failure, changed source, budget or deadline exhausted, media
     ffprobe cannot read). A source above the size limit is refused before any read.
+
+    `deadline` is the execution's own. The preflight's time budget is the nearer of it and the
+    profile's probe wall time, counted from this call. A preflight that runs out of that budget fails
+    with deadline_exceeded / probe_deadline_exceeded, not retryable, unless the storage was the slow
+    party: while `deadline` still has time left, reads of the source that took at least
+    PROBE_SOURCE_SLOW_SHARE of the time since the budget began make it the retryable
+    source_unavailable / probe_source_slow. A failure a read itself raised wins over both, also when
+    a read still in flight raised it only while the preflight's loopback server shut down.
     """
     size_bytes = source.size_bytes
     size_limit = min(profile.source.max_source_bytes, limits.max_source_bytes)
@@ -127,16 +151,74 @@ def run_preflight(
                 except RuntimeError as error:
                     # A reader thread could not start; run_bounded has already killed the group.
                     raise _prober_thread_failure(error) from None
+            # Looked at before the server shuts down: a read the prober no longer needed, failing
+            # while it shuts down, does not fail a probe that had succeeded by then.
             upstream_failure = server.failure
     except (OSError, RuntimeError) as error:
         raise _setup_failure(error) from None
 
-    # A storage or budget failure explains whatever ffprobe printed after it, so it wins.
-    if upstream_failure is not None:
+    # A storage or budget failure explains whatever ffprobe printed after it, so it wins. The reader's
+    # own refusal of a read past the time budget is no such failure: it is the preflight out of time.
+    reader_refused = upstream_failure == PROBE_DEADLINE_EXCEEDED
+    if upstream_failure is not None and not reader_refused:
         raise WorkerFailure(upstream_failure)
+    # Out of time, found out either way: the reader refused a read, or the prober was killed.
+    if reader_refused or result.timed_out:
+        raise _ran_out_of_time(server, budgeted, deadline)
     facts = _facts_from(result)
     decision = decide_admission(facts, size_bytes=size_bytes, profile=profile, limits=limits)
     return PreflightResult(facts=facts, decision=decision, read=budgeted.stats)
+
+
+def _ran_out_of_time(server: LoopbackRangeServer, budgeted: BudgetedSource, deadline: Deadline) -> WorkerFailure:
+    """The failure of a preflight whose time ran out, whichever way that was found out: the prober
+    was killed at the deadline, or the budgeted reader refused a read past it.
+
+    Called once the loopback server has shut down, because it looks at the server's recorded failure
+    once more. A read that was still in flight when the prober was killed can end, and record its
+    failure, while the server shuts down, after the caller looked: that failure wins as it is, as a
+    failure of a read always does (the reader's own refusal is not one). Otherwise `_out_of_time`
+    decides. The handler threads are not waited for, so a read that has not ended by now is missed:
+    one that was given up and never ends records nothing, and that stalled storage is the case
+    `_out_of_time` is for; one that ends later with a failure of its own is typed by time here, and
+    the next start meets that failure on its first read.
+
+    Only a preflight out of time looks again. A prober that ended by itself is judged by what was
+    recorded before the shutdown, so a read it no longer needed cannot fail a probe that succeeded.
+    """
+    recorded = server.failure
+    if recorded is not None and recorded != PROBE_DEADLINE_EXCEEDED:
+        return WorkerFailure(recorded)
+    return _out_of_time(budgeted, deadline)
+
+
+def _out_of_time(budgeted: BudgetedSource, deadline: Deadline) -> WorkerFailure:
+    """The failure of a preflight that ran out of its time: where the time went decides it.
+
+    Retryable (source_unavailable / probe_source_slow) only when both hold: the execution's own
+    `deadline` still has time left, so the preflight's budget and not the job's wall time ran out;
+    and the reads of the source took at least PROBE_SOURCE_SLOW_SHARE of the time since that budget
+    began, a read still in flight included. Otherwise deadline_exceeded / probe_deadline_exceeded,
+    not retryable: the media, or ffprobe's own work on bytes it already had, used the time, or the
+    wall time is what ran out, and a stage that runs out of wall time stays final.
+
+    The time in reads, the time elapsed and `deadline` are all read here, when the failure is typed:
+    after the prober ended and the loopback server shut down, not at the instant the budget ran
+    out. The share is taken of the time that had passed by then, so the worker's own teardown (tens
+    of milliseconds, a few seconds at worst) counts as elapsed time, and as time in reads while a
+    read is still in flight: it moves the boundary a little, in either direction.
+    """
+    spent = budgeted.read_time()
+    took_the_share = spent.seconds_in_reads >= PROBE_SOURCE_SLOW_SHARE * spent.seconds_elapsed
+    # Reads that took no time are never the slow party, not even when no time is seen to have passed.
+    storage_was_slow = spent.seconds_in_reads > 0 and took_the_share
+    if deadline.expired() or not storage_was_slow:
+        return WorkerFailure(PROBE_DEADLINE_EXCEEDED)
+    logger.warning(
+        "the preflight ran out of time while the storage was slow: %.3f s in reads of %.3f s elapsed",
+        spent.seconds_in_reads, spent.seconds_elapsed,
+    )
+    return WorkerFailure(PROBE_SOURCE_SLOW)
 
 
 def _prober_start_failure(error: OSError) -> WorkerFailure:
@@ -199,8 +281,8 @@ def _ffprobe_argv(executable: str, url: str, profile: MediaProfile, deadline: De
 
 
 def _facts_from(result: BoundedResult) -> SourceFacts:
-    if result.timed_out:
-        raise _failure("deadline_exceeded", "probe_deadline_exceeded", "the preflight ran out of time")
+    """The facts of a prober that was not killed at the deadline: run_preflight deals with that
+    ending before it asks for the facts (_ran_out_of_time)."""
     if result.stdout_overflow:
         raise _failure(
             "input_limits_exceeded", "probe_output_too_large",
