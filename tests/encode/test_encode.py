@@ -22,6 +22,7 @@ from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 import core.encode
+import core.hls_key
 from core.bounded_process import Deadline
 from core.encode import (
     DURATION_SLACK_MS,
@@ -1892,6 +1893,31 @@ def test_encode_rendition_when_an_encrypted_segment_is_whole_should_accept_it(
 
     # Assert
     assert output.segment_count == 1
+
+
+@pytest.mark.parametrize(
+    "work_dir_name",
+    [pytest.param('work-"quoted"', id="a-double-quote"), pytest.param("work-back\\slash", id="a-backslash")],
+)
+def test_encode_rendition_when_the_key_line_cannot_carry_the_key_files_path_should_raise_and_leave_nothing(
+    encode_media: EncodeMedia, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, work_dir_name: str
+) -> None:
+    # Arrange: without a memory file the key is a file under the work directory, and the playlist the
+    # rendition is decoded through names that file between double quotes
+    monkeypatch.setattr(core.hls_key, "memory_key_supported", lambda: False)
+    work_dir = tmp_path / work_dir_name
+    work_dir.mkdir()
+    job = dataclasses.replace(_claimed_job(tmp_path, tmp_path / "source.mp4"), work_dir=work_dir)
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+
+    # Act: the encode refuses the path itself; a decoder that does not find the key under the path
+    # it read would have a whole rendition refused as one that does not decode
+    with pytest.raises(ValueError, match="key line"):
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert
+    assert list(job.output_root.iterdir()) == []
+    assert list(work_dir.iterdir()) == []
 
 
 def test_encode_rendition_when_an_encrypted_segment_lost_its_last_block_should_refuse_the_rendition(

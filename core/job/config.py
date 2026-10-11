@@ -6,7 +6,8 @@
     VH_SCRATCH_DIR    optional: the existing directory every job makes its scratch directory in;
                       default the system's temporary directory. Either way this process may write to
                       and search it, and its path holds printable ASCII only and none of the
-                      characters the stages refuse in a path (`:`, `%`, a line break, a double quote).
+                      characters the stages refuse in a path (`:`, `%`, a line break, a double quote, a
+                      backslash).
 
 Whatever the scratch directory is, the system must have a usable temporary directory (TMPDIR gives it
 one): the ffmpeg version check and the preflight make their working directories there. A start on a
@@ -87,11 +88,11 @@ def _scratch_root(env: Mapping[str, str], default: str) -> Path:
     # with any other character in it every job would fail after its first rendition was encoded.
     if not all(PRINTABLE_ASCII_FIRST <= ord(character) <= PRINTABLE_ASCII_LAST for character in text):
         raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must hold printable ASCII characters only")
-    # That playlist names an encrypted job's key file between double quotes, and on a host without a
-    # memory file the key file lies under this path: with a quote in it such a job would be refused
-    # after its first rendition was encoded.
-    if KEY_PATH_FORBIDDEN in text:
-        raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must not hold a double quote")
+    # That playlist names an encrypted job's key file between double quotes, where ffmpeg reads a
+    # backslash as an escape and drops it, and on a host without a memory file the key file lies under
+    # this path: with either character in it such a job would fail after its first rendition was encoded.
+    if any(character in text for character in KEY_PATH_FORBIDDEN):
+        raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must not hold a double quote or a backslash")
     scratch_root = Path(text)
     if not scratch_root.is_absolute():
         raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must be an absolute path")

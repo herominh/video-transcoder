@@ -218,9 +218,17 @@ def test_from_env_when_the_scratch_directory_holds_a_character_the_stages_refuse
     assert name not in str(refusal)
 
 
-def test_from_env_when_the_scratch_directory_holds_a_double_quote_should_refuse_it_by_that_rule(tmp_path):
+@pytest.mark.parametrize(
+    ("name", "named_by_the_rule"),
+    [
+        pytest.param('scratch-"quoted"', "double quote", id="a-double-quote"),
+        pytest.param("scratch-back\\slash", "backslash", id="a-backslash"),
+    ],
+)
+def test_from_env_when_the_scratch_directory_holds_a_character_the_key_line_cannot_carry_should_refuse_it_by_that_rule(
+    tmp_path, name, named_by_the_rule
+):
     # Arrange: the directory exists, so only the character refuses it
-    name = 'scratch-"quoted"'
     directory = tmp_path / name
     directory.mkdir()
 
@@ -229,8 +237,9 @@ def test_from_env_when_the_scratch_directory_holds_a_double_quote_should_refuse_
 
     # Assert: the variable and the rule, never the value
     assert refusal.variable == SCRATCH_VARIABLE
-    assert "double quote" in refusal.rule
+    assert named_by_the_rule in refusal.rule
     assert name not in str(refusal)
+    assert str(directory) not in str(refusal)
 
 
 @pytest.mark.parametrize(

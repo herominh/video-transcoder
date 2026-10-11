@@ -153,7 +153,9 @@ FRAME_COUNT_PATTERN = re.compile(r"0|[1-9][0-9]{0,17}")
 # EXTINF values were parsed from at most 20 characters of decimal text.
 MAX_DECIMAL_DIGITS = 20
 DECIMAL_BASE = 10
-KEY_PATH_FORBIDDEN = '"'
+# What the key line of the check playlist cannot carry of the key file's path: the path stands between
+# double quotes there, and inside them ffmpeg's HLS demuxer reads a backslash as an escape and drops it.
+KEY_PATH_FORBIDDEN = ('"', "\\")
 UNKNOWN_ERRNO_NAME = "unknown"
 EMPTY_CWD_PREFIX = "encode-cwd-"
 FILE_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -869,7 +871,7 @@ def _check_playlist(playlist: MediaPlaylist, rendition_dir: Path, key_path: Path
     the path the decoder reads it from; built from the parsed playlist, never from its text."""
     if key_path is not None:
         require_safe_path("key_path", key_path)
-        if KEY_PATH_FORBIDDEN in str(key_path):
+        if any(character in str(key_path) for character in KEY_PATH_FORBIDDEN):
             raise ValueError("key_path holds a character the key line cannot carry")
     lines = [
         "#EXTM3U",

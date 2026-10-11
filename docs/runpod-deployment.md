@@ -44,8 +44,9 @@ Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are 
   (`<repository>@sha256:<digest>`, not a tag such as `:latest`) and change the two together: a tag can be moved to
   another image while every result goes on reporting the old digest;
 - `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, which the worker's process can
-  write to and search; its path holds printable ASCII only, without `:`, `%` or a double quote; a usable system temporary
-  directory (`TMPDIR`) is required whatever the scratch directory is. The scratch directory (this one, or the system's
+  write to and search; its path holds printable ASCII only, without `:`, `%`, a double quote or a backslash; a usable
+  system temporary directory (`TMPDIR`) is required whatever the scratch directory is. The scratch directory (this one,
+  or the system's
   temporary directory when the variable is not set) must be on a local file system on which a directory can be locked
   with `flock`, and must not be shared between hosts: every job locks its own directory in it, and that lock tells a
   running job's directory from one a killed process left behind only between processes of one host. Where a directory

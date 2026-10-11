@@ -41,6 +41,10 @@ from core.source_reader import PROBE_DEADLINE_EXCEEDED, BudgetedSource, RangeSou
 logger = logging.getLogger(__name__)
 
 LOOPBACK_HOST = "127.0.0.1"
+# How often the loopback server looks for its shutdown. Leaving the server waits for the next look, so
+# this is how long after its prober ended, or after its deadline passed, a preflight may still return;
+# the standard library's own interval is half a second.
+LOOPBACK_POLL_INTERVAL_S = 0.05
 URL_TOKEN_BYTES = 32
 # libavformat logs this line when no container or stream timestamp gives the duration.
 DURATION_ESTIMATED_MARKER = b"Estimating duration from bitrate"
@@ -444,6 +448,10 @@ class _LoopbackHTTPServer(ThreadingHTTPServer):
     ) -> None:
         self._owner = owner
         super().__init__(server_address, handler_class)
+
+    def serve_forever(self, poll_interval: float = LOOPBACK_POLL_INTERVAL_S) -> None:
+        """Serve until shutdown(), which returns at this loop's next look, at most `poll_interval` later."""
+        super().serve_forever(poll_interval)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         # The prober drops a connection on every seek; only other errors are worth a line.

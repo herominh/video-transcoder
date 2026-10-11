@@ -43,7 +43,7 @@ TIME_LEFT_S = 3_600.0
 # How long a test waits for another thread to get somewhere, and a held read lets go by itself: far
 # longer than a test takes, so that a regression fails a test instead of hanging the suite.
 PATIENCE_S = 20.0
-# The loopback server looks for its shutdown this often here, where the worker's looks twice a second.
+# The loopback server looks for its shutdown this often here, far more often than the worker's does.
 SHUTDOWN_POLL_S = 0.005
 # ffprobe's option for its own I/O time-out, in microseconds, and how much longer than what the
 # preflight's budget leaves that time-out is: the worker's kill at the deadline comes first.

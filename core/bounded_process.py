@@ -49,7 +49,12 @@ class Deadline:
     def __post_init__(self) -> None:
         if isinstance(self.expires_at, bool) or not isinstance(self.expires_at, (int, float)):
             raise ValueError("expires_at must be a number")
-        if not math.isfinite(self.expires_at):
+        try:
+            finite = math.isfinite(self.expires_at)
+        except OverflowError:
+            # An integer too large to be a float: no reading of a clock, and nothing can be counted to it.
+            finite = False
+        if not finite:
             raise ValueError("expires_at must be finite")
 
     @classmethod

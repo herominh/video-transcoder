@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import inspect
 import logging
 import selectors
 import shutil
+import socketserver
 import subprocess
 import threading
 import time
@@ -31,6 +33,10 @@ KIB = 1024
 TEN_GIB = 10 * GIB
 OPEN_LIMITS = RequestLimits(max_source_bytes=TEN_GIB, max_source_duration_ms=21_600_000)
 TEST_DEADLINE_MS = 60_000
+# The longest the loopback server may go between two looks for its shutdown: leaving the server waits
+# for the next look, so every preflight returns at most this long after its prober ended. The standard
+# library's own interval is half a second.
+LONGEST_SHUTDOWN_POLL_S = 0.1
 
 pytestmark = pytest.mark.skipif(shutil.which("ffprobe") is None, reason="ffprobe is not installed")
 
@@ -817,3 +823,30 @@ def test_loopback_server_when_the_range_starts_beyond_the_object_should_refuse_i
     # Assert
     assert raised.value.code == 416
     assert inner.reads == []
+
+
+def test_loopback_server_when_serving_should_look_for_its_shutdown_at_least_ten_times_a_second(monkeypatch):
+    # Arrange: note the time between two looks for a shutdown that the standard library's serving loop
+    # is run with. Leaving the server waits for the loop's next look, at most that long; the wait
+    # itself is not timed here, because a bound far below half a second would be one on this machine's load.
+    intervals: list[float] = []
+    serve_forever = socketserver.BaseServer.serve_forever
+
+    def serve_noting_the_interval(server: Any, *args: Any, **kwargs: Any) -> None:
+        call = inspect.signature(serve_forever).bind(server, *args, **kwargs)
+        call.apply_defaults()
+        intervals.append(call.arguments["poll_interval"])
+        serve_forever(server, *args, **kwargs)
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", serve_noting_the_interval)
+    data = bytes(range(100))
+    server, _ = _serve(data)
+
+    # Act: one served request, then the server is left
+    with server:
+        body = urllib.request.urlopen(server.url, timeout=5).read()
+
+    # Assert
+    assert body == data
+    assert len(intervals) == 1
+    assert 0 < intervals[0] <= LONGEST_SHUTDOWN_POLL_S
