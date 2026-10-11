@@ -1,7 +1,11 @@
 """How the job touches a bucket: it reads the source object and stores the generation, nothing else.
 
 Each side has its own client of an access profile: storage_client() reads the source, upload_client()
-stores the generation.
+stores the generation. Neither follows a region redirect. botocore's region redirector, registered on
+every S3 client, would send a request again, signed for the region the storage's answer names, and
+ask for the bucket's head where the answer names none; it is stopped where each client is made
+(without_region_redirects() of core/source_reader.py). So one call of a client is one request, and a
+redirect answer comes back as the storage's own error, a ClientError.
 
 Every request is held to the execution's deadline while it is in flight, and to a time ceiling of its
 own. The client's read time-out bounds a silence only, so a storage that trickles a body or withholds
@@ -34,25 +38,34 @@ count is above zero the entry point asks for a fresh process with every job it r
 
 download_source() copies the source into the scratch directory through RangeSource.read(), so every byte
 arrives through the reader's own checks: in production an S3RangeSource, whose ranged reads are each
-conditional on the recorded ETag. A source that changed while it was read fails the job.
+conditional on the recorded ETag. A source that changed while it was read fails the job. The close of
+the file is its last write: one that fails after the whole copy is a failed write, and no file is left.
 
 upload_generation() stores exactly the files the manifest lists and then the manifest, each under
 `<prefix>/<relative path>` (contract README 15.1, rule 3: every object a runtime writes has a key that
 starts with the granted prefix and `/`). The manifest is the completion marker, so it goes last, only
 after every artifact was stored. It takes its list from the caller, never from a walk of the output
-directory, and it only ever puts: it lists nothing, reads nothing back and deletes nothing (the client's
-own region redirector may ask for the bucket's head once after a redirect answer, inside the same
-request and under its deadline). The bytes a client reads of a file are counted and hashed as it reads
-them, and an object counts as stored only when they have the size and the SHA-256 the manifest records.
+directory, and refuses, before any request, a list that is not as many artifacts, or not of the total
+size, the manifest records, and a bucket that is no contract bucket. It only ever puts: it lists
+nothing, reads nothing back and deletes nothing. The bytes a client reads of a file are counted and
+hashed as it reads them, and an object counts as stored only when they have the size and the SHA-256
+the manifest records.
 A pass over a file that ends with other bytes is refused where it ends: before anything is sent, with a
-client that reads a body through to sign it.
+client that reads a body through to sign it. A file is opened anew for every request, without waiting
+(a FIFO put where it was is refused at once, as any file that is no longer a regular one of the
+recorded size), and a file that cannot be opened, or fails under a read, ends the upload as a file
+that changed, named by its relative path and the errno's name.
 A refusal that sending the object again cannot change (the credentials may not write, the bucket does
 not exist) ends the upload at once and for good; every other failed request is sent again, after its
 wait.
 
 No log line and no failure detail holds an endpoint, a URL, a credential or the storage client's own
-error text: a storage error is named by its class and, for an answer of the storage, its error code,
-and of a `Retry-After` header nothing is kept but its number of seconds.
+error text: a storage error is named by its class and, for an answer of the storage, its error code
+where that has the shape of one (ERROR_CODE_PATTERN; any other value counts as no code at all), and of
+a `Retry-After` header nothing is kept but its number of seconds. A typed failure this module raises
+in place of a storage client's error carries nothing of that error, neither as its cause nor as its
+context. An error of the operating system is named by its errno's symbolic name, never by its own
+text, which may name a path.
 """
 
 from __future__ import annotations
@@ -63,6 +76,7 @@ import hashlib
 import logging
 import os
 import random
+import re
 import stat
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -87,6 +101,7 @@ from core.source_reader import (
     S3_READ_TIMEOUT_S,
     RangeSource,
     make_s3_client,
+    without_region_redirects,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,6 +128,9 @@ SOURCE_FILE_FLAGS = (
     os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
 )
 SOURCE_FILE_MODE = 0o600
+# How a file to upload is opened, besides for reading: through no link at its last part, and without
+# waiting. An open that waits never returns for a FIFO put where the file was, until a writer comes.
+ARTIFACT_OPEN_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
 DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 UNKNOWN_ERRNO_NAME = "unknown"
 KEY_SEPARATOR = "/"
@@ -132,6 +150,7 @@ CONTENT_TYPES = {
 _COMMON_DEFINITIONS = schema.SCHEMA_BASE_URI + "schemas/common.schema.json#/$defs/"
 _REL_PATH_DEFINITION = _COMMON_DEFINITIONS + "rel_path"
 _OBJECT_KEY_DEFINITION = _COMMON_DEFINITIONS + "object_key"
+_BUCKET_DEFINITION = _COMMON_DEFINITIONS + "bucket"
 # The helper thread one storage request runs on (_within).
 REQUEST_THREAD_NAME = "vh-storage-request"
 # A PutObject the storage answered with a redirect or a client error is refused for good: the same
@@ -163,6 +182,11 @@ PASSING_REFUSAL_CODES = frozenset(
         "SlowDown",  # the storage limits how fast it is asked, whatever status it answers with
     }
 )
+
+# The shape an error code of the storage's answer is kept in. The answer is the storage's own text: a
+# value of any other shape is no code at all, to a failure's detail, to a log line and to the decision
+# whether a refusal passes.
+ERROR_CODE_PATTERN = re.compile(r"[A-Za-z0-9.]{1,64}")
 
 DOWNLOAD_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "download_deadline_exceeded", False,
@@ -217,21 +241,23 @@ def upload_client(profile: StorageProfile) -> Any:
     """
     if not isinstance(profile, StorageProfile):
         raise TypeError("profile must be a StorageProfile")
-    return boto3.client(
-        "s3",
-        endpoint_url=profile.endpoint,
-        region_name=profile.region,
-        aws_access_key_id=profile.access_key_id,
-        aws_secret_access_key=profile.secret_access_key,
-        config=Config(
-            signature_version=SIGNATURE_VERSION,
-            connect_timeout=S3_CONNECT_TIMEOUT_S,
-            read_timeout=S3_READ_TIMEOUT_S,
-            retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": RETRY_MODE},
-            s3={"addressing_style": ADDRESSING_STYLE},
-            request_checksum_calculation=CHECKSUM_WHEN_REQUIRED,
-            response_checksum_validation=CHECKSUM_WHEN_REQUIRED,
-        ),
+    return without_region_redirects(
+        boto3.client(
+            "s3",
+            endpoint_url=profile.endpoint,
+            region_name=profile.region,
+            aws_access_key_id=profile.access_key_id,
+            aws_secret_access_key=profile.secret_access_key,
+            config=Config(
+                signature_version=SIGNATURE_VERSION,
+                connect_timeout=S3_CONNECT_TIMEOUT_S,
+                read_timeout=S3_READ_TIMEOUT_S,
+                retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": RETRY_MODE},
+                s3={"addressing_style": ADDRESSING_STYLE},
+                request_checksum_calculation=CHECKSUM_WHEN_REQUIRED,
+                response_checksum_validation=CHECKSUM_WHEN_REQUIRED,
+            ),
+        )
     )
 
 
@@ -499,7 +525,10 @@ def download_source(
     with the bytes written so far after each chunk.
 
     Raises WorkerFailure for a failed read, a chunk of another length than asked (the object is not the
-    recorded size), a passed deadline and a failed write; the partial file is removed first. Raises
+    recorded size), a passed deadline and a failed write; the partial file is removed first. The close
+    of the file is its last write: one that fails after a whole copy is a failed write like any other
+    (a file system may report only then that it could not keep the bytes), and the file is removed.
+    Behind a copy that failed, the copy's own failure stands whatever the close does. Raises
     TypeError or ValueError for invalid arguments or an existing destination, before anything is read.
     """
     size_bytes = _validated_download(source, destination)
@@ -510,13 +539,17 @@ def download_source(
         # Nothing of ours to remove: the file was not created, or it was not created by this call.
         raise _source_write_failure(error) from None
     try:
-        try:
-            return _copy_source(source, size_bytes, descriptor, deadline, sleep, on_bytes)
-        finally:
-            os.close(descriptor)
+        written = _copy_source(source, size_bytes, descriptor, deadline, sleep, on_bytes)
     except BaseException:
+        _close_behind_a_failure(descriptor)
         _remove_partial(destination)
         raise
+    try:
+        os.close(descriptor)
+    except OSError as error:
+        _remove_partial(destination)
+        raise _source_write_failure(error) from None
+    return written
 
 
 def _validated_download(source: object, destination: object) -> int:
@@ -616,6 +649,15 @@ def _source_write_failure(error: OSError) -> WorkerFailure:
     )
 
 
+def _close_behind_a_failure(descriptor: int) -> None:
+    """Close the source file a copy failed on. What the copy failed with stands, so a close that fails
+    too is logged, by its errno's name, and raises nothing."""
+    try:
+        os.close(descriptor)
+    except OSError as error:
+        logger.warning("a partial source file could not be closed: errno=%s", _errno_name(error))
+
+
 def _remove_partial(path: Path) -> None:
     """Best effort: the job's scratch cleanup removes whatever is left. Paths are never logged."""
     try:
@@ -678,9 +720,12 @@ def upload_generation(
     after each object.
 
     Raises TypeError or ValueError, before any request, for anything that would put an object where the
-    generation does not belong (a wiring bug): a prefix that is no contract object key, a path that is
-    no contract rel_path, two files with one path, a file that is not a regular file of the output root
-    or has no content type here; a ValueError about a file names its relative path only. Raises
+    generation does not belong, or store another generation than the manifest's (a wiring bug): a
+    bucket that is no contract bucket, a prefix that is no contract object key, a path that is no
+    contract rel_path, two files with one path, a file that is not a regular file of the output root
+    or has no content type here, artifacts that are not as many as the manifest's `artifact_count` or
+    whose recorded sizes do not add up to its `total_bytes`; a ValueError about a file names its
+    relative path only, and one about the bucket does not repeat it. Raises
     WorkerFailure for a file that changed, a passed deadline, a refusal (not retryable) and an upload
     that kept failing or stalling (retryable): no later object is then put, so the manifest is stored only after
     every artifact was. With a client that reads a body through before it sends it (botocore does, to
@@ -693,10 +738,14 @@ def upload_generation(
     """
     if not callable(getattr(client, "put_object", None)):
         raise TypeError("client must be an S3 client")
-    if not isinstance(bucket, str) or not bucket:
-        raise ValueError("bucket must be a non-empty string")
+    if not isinstance(bucket, str) or schema.error_pointers_for_schema({"$ref": _BUCKET_DEFINITION}, bucket):
+        # The refused name is not repeated: what a bug hands over here need not be a bucket's name at all.
+        raise ValueError(
+            "bucket must be a contract bucket: 3 to 63 lower-case letters, digits and hyphens, no hyphen first or last"
+        )
     _require_transfer_arguments(deadline, sleep, on_bytes)
     uploads = _planned_uploads(prefix, output_root, artifacts, manifest)
+    _require_what_the_manifest_records(artifacts, manifest)
     uploaded = 0
     for upload in uploads:
         _store(client, bucket, upload, deadline, sleep)
@@ -717,6 +766,22 @@ def _planned_uploads(prefix: object, output_root: object, artifacts: object, man
         _planned_upload(prefix, root, relative_path, size_bytes, sha256)
         for relative_path, size_bytes, sha256 in _listed_files(artifacts, manifest)
     ]
+
+
+def _require_what_the_manifest_records(artifacts: Sequence[ArtifactFile], manifest: ManifestOutput) -> None:
+    """The artifacts must be exactly what the manifest records: as many as its `artifact_count`, their
+    recorded sizes adding up to its `total_bytes`. (The package stage counts both over the artifacts
+    the manifest lists; the manifest's own file is in neither.) Asked once each file was found to be
+    one the upload can store, so that a file's own fault is named first."""
+    if len(artifacts) != manifest.artifact_count:
+        raise ValueError(
+            f"{len(artifacts)} artifacts were given where the manifest records {manifest.artifact_count}"
+        )
+    given_bytes = sum(artifact.size_bytes for artifact in artifacts)
+    if given_bytes != manifest.total_bytes:
+        raise ValueError(
+            f"the artifacts given record {given_bytes} bytes where the manifest records {manifest.total_bytes}"
+        )
 
 
 def _listed_files(artifacts: object, manifest: object) -> list[tuple[str, int, str]]:
@@ -794,18 +859,19 @@ def _store(client: Any, bucket: str, upload: _Upload, deadline: Deadline, sleep:
             # changed, a request no thread could be made for.
             if stalled.failure is not UPLOAD_STALLED:
                 raise
-            failed, name, asked_s = stalled, UPLOAD_STALLED.code, 0.0
+            failed, name, asked_s, for_good = stalled, UPLOAD_STALLED.code, 0.0, False
         except (BotoCoreError, ClientError) as error:
-            name = _storage_error_name(error)
-            if _refused_for_good(error):
-                logger.warning("an upload was refused for good and is not sent again: %s", name)
-                # `from None`: the client's own error names the endpoint, and must not travel with ours.
-                raise _upload_refused(name) from None
-            failed, asked_s = _upload_failed(name), _retry_after_s(error)
+            # The client's own error names the endpoint. Only what is read of it here goes on: the typed
+            # failure is raised below, outside this handler, so that the error is neither its cause nor
+            # its context.
+            name, asked_s, for_good = _storage_error_name(error), _retry_after_s(error), _refused_for_good(error)
+            failed = _upload_refused(name) if for_good else _upload_failed(name)
+        if for_good:
+            logger.warning("an upload was refused for good and is not sent again: %s", name)
+            raise failed
         wait_s = _next_wait_s(nominal_waits_s, deadline, at_least_s=asked_s)
         if wait_s is None:
-            # `from None` here too: nothing of the client's error travels with the failure of the upload.
-            raise failed from None
+            raise failed
         logger.warning("an upload failed and is tried again after %.3f s: %s", wait_s, name)
         sleep(wait_s)
 
@@ -835,9 +901,11 @@ def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
     recorded ones.
 
     What the body itself refused the client decides first, whatever the client returned or raised: a
-    read after the deadline, then a pass over the file that ended with other bytes than the recorded
-    ones. An error of the client's own comes next, raised again as it is: a pass it had read only a
-    part of says nothing about the file. A request that returned is judged by its last pass. (The step
+    read after the deadline, then an error of the file itself, then a pass over the file that ended with
+    other bytes than the recorded ones. An error of the client's own comes next, raised again as it is:
+    a pass it had read only a part of says nothing about the file. An OSError among them is the
+    client's too: the file's own is known by the body's note of it, never by its class. A request that
+    returned is judged by its last pass. (The step
     for a read after the deadline is a belt: such a request also ended out of time or was abandoned at
     its ceiling, its outcome is dropped either way, and _within's own
     note of that already makes it the deadline failure.)
@@ -851,10 +919,12 @@ def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
             ContentType=upload.content_type,
         )
     except Exception:
-        if not body.cut_at_deadline and body.found_difference is None:
+        if not body.cut_at_deadline and body.file_error is None and body.found_difference is None:
             raise
     if body.cut_at_deadline:
         raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
+    if body.file_error is not None:
+        raise _artifact_changed(upload, f"it could not be read: {body.file_error}")
     difference = body.found_difference or body.difference_of_the_last_pass()
     if difference is not None:
         raise _artifact_changed(upload, difference)
@@ -868,6 +938,12 @@ class _BodyCutAtDeadline(Exception):
 class _BodyNotAsRecorded(Exception):
     """What an upload's body raises to a storage client where a pass over the file ended with other
     bytes than the recorded ones, and at every read after that."""
+
+
+class _BodyFileFailed(Exception):
+    """What an upload's body raises to a storage client where the file itself failed under a question
+    (a read error of the disk), and at every read after that: in our own words, never the
+    operating system's, which may name a path."""
 
 
 class _CheckedBody:
@@ -894,6 +970,12 @@ class _CheckedBody:
     that does not check that hash, can a wrong object have been stored by the time it is refused. A
     client that stops before the end of the file is judged by its last pass once its request returned.
 
+    A question the file answers with an error of the operating system (a disk that fails under a read)
+    is refused in our own words, and so is every read after it. The body notes that its own file
+    failed, by the errno's name: whatever the client makes of the refusal (it raises it as it is while
+    it signs, and wraps it in an error of its own while it sends), the upload ends as a file that could
+    not be read, and no OSError of another origin is taken for it.
+
     Once the deadline has passed read() raises too: the request was abandoned by then (_within), and an
     abandoned upload must not go on sending. The thread that waited closes the body when it stops
     waiting, while the request may still run on its helper thread: whatever that thread then asks of the
@@ -909,6 +991,7 @@ class _CheckedBody:
         self._pass_bytes = 0
         self._moved_within_the_pass = False
         self._cut_at_deadline = False
+        self._file_error: str | None = None
         self._found_difference: str | None = None
         self._closed = False
 
@@ -916,6 +999,12 @@ class _CheckedBody:
     def cut_at_deadline(self) -> bool:
         """Whether the client was refused because the deadline had passed, or the body was closed for it."""
         return self._cut_at_deadline
+
+    @property
+    def file_error(self) -> str | None:
+        """The errno's name of the first error the body's own file answered a question with; None when
+        it answered every question so far."""
+        return self._file_error
 
     @property
     def found_difference(self) -> str | None:
@@ -942,6 +1031,8 @@ class _CheckedBody:
         # The question _within asks of the deadline, so the body stops when its request is abandoned.
         if self._closed or self._deadline.remaining_s() <= 0:
             raise self._cut()
+        if self._file_error is not None:
+            raise self._file_failed()
         self._refuse_a_pass_that_ended_otherwise()
         wanted = -1 if amount is None else amount
         data = self._of_the_open_file(functools.partial(self._artifact.read, wanted))
@@ -957,6 +1048,10 @@ class _CheckedBody:
         if self._found_difference is not None:
             raise _BodyNotAsRecorded(self._found_difference)
 
+    def _file_failed(self) -> _BodyFileFailed:
+        """What is raised to the client that asks a body whose file failed, at the failure and after it."""
+        return _BodyFileFailed(f"an upload's file could not be read: {self._file_error}")
+
     def _cut(self) -> _BodyCutAtDeadline:
         """Note that the request was cut, and give what is raised to the client that still uses the body."""
         self._cut_at_deadline = True
@@ -964,7 +1059,9 @@ class _CheckedBody:
 
     def _of_the_open_file(self, ask: Callable[[], _Returned]) -> _Returned:
         """What `ask()` gets of the file. A body that is closed, before the question or under it, is the
-        body of a request that was cut: the client is refused as it is after the deadline."""
+        body of a request that was cut: the client is refused as it is after the deadline. An error of
+        the operating system under the question is the file's own: it is noted, and the client is
+        refused in our own words."""
         if self._closed:
             raise self._cut()
         try:
@@ -974,6 +1071,14 @@ class _CheckedBody:
             if not self._closed:
                 raise
             raise self._cut() from None
+        except OSError as error:
+            if self._closed:
+                raise self._cut() from None
+            # Noted here, where the file raised it: nowhere else can it be told from another OSError.
+            self._file_error = self._file_error or _errno_name(error)
+        # Raised outside the handler: the operating system's error, whose text may name a path, does not
+        # travel with what the client is given.
+        raise self._file_failed()
 
     def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
         position = self._of_the_open_file(functools.partial(self._artifact.seek, offset, whence))
@@ -1007,14 +1112,18 @@ class _CheckedBody:
         self.close()
 
 
-def _open_without_following(path: str, flags: int) -> int:
-    return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0))
+def _open_without_following_or_waiting(path: str, flags: int) -> int:
+    return os.open(path, flags | ARTIFACT_OPEN_FLAGS)
 
 
 def _opened_artifact(upload: _Upload) -> BinaryIO:
-    """The file to upload, open for reading, once it is still a regular file of the recorded size."""
+    """The file to upload, open for reading, once it is still a regular file of the recorded size.
+
+    The open never waits: whatever stands at the path by now is opened at once and then judged, so a
+    FIFO there is refused as any other file that is no longer a regular one. (Reading a regular file
+    is the same with or without the flag.)"""
     try:
-        body = open(upload.local_path, "rb", opener=_open_without_following)
+        body = open(upload.local_path, "rb", opener=_open_without_following_or_waiting)
     except OSError as error:
         raise _artifact_changed(upload, f"it could not be opened: {_errno_name(error)}") from None
     try:
@@ -1081,9 +1190,10 @@ def _answered_status(error: ClientError) -> int | None:
 
 
 def _error_code(error: ClientError) -> str | None:
-    """The error code of the storage's error answer; None when the answer names none."""
+    """The error code of the storage's error answer; None when the answer names none, or names one
+    that is not wholly of ERROR_CODE_PATTERN."""
     code = error.response.get("Error", {}).get("Code")
-    return code if isinstance(code, str) and code else None
+    return code if isinstance(code, str) and ERROR_CODE_PATTERN.fullmatch(code) else None
 
 
 def _storage_error_name(error: BotoCoreError | ClientError) -> str:

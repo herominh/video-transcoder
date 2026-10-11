@@ -38,6 +38,8 @@ class FakeS3State:
     error_code: str = ""
     cut_body_to: int | None = None
     requests: list[dict[str, str]] = field(default_factory=list)
+    # The path of every HEAD request: the reader makes none, so each is one the client made on its own account.
+    head_requests: list[str] = field(default_factory=list)
 
 
 def _handler(state: FakeS3State) -> type[BaseHTTPRequestHandler]:
@@ -68,6 +70,13 @@ def _handler(state: FakeS3State) -> type[BaseHTTPRequestHandler]:
             first, last = range_header.removeprefix("bytes=").split("-")
             start, end = int(first) + state.shift_range_by, int(last) + state.shift_range_by
             self._send(206, data[start:end + 1], f"bytes {start}-{end}/{total}")
+
+        def do_HEAD(self) -> None:
+            # Answered as a GET is where a test sets a status, without a body: a HEAD's answer has none.
+            state.head_requests.append(self.path)
+            self.send_response(200 if state.status is None else state.status)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _send(self, status: int, body: bytes, content_range: str | None) -> None:
             self.send_response(status)
@@ -236,6 +245,29 @@ def test_read_when_storage_refuses_should_report_a_typed_failure_after_one_reque
     # Assert
     assert (failure.code, failure.retryable) == (expected_code, expected_retryable)
     assert len(state.requests) == 1  # no hidden retry spent a request the budget never saw
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [(301, "PermanentRedirect"), (302, "Found"), (307, "TemporaryRedirect")],
+    ids=["301", "302", "307"],
+)
+def test_read_when_storage_answers_every_request_with_a_redirect_should_make_one_request_and_fail_typed(
+    fake_s3, status, error_code,
+):
+    # Arrange: a host that answers whatever it is asked, a bucket's head included, with the same redirect
+    state, endpoint = fake_s3
+    state.status = status
+    state.error_code = error_code
+    source = _source(endpoint)
+
+    # Act
+    failure = _failure_of(lambda: source.read(0, 10))
+
+    # Assert: the answer came back as the storage's own, and the client followed it nowhere
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "storage_error", True)
+    assert len(state.requests) == 1
+    assert state.head_requests == []
 
 
 def test_read_when_the_body_is_cut_short_should_fail_retryable(fake_s3):

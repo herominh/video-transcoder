@@ -86,6 +86,7 @@ from tests.job.conftest import (
     hub_storage_context,
     job_settings,
     runtime_of,
+    settle_requests_first,
 )
 
 SOURCE_BUCKET = "test-source-bucket"
@@ -417,6 +418,9 @@ class Harness:
                 return ClockDeadline(clock, milliseconds / 1000)
 
         monkeypatch.setattr(runner_module, "Deadline", DeadlineOnTheFakeClock)
+        # What is left on the test's clock also bounds, in real seconds, how long the job waits for a
+        # storage request's thread. So each request has ended before the job begins to wait for it.
+        settle_requests_first(monkeypatch)
 
     @property
     def access_profiles(self) -> list[StorageProfile]:

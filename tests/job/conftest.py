@@ -1,6 +1,7 @@
 """Shared helpers of the job tests. Nothing here touches a network, a real bucket or a paid service.
 
 ScriptedDeadline and ClockDeadline are deadlines a test decides, so that no sleep and no real clock does.
+settle_requests_first() takes the host's speed out of a test that has the job wait for a storage request.
 FakeS3 stands in for the S3 client: it serves ranged, conditional reads of objects it holds with the
 response shape core.source_reader.S3RangeSource checks, and records every PutObject in order. A claimed
 execution is built from the contract's own fixtures (the P01/P02 requests, the P24/P27 grants) through
@@ -13,6 +14,8 @@ and ctx-hub-storage.json.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,6 +25,7 @@ import pytest
 from botocore.exceptions import ClientError
 
 from core.bounded_process import Deadline
+from core.job import storage
 from core.job.config import JobSettings
 from core.protocol import files, pipeline, signing
 from core.protocol.claim import Grant, claim_execution
@@ -79,22 +83,37 @@ _NEVER_S = 1.0e12
 
 class ScriptedDeadline(Deadline):
     """A Deadline whose expired() answers from a script, not from a clock: each call takes the next answer,
-    and the last one repeats. `asked` counts the calls. It is a Deadline to every isinstance check."""
+    and the last one repeats. `asked` counts the calls. It is a Deadline to every isinstance check.
+
+    remaining_s() goes by the script as well, and takes no answer of it: no time is left once expired()
+    has said that the deadline passed (before the first call: when the first answer says so), and until
+    then more time than any wait lasts. So what decides whether a wait is made, or a request started,
+    agrees with what expired() last said."""
 
     def __init__(self, *answers: bool) -> None:
         if not answers:
             raise ValueError("a scripted deadline needs at least one answer")
         super().__init__(_NEVER_S)
         object.__setattr__(self, "_answers", list(answers))
+        object.__setattr__(self, "_passed", answers[0])
         object.__setattr__(self, "asked", 0)
 
     def expired(self) -> bool:
         object.__setattr__(self, "asked", self.asked + 1)
-        return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+        object.__setattr__(self, "_passed", self._answers.pop(0) if len(self._answers) > 1 else self._answers[0])
+        return self._passed
+
+    def remaining_s(self) -> float:
+        return 0.0 if self._passed else _NEVER_S
 
 
 class ClockDeadline(Deadline):
-    """A Deadline on the test's own clock: it has passed once `seconds` have gone by on `clock.monotonic()`."""
+    """A Deadline on the test's own clock: it has passed once `seconds` have gone by on `clock.monotonic()`,
+    and remaining_s() is what is left of them on that clock.
+
+    The job waits for a storage request's thread no longer than its deadline leaves, in real seconds
+    (storage._within). A test that puts storage requests under this deadline has them settle first
+    (settle_requests_first), so that what is left on its clock bounds no real wait."""
 
     def __init__(self, clock: FakeClock, seconds: float) -> None:
         super().__init__(_NEVER_S)
@@ -103,6 +122,40 @@ class ClockDeadline(Deadline):
 
     def expired(self) -> bool:
         return self._clock.monotonic() >= self._passes_at_s
+
+    def remaining_s(self) -> float:
+        return max(0.0, self._passes_at_s - self._clock.monotonic())
+
+
+# --- storage requests that settle before the job waits for them ------------------------------------
+
+# How long a request may take to end, or to get to where a test keeps it: far longer than any takes, so
+# that a regression fails a test instead of hanging it. And how often the thread that waits looks again.
+SETTLES_WITHIN_S = 10.0
+SETTLE_TICK_S = 0.005
+
+
+def settle_requests_first(patched: pytest.MonkeyPatch, arrival: threading.Event | None = None) -> None:
+    """Make whoever starts a storage request's thread get on only once that request has ended or, where
+    a test names one, `arrival` is set (a request is where the test keeps it).
+
+    The job waits for a request's thread no longer than its deadline or its ceiling leaves, in real
+    seconds (storage._within). Under this it begins to wait when the request needs no more time to get
+    somewhere, so nothing a test's deadline leaves is a time a loaded host could use up first: neither
+    the tens of milliseconds of a deadline or a ceiling that is to pass under a kept request, nor what
+    is left on a test's own clock (ClockDeadline)."""
+    start = threading.Thread.start
+
+    def start_and_see_the_request_settle(thread: threading.Thread) -> None:
+        start(thread)
+        if thread.name != storage.REQUEST_THREAD_NAME:
+            return
+        give_up_at_s = time.monotonic() + SETTLES_WITHIN_S
+        while thread.is_alive() and not (arrival is not None and arrival.is_set()):
+            assert time.monotonic() < give_up_at_s, "a storage request neither ended nor got to where the test keeps it"
+            thread.join(SETTLE_TICK_S)
+
+    patched.setattr(threading.Thread, "start", start_and_see_the_request_settle)
 
 
 # --- a fake S3 client ---------------------------------------------------------------------------
