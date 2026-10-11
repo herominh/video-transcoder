@@ -4,7 +4,9 @@ The image runs this file (`Dockerfile.runpod`). build_handler() runs once, befor
 checks the contract tree the image ships and reads the worker's whole configuration
 (core.protocol.handler.load_runtime, core.job.config.JobSettings). A tree or a configuration that cannot
 be trusted stops the process there (ContractTreeInvalid, SettingsInvalid: each names the file or the
-variable and the rule, never a value), so a worker never serves with either.
+variable and the rule, never a value), so a worker never serves with either. With the configuration read,
+it removes the scratch directories a killed process left in the scratch root
+(core.job.scratch.remove_leftover_scratch, which never raises, so it cannot stop a start).
 
 For each job the SDK calls the handler with its job, a mapping that has `id` and `input`. Nothing of the
 job is trusted here: the value of `input` (None when the job is no mapping or has no input) goes to
@@ -27,6 +29,11 @@ context and the traceback holds no chain:
     WorkerFault   anything else, a bug. Its text names the error's class and nothing more; the class
                   and the stack are logged once, without the error's text.
 
+A bug's log line is written once the bug is no longer being handled, as the two errors are raised: when a
+log handler fails on a line, Python's logging prints a report of its own to standard error with every
+error that failure is chained to, and a failure inside the `except` block that caught the bug would be
+chained to the bug, with the bug's own text.
+
 Once a storage request was abandoned in this process, at the deadline or at its own ceiling
 (core.job.storage._within counts it, in a job that completed too), every returned output also carries
 `refresh_worker: True`, until the process ends. It is the process that is marked, not a job: the abandoned
@@ -37,8 +44,10 @@ output to carry the member; the next one that returns carries it. The SDK takes 
 and reports the job with `stopPod`, on which the provider stops the pod after the job, so the Hub still reads
 exactly the carrier.
 
-Importing this module builds and configures nothing: the process's logging is set up
-(configure_logging), the SDK imported and the handler built only when this file is run.
+Importing this module builds and configures nothing. What the file does when it is run as the program is
+main(), which the `__main__` block calls and nothing else: it sets up the process's logging
+(configure_logging) before it imports the SDK and before it builds the handler, and starts the SDK's
+serverless loop with that handler.
 """
 
 from __future__ import annotations
@@ -55,6 +64,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.job.config import JobSettings  # noqa: E402 - after the path insertion, as every `core` import here
 from core.job.runner import JobRunner  # noqa: E402
+from core.job.scratch import remove_leftover_scratch  # noqa: E402
 from core.job.storage import abandoned_requests  # noqa: E402
 from core.protocol.dispatch import DispatchRefused  # noqa: E402
 from core.protocol.handler import JobRunner as RunJob  # noqa: E402 - the callable handle() runs a job with
@@ -76,6 +86,10 @@ HTTP_LIBRARY_LOGGER = "urllib3"
 
 # What the SDK calls with each job, and what it takes as the job's output.
 SdkHandler = Callable[[object], dict[str, Any]]
+# What starts the SDK's serverless loop (runpod.serverless.start): it takes the SDK's configuration, whose
+# member HANDLER_MEMBER holds the handler.
+SdkStarter = Callable[[dict[str, Any]], None]
+HANDLER_MEMBER = "handler"
 
 
 class JobRefused(Exception):
@@ -89,7 +103,7 @@ class WorkerFault(Exception):
 
 def configure_logging() -> None:
     """Set up the process's log: INFO and above from every logger, in one line format, and nothing at
-    all from the HTTP library under the storage clients. Called when this file is run, never on import.
+    all from the HTTP library under the storage clients. Called by main(), never on import.
 
     urllib3's own lines name what it talks to, and no log line of the worker holds an endpoint, a bucket
     or an object key: "Connection pool is full, discarding connection: <host>" (once abandoned requests
@@ -116,9 +130,14 @@ def build_handler(env: Mapping[str, str]) -> SdkHandler:
 
     Raises ContractTreeInvalid for the tree and SettingsInvalid for the configuration, before any job
     could be taken: each names the file or the variable and the rule, never a value.
+
+    Once the configuration was read, and before the handler is returned, the scratch directories a
+    killed process left in the configured scratch root are removed. That removal never raises: a
+    leftover that stays never keeps a process from starting.
     """
     runtime = load_runtime(env)
     job_settings = JobSettings.from_env(env)
+    remove_leftover_scratch(job_settings.scratch_root)
     runner = JobRunner(job_settings)
     return job_handler(runtime, runner.run)
 
@@ -139,6 +158,7 @@ def job_handler(runtime: Runtime, run_job: RunJob) -> SdkHandler:
         # A job that is no mapping, or has no input, is refused by the dispatch's own validation.
         job_input = job.get(INPUT_MEMBER) if isinstance(job, Mapping) else None
         failed: Exception
+        bug: Exception | None = None
         try:
             carrier = handle(job_input, runtime=runtime, run_job=run_job)
         except DispatchRefused as refused:
@@ -147,12 +167,20 @@ def job_handler(runtime: Runtime, run_job: RunJob) -> SdkHandler:
         except Exception as error:  # noqa: BLE001 - a bug leaves as the wrapper's own error, without its text
             # Made before the bug is logged: whatever the logging does, this is the error that leaves.
             failed = WorkerFault(f"the worker failed on an unexpected {type(error).__name__}")
-            _log_bug(error)
+            bug = error
         else:
             if abandoned_requests() > 0:
                 _log_marked_process()
                 return {**carrier, REFRESH_WORKER_MEMBER: True}
             return carrier
+        if bug is not None:
+            # Logged here, after the `except` block has ended. A log handler that fails on a line does
+            # not raise: Python's logging prints a report of its own to standard error, with every error
+            # the failure is chained to. Inside the block that would be the bug, with its own text.
+            _log_bug(bug)
+            # Let go of, as Python lets go of a caught error where its block ends: the bug's stack
+            # holds this frame, and this frame would hold the bug.
+            bug = None
         # Raised here, after the `except` blocks have ended, so that the error that was caught is not
         # even kept as this one's context: nothing of it travels with what the provider records.
         raise failed
@@ -162,7 +190,8 @@ def job_handler(runtime: Runtime, run_job: RunJob) -> SdkHandler:
 
 def _log_bug(error: Exception) -> None:
     """One error line for a bug: its class and its stack, never its text. It never raises: a line that
-    cannot be built or written must not put another error, with the bug as its context, in the bug's place."""
+    cannot be built or written must not put another error in the place of the wrapper's own. Called once
+    the bug is no longer being handled (see the handler)."""
     try:
         # No `exc_info`: a traceback ends with the error's own text. The class and the stack say where.
         logger.error("a start ended on an unexpected %s", _stack_report(error))
@@ -204,10 +233,25 @@ def _stack_report(error: BaseException) -> str:
     return "chained to ".join(links).rstrip("\n")
 
 
-if __name__ == "__main__":
-    # Here, and before the SDK is imported, so that importing this module configures no logger.
+def main(start: SdkStarter | None = None, env: Mapping[str, str] | None = None) -> None:
+    """All that this file does when it is run as the program: set up the process's log, build the handler
+    from `env` (the process's environment when none is given) and start the SDK's serverless loop with it.
+
+    The log is set up first. Before the SDK is imported: its import hangs a handler of its own on a root
+    logger that has none, through which every line of the HTTP library would be written. And before the
+    handler is built, so that what the start of the process logs is in the process's log.
+
+    `start` stands in for the SDK's `runpod.serverless.start` in a test. Without one the SDK is imported
+    here, after the log was set up, and never when this module is imported. What build_handler() raises is
+    raised before the loop is started.
+    """
     configure_logging()
+    if start is None:
+        import runpod
 
-    import runpod
+        start = runpod.serverless.start
+    start({HANDLER_MEMBER: build_handler(os.environ if env is None else env)})
 
-    runpod.serverless.start({"handler": build_handler(os.environ)})
+
+if __name__ == "__main__":
+    main()
