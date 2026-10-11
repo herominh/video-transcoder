@@ -1,16 +1,19 @@
 """What the worker sends leaves only self-checked and signed, and travels as the job output or to the callback address.
 
 seal_message() encodes a built message, validates those exact bytes under the sender context and signs
-them: a message its own validator refuses raises SelfCheckFailed and is never sealed. runpod_output() is
-the job's output carrier of a result or an unclaimed report; deliver() posts the same bytes to the
-configured callback address, sends again only after a transport failure or a retryable `hub.error`, and
-never raises for a delivery that failed. A claim travels neither way. Given the instant it must give up
-at, deliver() starts neither an attempt nor a wait that would reach it, and shortens each POST's
-time-out to the time left; given none, it behaves as it always did.
+them: a message its own validator refuses raises SelfCheckFailed and is never sealed, and a SealedMessage
+is made in no other way. runpod_output() is the job's output carrier of a result or an unclaimed report;
+deliver() posts the same bytes to the configured callback address, sends again only after a transport
+failure, a gateway's 502, 503 or 504 that carries no accepted `hub.error`, or a retryable `hub.error`
+(read only under a 4xx or 5xx status), and never raises for a delivery that failed. A claim travels
+neither way. Given the instant it must give up at, deliver() starts neither an attempt nor a wait that
+would reach it, and shortens each POST's time-out to the time left; given none, it behaves as it always
+did. Nothing of a message or of an answer is logged.
 
 The transport and the clock are the test's own (v2_support): no network, no real waiting.
 """
 
+import dataclasses
 import json
 import logging
 from datetime import datetime, timedelta
@@ -25,6 +28,7 @@ from core.protocol.context import TrustedContext
 from core.protocol.messages import DispatchIdentity, ExecutionIdentity
 from core.protocol.outbox import (
     CALLBACK_ATTEMPTS,
+    CALLBACK_BACKOFF_S,
     CALLBACK_TIMEOUT_S,
     SealedMessage,
     SelfCheckFailed,
@@ -32,19 +36,25 @@ from core.protocol.outbox import (
     runpod_output,
     seal_message,
 )
-from core.protocol.registry import MessageKind
+from core.protocol.registry import MessageKind, load_registry
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
     CALLBACK_URL,
     FIXTURE_NOW,
+    HUB_ERROR_MESSAGE_ID,
+    HUB_ERROR_TEXT,
     HUB_KEY,
+    MEDIA_KEY_HEX,
     UNCLAIMED_REFUSED,
     WORKER_KEY,
     FakeClock,
     FakeTransport,
+    Outcome,
     compact,
     hub_error_answer,
+    key_forms,
     moment,
+    slices_shown,
     worker_settings,
 )
 
@@ -64,13 +74,42 @@ SIGNATURE_HEX_DIGITS = 64
 HTTP_OK = 200
 HTTP_NO_CONTENT = 204
 HTTP_FOUND = 302
+HTTP_NOT_MODIFIED = 304
 HTTP_CONFLICT = 409
+HTTP_INTERNAL_ERROR = 500
+HTTP_NOT_IMPLEMENTED = 501
 HTTP_BAD_GATEWAY = 502
 HTTP_UNAVAILABLE = 503
+HTTP_GATEWAY_TIMEOUT = 504
+HTTP_VERSION_NOT_SUPPORTED = 505
+# The last status that is no error status, and the first and the last that are: a `hub.error` is read
+# under an error status only.
+HTTP_LAST_BEFORE_THE_ERRORS = 399
+HTTP_BAD_REQUEST = 400
+HTTP_LAST_ERROR = 599
+# What a gateway in front of the Hub answers while it cannot reach it.
+GATEWAY_STATUSES = [HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
 HTML_BODY = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
+RETRYABLE_CODE = "service_unavailable"
+FINAL_CODE = "conflicting_terminal_result"
+UNKNOWN_HUB_ERROR_CODE = "made_up_refusal"
+HUB_ERROR_MAX_BYTES = load_registry().max_bytes(MessageKind.HUB_ERROR)
 NO_ANSWER = TransportFailed("ReadTimeout")
 DELIVERED = HttpAnswer(HTTP_OK, b"", None)
-RETRY_LATER = hub_error_answer(HTTP_UNAVAILABLE, "service_unavailable", retryable=True)
+RETRY_LATER = hub_error_answer(HTTP_UNAVAILABLE, RETRYABLE_CODE, retryable=True)
+FINAL_REFUSAL = hub_error_answer(HTTP_CONFLICT, FINAL_CODE, retryable=False)
+GATEWAY_FAILURE = HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None)
+# What a gateway answers while it cannot reach the Hub: one of its own statuses, and no accepted `hub.error`
+# (a body that says it is one and is not accepted, whatever it says of sending again, is none).
+GATEWAY_FAILURES = [
+    pytest.param(GATEWAY_FAILURE, id="an-html-502"),
+    pytest.param(HttpAnswer(HTTP_UNAVAILABLE, HTML_BODY, None), id="an-html-503"),
+    pytest.param(HttpAnswer(HTTP_GATEWAY_TIMEOUT, HTML_BODY, None), id="an-html-504"),
+    pytest.param(HttpAnswer(HTTP_GATEWAY_TIMEOUT, b"", None), id="an-empty-504"),
+    pytest.param(
+        hub_error_answer(HTTP_UNAVAILABLE, UNKNOWN_HUB_ERROR_CODE, retryable=False), id="a-503-hub-error-with-an-unknown-code"
+    ),
+]
 # What a delivery waits before its second and its third attempt, and the least time-out of a POST that
 # started before the delivery's end.
 FIRST_WAIT_S = 1.0
@@ -78,6 +117,7 @@ SECOND_WAIT_S = 2.0
 LEAST_POST_TIMEOUT_S = 1.0
 FAILED_RESULT_KIND = "transcode.result.failed"
 STOPPED_FOR_WANT_OF_TIME = "no time is left"
+LOG_PROBE = "probe: the capture sees this module's logger at DEBUG"
 
 
 def _fixture(path: str) -> dict[str, Any]:
@@ -174,6 +214,11 @@ def _deliver(sealed: SealedMessage, transport: FakeTransport, **options: Any) ->
     return deliver(sealed, settings=SETTINGS, transport=transport, sleep=FakeClock().sleep, **options)
 
 
+def _deliver_on(sealed: SealedMessage, transport: FakeTransport, clock: FakeClock, **options: Any) -> bool:
+    """Deliver with nothing to give up at, waiting on the test's clock, which records each wait."""
+    return deliver(sealed, settings=SETTINGS, transport=transport, sleep=clock.sleep, **options)
+
+
 def _deliver_within(
     sealed: SealedMessage, transport: FakeTransport, clock: FakeClock, seconds: float, **options: Any
 ) -> bool:
@@ -245,6 +290,18 @@ def test_seal_message_when_the_context_refuses_the_message_should_raise_self_che
     assert [value for value in values if value in text] == []
 
 
+def test_self_check_failed_when_turned_into_text_should_say_the_kind_the_layer_and_the_reason_and_nothing_more():
+    # Arrange: a report sent an hour before the context's now
+    context = _unclaimed_context(now=moment(_fixture(UNCLAIMED_REFUSED)["sent_at"]) + ONE_HOUR)
+
+    # Act
+    with pytest.raises(SelfCheckFailed) as raised:
+        seal_message(_unclaimed(), context, settings=SETTINGS)
+
+    # Assert
+    assert str(raised.value) == "a transcode.unclaimed fails its self-check at semantic/timestamp_out_of_tolerance"
+
+
 # --- the job output -----------------------------------------------------------------------------
 
 
@@ -276,7 +333,11 @@ def test_runpod_output_when_given_a_message_that_is_never_a_job_output_should_ra
 
 
 @pytest.mark.parametrize("status", [HTTP_OK, HTTP_NO_CONTENT])
-@pytest.mark.parametrize("sealed", [_sealed_unclaimed, _sealed_failed_result], ids=["an-unclaimed-report", "a-result"])
+@pytest.mark.parametrize(
+    "sealed",
+    [_sealed_unclaimed, _sealed_failed_result, _sealed_progress],
+    ids=["an-unclaimed-report", "a-result", "a-progress-message"],
+)
 def test_deliver_when_the_hub_answers_2xx_should_post_once_to_the_callback_address_and_return_true(sealed, status):
     # Arrange
     message = sealed()
@@ -291,7 +352,24 @@ def test_deliver_when_the_hub_answers_2xx_should_post_once_to_the_callback_addre
     assert (call.url, call.body, call.signature) == (CALLBACK_URL, message.body, message.signature)
 
 
-@pytest.mark.parametrize("first_answer", [NO_ANSWER, RETRY_LATER], ids=["no-answer", "a-retryable-hub-error"])
+# What a delivery is sent again after: no answer, a gateway that did not reach the Hub, and the Hub's own
+# word that it may be, under any error status.
+SENT_AGAIN_AFTER = [
+    pytest.param(NO_ANSWER, id="no-answer"),
+    pytest.param(RETRY_LATER, id="a-retryable-hub-error"),
+    pytest.param(
+        hub_error_answer(HTTP_BAD_REQUEST, RETRYABLE_CODE, retryable=True),
+        id="a-retryable-hub-error-under-the-first-error-status",
+    ),
+    pytest.param(
+        hub_error_answer(HTTP_LAST_ERROR, RETRYABLE_CODE, retryable=True),
+        id="a-retryable-hub-error-under-the-last-error-status",
+    ),
+    pytest.param(GATEWAY_FAILURE, id="an-html-502"),
+]
+
+
+@pytest.mark.parametrize("first_answer", SENT_AGAIN_AFTER)
 def test_deliver_when_the_first_attempt_may_be_sent_again_should_send_the_same_bytes_again_and_return_true(
     first_answer,
 ):
@@ -309,7 +387,7 @@ def test_deliver_when_the_first_attempt_may_be_sent_again_should_send_the_same_b
     ] * 2
 
 
-@pytest.mark.parametrize("every_answer", [NO_ANSWER, RETRY_LATER], ids=["no-answer", "a-retryable-hub-error"])
+@pytest.mark.parametrize("every_answer", SENT_AGAIN_AFTER)
 def test_deliver_when_every_attempt_may_be_sent_again_should_stop_after_the_allowed_attempts_and_return_false(
     every_answer,
 ):
@@ -328,8 +406,12 @@ def test_deliver_when_every_attempt_may_be_sent_again_should_stop_after_the_allo
 @pytest.mark.parametrize(
     "answer",
     [
-        pytest.param(hub_error_answer(HTTP_CONFLICT, "conflicting_terminal_result", retryable=False), id="a-final-hub-error"),
-        pytest.param(HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None), id="an-html-502"),
+        pytest.param(FINAL_REFUSAL, id="a-final-hub-error"),
+        pytest.param(HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None), id="an-html-500"),
+        pytest.param(HttpAnswer(HTTP_NOT_IMPLEMENTED, HTML_BODY, None), id="an-html-501-just-below-the-gateway-statuses"),
+        pytest.param(
+            HttpAnswer(HTTP_VERSION_NOT_SUPPORTED, HTML_BODY, None), id="an-html-505-just-above-the-gateway-statuses"
+        ),
         pytest.param(HttpAnswer(HTTP_FOUND, b"", None), id="a-redirect"),
     ],
 )
@@ -345,6 +427,101 @@ def test_deliver_when_the_answer_is_a_final_refusal_or_no_contract_answer_should
     assert len(transport.calls) == 1
 
 
+@pytest.mark.parametrize(
+    "status",
+    [HTTP_FOUND, HTTP_NOT_MODIFIED, HTTP_LAST_BEFORE_THE_ERRORS],
+    ids=["a-redirect", "not-modified", "the-last-status-before-the-error-statuses"],
+)
+def test_deliver_when_a_retryable_hub_error_comes_under_a_status_that_is_no_error_should_not_send_again(status):
+    # Arrange: the body alone would have the message sent again (RETRY_LATER); the Hub would then take it
+    clock = FakeClock()
+    transport = FakeTransport(hub_error_answer(status, RETRYABLE_CODE, retryable=True), then=DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_unclaimed(), transport, clock)
+
+    # Assert: a `hub.error` is read only under a 4xx or 5xx status, so this is an answer like any other
+    assert delivered is False
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+# --- a gateway's 502, 503 or 504 ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("gateway_failure", GATEWAY_FAILURES)
+def test_deliver_when_a_gateway_failure_precedes_the_hubs_2xx_should_wait_the_first_back_off_then_send_again(
+    gateway_failure,
+):
+    # Arrange
+    clock = FakeClock()
+    message = _sealed_failed_result()
+    transport = FakeTransport(gateway_failure, DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_on(message, transport, clock)
+
+    # Assert: the gateway's answer is no answer from the Hub, so it is treated as a failure in transport
+    assert delivered is True
+    assert [(call.body, call.signature) for call in transport.calls] == [(message.body, message.signature)] * 2
+    assert clock.waits == [FIRST_WAIT_S]
+
+
+@pytest.mark.parametrize(
+    ("attempts", "waits"),
+    [(2, [FIRST_WAIT_S]), (3, [FIRST_WAIT_S, SECOND_WAIT_S])],
+    ids=["two-attempts", "three-attempts"],
+)
+@pytest.mark.parametrize("status", GATEWAY_STATUSES)
+def test_deliver_when_a_gateway_answers_every_attempt_should_post_exactly_the_allowed_attempts_and_return_false(
+    status, attempts, waits
+):
+    # Arrange
+    clock = FakeClock()
+    transport = FakeTransport(then=HttpAnswer(status, HTML_BODY, None), clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_failed_result(), transport, clock, attempts=attempts)
+
+    # Assert
+    assert delivered is False
+    assert len(transport.calls) == attempts
+    assert clock.waits == waits
+
+
+@pytest.mark.parametrize("status", GATEWAY_STATUSES)
+def test_deliver_when_a_gateway_status_carries_a_final_hub_error_should_stop_at_once_and_return_false(status):
+    # Arrange: the Hub itself answered, whatever the status: its refusal counts, not the status
+    clock = FakeClock()
+    transport = FakeTransport(hub_error_answer(status, FINAL_CODE, retryable=False), then=DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_failed_result(), transport, clock)
+
+    # Assert
+    assert delivered is False
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize("status", GATEWAY_STATUSES)
+def test_deliver_when_a_gateway_status_carries_a_retryable_hub_error_should_send_again_and_return_true(status):
+    # Arrange
+    clock = FakeClock()
+    transport = FakeTransport(hub_error_answer(status, RETRYABLE_CODE, retryable=True), DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_failed_result(), transport, clock)
+
+    # Assert
+    assert delivered is True
+    assert len(transport.calls) == 2
+    assert clock.waits == [FIRST_WAIT_S]
+
+
+# --- the attempts and each POST -----------------------------------------------------------------
+
+
 def test_deliver_when_allowed_one_attempt_should_post_exactly_once():
     # Arrange
     transport = FakeTransport(NO_ANSWER, then=DELIVERED)
@@ -355,6 +532,47 @@ def test_deliver_when_allowed_one_attempt_should_post_exactly_once():
     # Assert
     assert delivered is False
     assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "attempts",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(True, id="a-bool"),
+        pytest.param(1.5, id="a-fraction"),
+        pytest.param("3", id="text"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_deliver_when_the_attempts_are_no_whole_number_of_one_or_more_should_raise_value_error_without_posting(
+    attempts,
+):
+    # Arrange
+    transport = FakeTransport(then=DELIVERED)
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        _deliver(_sealed_failed_result(), transport, attempts=attempts)
+    assert transport.calls == []
+
+
+def test_deliver_when_no_attempt_is_answered_should_wait_its_back_off_in_order_and_bound_every_post_alike():
+    # Arrange
+    clock = FakeClock()
+    transport = FakeTransport(then=NO_ANSWER, clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_failed_result(), transport, clock)
+
+    # Assert: one second, then two; every POST with the callback's own time-out, and an answer cut at
+    # the size of the only one a delivery reads, a `hub.error`
+    assert delivered is False
+    assert clock.waits == [FIRST_WAIT_S, SECOND_WAIT_S]
+    assert tuple(clock.waits) == CALLBACK_BACKOFF_S
+    assert [(call.timeout_s, call.max_body_bytes) for call in transport.calls] == [
+        (CALLBACK_TIMEOUT_S, HUB_ERROR_MAX_BYTES)
+    ] * CALLBACK_ATTEMPTS
 
 
 def test_deliver_when_given_no_time_out_should_post_with_the_callbacks_own():
@@ -491,6 +709,49 @@ def test_deliver_when_a_wait_would_end_at_or_after_the_end_should_not_start_it(s
     assert clock.elapsed_s < seconds_left
 
 
+def test_deliver_when_its_time_runs_out_between_gateway_failures_should_start_no_attempt_at_or_after_the_end():
+    # Arrange: a gateway answers each POST after 4 s; the delivery must give up 6 s from now
+    clock = FakeClock()
+    transport = FakeTransport(then=GATEWAY_FAILURE, clock=clock, seconds_per_post=4.0)
+    gives_up_at = clock() + timedelta(seconds=6.0)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, seconds=6.0)
+
+    # Assert: sent again once, after the first wait, and no third time: it would start after the end
+    assert delivered is False
+    assert [call.at - clock.start for call in transport.calls] == [timedelta(0), timedelta(seconds=5.0)]
+    assert [call.at for call in transport.calls if call.at >= gives_up_at] == []
+    assert len(transport.calls) < CALLBACK_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "waits", "posts"),
+    [
+        pytest.param(FIRST_WAIT_S + 0.5, [FIRST_WAIT_S], 2, id="the-first-wait-ends-before-the-end"),
+        pytest.param(FIRST_WAIT_S + SECOND_WAIT_S, [FIRST_WAIT_S], 2, id="the-second-wait-would-end-at-the-end"),
+        pytest.param(
+            FIRST_WAIT_S + SECOND_WAIT_S + 0.5, [FIRST_WAIT_S, SECOND_WAIT_S], 3, id="both-waits-end-before-the-end"
+        ),
+    ],
+)
+def test_deliver_when_a_wait_after_a_gateway_failure_would_end_at_or_after_the_end_should_not_start_it(
+    seconds_left, waits, posts
+):
+    # Arrange: a gateway answers every POST at once, so only the waits take time
+    clock = FakeClock()
+    transport = FakeTransport(then=GATEWAY_FAILURE, clock=clock)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, seconds=seconds_left)
+
+    # Assert: sent again as after a failure in transport, and held to the same end
+    assert delivered is False
+    assert clock.waits == waits
+    assert len(transport.calls) == posts
+    assert clock.elapsed_s < seconds_left
+
+
 @pytest.mark.parametrize(
     ("seconds_left", "options", "expected_timeout_s"),
     [
@@ -614,6 +875,140 @@ def test_deliver_when_given_no_end_should_post_with_a_time_out_below_one_second_
 
     # Assert
     assert [call.timeout_s for call in transport.calls] == [0.5]
+
+
+# --- what a delivery logs -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        pytest.param(NO_ANSWER, "got no answer: ReadTimeout", id="no-answer"),
+        pytest.param(RETRY_LATER, f"refused for now: {RETRYABLE_CODE}", id="a-retryable-hub-error"),
+        pytest.param(FINAL_REFUSAL, f"refused: status {HTTP_CONFLICT}, code {FINAL_CODE}", id="a-final-hub-error"),
+        pytest.param(
+            HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None),
+            f"refused: status {HTTP_INTERNAL_ERROR}, code none",
+            id="an-html-500",
+        ),
+    ],
+)
+def test_deliver_when_an_attempt_is_not_delivered_should_log_one_line_naming_the_kind_and_the_outcome(
+    caplog, answer, outcome
+):
+    # Arrange: the Hub takes the message at the next attempt, where there is one
+    caplog.set_level(logging.DEBUG, logger=outbox_module.__name__)
+    transport = FakeTransport(answer, then=DELIVERED)
+
+    # Act
+    _deliver(_sealed_failed_result(), transport)
+
+    # Assert
+    (logged,) = [record for record in caplog.records if record.name == outbox_module.__name__]
+    line = logged.getMessage()
+    assert logged.levelno == logging.INFO
+    assert FAILED_RESULT_KIND in line and outcome in line
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "then"),
+    [
+        pytest.param((DELIVERED,), None, id="delivered"),
+        pytest.param((), NO_ANSWER, id="never-answered"),
+        pytest.param((RETRY_LATER, NO_ANSWER, DELIVERED), None, id="delivered-after-retries"),
+        pytest.param((), RETRY_LATER, id="refused-for-now-until-the-end"),
+        pytest.param((FINAL_REFUSAL,), None, id="refused"),
+        pytest.param((HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None),), None, id="an-html-500"),
+        pytest.param((GATEWAY_FAILURE,), DELIVERED, id="a-gateway-failure-first"),
+        pytest.param((), GATEWAY_FAILURE, id="gateway-failures-until-the-end"),
+    ],
+)
+def test_deliver_when_it_ends_any_way_should_log_nothing_of_the_message_or_of_an_answer(
+    caplog, outcomes: tuple[Outcome, ...], then: Outcome | None
+):
+    # Arrange
+    caplog.set_level(logging.DEBUG)
+    message = _sealed_failed_result()
+    transport = FakeTransport(*outcomes, then=then)
+    answers = [answer.body.decode("ascii") for answer in (*outcomes, then) if isinstance(answer, HttpAnswer)]
+    # A line may name the message's kind and the code of the Hub's refusal, and nothing else of either.
+    nameable = (FAILED_RESULT_KIND, RETRYABLE_CODE, FINAL_CODE)
+
+    # Act
+    _deliver(message, transport)
+    logging.getLogger(outbox_module.__name__).debug(LOG_PROBE)
+    logged = caplog.text
+
+    # Assert
+    # A key is held as bytes, so it is looked for as bytes are printed too, not as hex alone.
+    keys = [bytes.fromhex(MEDIA_KEY_HEX), WORKER_KEY, HUB_KEY]
+    secrets = [message.signature, message.signature[-SIGNATURE_HEX_DIGITS:], CALLBACK_URL, HUB_ERROR_TEXT]
+    secrets += [HUB_ERROR_MESSAGE_ID, *(form for key in keys for form in key_forms(key))]
+    assert LOG_PROBE in logged
+    assert [secret for secret in secrets if secret in logged] == []
+    assert slices_shown(logged, message.body.decode("ascii"), nameable) == []
+    assert [piece for answer in answers for piece in slices_shown(logged, answer, nameable)] == []
+
+
+# --- a sealed message is made by seal_message() only --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "construct",
+    [
+        pytest.param(
+            lambda sealed: SealedMessage(kind=sealed.kind, body=sealed.body, signature=sealed.signature), id="by-name"
+        ),
+        pytest.param(lambda sealed: SealedMessage(sealed.kind, sealed.body, sealed.signature), id="by-position"),
+        pytest.param(
+            lambda sealed: SealedMessage(kind=sealed.kind, body=b'{"never":"self-checked"}', signature=sealed.signature),
+            id="of-bytes-that-passed-no-self-check",
+        ),
+    ],
+)
+def test_sealed_message_when_constructed_directly_should_raise_type_error(construct):
+    # Arrange: the kind, the bytes and the signature of a message that did pass its self-check
+    sealed = _sealed_unclaimed()
+
+    # Act / Assert
+    with pytest.raises(TypeError):
+        construct(sealed)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({}, id="nothing-changed"),
+        pytest.param({"body": b'{"never":"self-checked"}'}, id="another-body"),
+        pytest.param({"kind": MessageKind.TRANSCODE_RESULT_COMPLETED}, id="another-kind"),
+    ],
+)
+def test_sealed_message_when_copied_with_dataclasses_replace_should_raise_type_error(changes):
+    # Arrange
+    sealed = _sealed_unclaimed()
+
+    # Act / Assert
+    with pytest.raises(TypeError):
+        dataclasses.replace(sealed, **changes)
+
+
+def test_sealed_message_when_made_by_seal_message_should_hold_its_three_fields_and_equal_one_of_the_same_bytes():
+    # Arrange
+    message = _unclaimed()
+
+    # Act
+    sealed = seal_message(message, _unclaimed_context(), settings=SETTINGS)
+    sealed_again = seal_message(message, _unclaimed_context(), settings=SETTINGS)
+
+    # Assert: refusing every other construction changed nothing else of the value
+    assert [field.name for field in dataclasses.fields(sealed)] == ["kind", "body", "signature"]
+    assert (sealed.kind, sealed.body) == (MessageKind.TRANSCODE_UNCLAIMED, messages.encode(message))
+    assert signing.verify(sealed.body, WORKER_KEY, sealed.signature)
+    assert sealed == sealed_again and hash(sealed) == hash(sealed_again)
+    assert sealed != _sealed_failed_result()
+    assert repr(sealed) == f"SealedMessage(kind={MessageKind.TRANSCODE_UNCLAIMED!r})"
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        sealed.body = b""  # type: ignore[misc]
 
 
 # --- what a sealed message shows ----------------------------------------------------------------

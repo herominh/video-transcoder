@@ -2,9 +2,12 @@
 
 handle() refuses a dispatch it cannot accept (DispatchRefused, nothing sent, no work). Granted, it hands
 the claimed execution to the job runner exactly once; unclaimed, it does no work and reports
-`transcode.unclaimed`. Either message is the job's output and is also posted to the callback address,
-the same signed bytes both ways, and no failure of the callback costs the output. Every start draws its
-own runtime id. load_runtime() checks the contract tree before it reads the configuration.
+`transcode.unclaimed`; a claiming that ends as neither is a wiring bug, and no work is done. Either
+message is the job's output and is also posted to the callback address, the same signed bytes both ways,
+and no failure of the callback costs the output; a job runner that fails, or returns what is no job
+output, posts nothing there. Every start draws its own runtime id. load_runtime() checks the contract
+tree before it reads the configuration. Nothing of a message, a signature, the bootstrap token or a key
+is logged.
 
 One start has one wall-time budget, counted from the moment handle() begins: the claiming ends by it,
 the job is told when it ends, and the callback is not attempted once it is spent (the output still is
@@ -15,7 +18,11 @@ The transport and the clock are the test's own (v2_support): no network, no real
 
 import dataclasses
 import json
+import logging
 import re
+import time
+import types
+import uuid
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
@@ -50,9 +57,11 @@ from tests.contract.v2_support import (
     accepted_dispatch,
     catalog_context,
     hub_error_answer,
+    key_forms,
     modified_fixture,
     signed_answer,
     signed_carrier,
+    slices_shown,
     uuid_source,
     worker_env,
     worker_settings,
@@ -95,6 +104,13 @@ ACCEPTING_TOOK_S = 2.0
 # The callback's own time-out, and how long a POST that times out takes on the fake clock.
 CALLBACK_TIMEOUT_S = 10.0
 SLOW_POST_S = 15.0
+RESULT_KIND = "transcode.result.failed"
+CALLBACK_REFUSAL_CODE = "conflicting_terminal_result"
+CALLBACK_REFUSED = hub_error_answer(HTTP_CONFLICT, CALLBACK_REFUSAL_CODE, retryable=False)
+# A value no log line may show, placed in the text of the error a broken callback transport raises.
+CALLBACK_ERROR_CANARY = "CANARY-callback-error-text"
+LOG_PROBE = "probe: the capture sees this module's logger at DEBUG"
+UUID_VERSION_RANDOM = 4
 
 
 class StandInJob:
@@ -275,6 +291,51 @@ def test_handle_when_the_claim_is_not_granted_should_do_no_work_and_report_uncla
     assert transport.calls[-1].url == CALLBACK_URL
 
 
+# --- a claiming that ends as neither a grant nor unclaimed --------------------------------------
+
+
+def _a_grant() -> Grant:
+    """The Grant a start of the fixtures' dispatch is given."""
+    clock = FakeClock()
+    job = StandInJob()
+    handle(_job_input(), runtime=_runtime(_transport(clock, _granted()), clock), run_job=job)
+    ((execution, _),) = job.calls
+    return execution.grant
+
+
+def _all_a_grant_holds(grant: Grant) -> types.SimpleNamespace:
+    """Every field of the grant, in a value of a class that is not Grant."""
+    return types.SimpleNamespace(**{field.name: getattr(grant, field.name) for field in dataclasses.fields(grant)})
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        pytest.param(lambda: None, id="none"),
+        pytest.param(lambda: "granted", id="text"),
+        pytest.param(lambda: dataclasses.asdict(_a_grant()), id="the-fields-of-a-grant-in-a-dict"),
+        pytest.param(lambda: _all_a_grant_holds(_a_grant()), id="the-fields-of-a-grant-in-another-class"),
+    ],
+)
+def test_handle_when_the_claiming_ends_as_neither_a_grant_nor_unclaimed_should_raise_type_error_without_work_or_post(
+    monkeypatch, ending: Callable[[], object]
+):
+    # Arrange: a claiming that returns what none may; the Hub would grant and take the callback
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+    job = StandInJob()
+    returned = ending()
+    monkeypatch.setattr(handler, "claim_execution", lambda *arguments, **named: returned)
+    key = bytes.fromhex(MEDIA_KEY_HEX)
+
+    # Act / Assert: a wiring bug, told without the value, which may hold a media key
+    with pytest.raises(TypeError) as raised:
+        handle(_job_input(), runtime=_runtime(transport, clock), run_job=job)
+    assert job.calls == []
+    assert transport.calls == []
+    assert [value for value in (MEDIA_KEY_HEX, repr(key), repr(key)[2:-1]) if value in str(raised.value)] == []
+
+
 # --- a refused dispatch -------------------------------------------------------------------------
 
 
@@ -327,6 +388,87 @@ def test_handle_when_the_callback_fails_for_an_unclaimed_report_should_still_ret
     # Assert
     assert json.loads(output["vh_message"])["cause"] == CAUSE_REFUSED
     assert len(transport.calls_to(CALLBACK_URL)) >= 1
+
+
+# --- a job runner that fails, or returns what is no job output ----------------------------------
+
+
+class JobBroke(Exception):
+    """What the job runner of a test raises."""
+
+
+def _the_executions_claim_sealed_again(execution: ClaimedExecution, runtime: Runtime) -> SealedMessage:
+    """A job runner that returns a sealed `transcode.claim`: a message that travels neither way."""
+    now = runtime.clock()
+    dispatch = execution.dispatch
+    message = messages.claim(
+        protocol_version=dispatch.protocol_version,
+        message_id=RESULT_MESSAGE_ID,
+        sent_at=now,
+        key_id=runtime.settings.worker_to_hub_key_id,
+        identity=dispatch.identity,
+        bootstrap_token=dispatch.bootstrap_token,
+        runtime_id=execution.runtime_id,
+    )
+    context = messages.worker_sender_context(
+        MessageKind.TRANSCODE_CLAIM, dispatch.identity, settings=runtime.settings, now=now
+    )
+    return seal_message(message, context, settings=runtime.settings)
+
+
+def _a_sealed_progress_message(execution: ClaimedExecution, runtime: Runtime) -> SealedMessage:
+    """A job runner that returns a sealed `transcode.progress`: a message for the callback address only."""
+    now = runtime.clock()
+    identity = execution.grant.identity
+    message = messages.progress(
+        protocol_version=execution.dispatch.protocol_version,
+        message_id=RESULT_MESSAGE_ID,
+        sent_at=now,
+        key_id=runtime.settings.worker_to_hub_key_id,
+        identity=identity,
+        event_seq=1,
+        stage="downloading",
+        stage_progress_pct=10,
+    )
+    context = messages.worker_sender_context(
+        MessageKind.TRANSCODE_PROGRESS, identity, settings=runtime.settings, now=now, last_event_seq=0
+    )
+    return seal_message(message, context, settings=runtime.settings)
+
+
+def test_handle_when_the_job_runner_raises_should_let_its_error_out_and_post_nothing_to_the_callback():
+    # Arrange
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+    broke = JobBroke("the job of this test broke")
+
+    def breaking_job(execution: ClaimedExecution, runtime: Runtime) -> SealedMessage:
+        raise broke
+
+    # Act / Assert: the claim is all that was posted
+    with pytest.raises(JobBroke) as raised:
+        handle(_job_input(), runtime=_runtime(transport, clock), run_job=breaking_job)
+    assert raised.value is broke
+    assert [call.url for call in transport.calls] == [CLAIM_URL]
+
+
+@pytest.mark.parametrize(
+    "job",
+    [_the_executions_claim_sealed_again, _a_sealed_progress_message],
+    ids=["a-claim", "a-progress-message"],
+)
+def test_handle_when_the_job_runner_returns_what_is_never_a_job_output_should_raise_value_error_and_post_nothing_more(
+    job: Callable[[ClaimedExecution, Runtime], SealedMessage]
+):
+    # Arrange: a Hub that would take whatever the callback address is sent
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+
+    # Act / Assert: the claim is all that was posted, and the refusal shows nothing of the message
+    with pytest.raises(ValueError) as raised:
+        handle(_job_input(), runtime=_runtime(transport, clock), run_job=job)
+    assert [call.url for call in transport.calls] == [CLAIM_URL]
+    assert _request()["claim"]["bootstrap_token"] not in str(raised.value)
 
 
 # --- one wall-time budget for the whole start ---------------------------------------------------
@@ -469,6 +611,31 @@ def test_handle_when_claiming_spent_the_starts_wall_time_should_return_the_uncla
     assert transport.calls_to(CALLBACK_URL) == []
 
 
+def test_handle_when_it_claims_and_delivers_should_hand_both_the_runtimes_own_monotonic_clock(monkeypatch):
+    # Arrange: the claiming and the delivery as they are, with a look at the clock each is handed
+    clock = FakeClock()
+    runtime = _runtime(_transport(clock, _granted()), clock)
+    handed: dict[str, Any] = {}
+
+    def looked_at(step: str, real: Callable[..., Any]) -> Callable[..., Any]:
+        def call(*arguments: Any, **named: Any) -> Any:
+            handed[step] = named["monotonic"]
+            return real(*arguments, **named)
+
+        return call
+
+    monkeypatch.setattr(handler, "claim_execution", looked_at("the claim", handler.claim_execution))
+    monkeypatch.setattr(handler, "deliver", looked_at("the delivery", handler.deliver))
+
+    # Act
+    handle(_job_input(), runtime=runtime, run_job=StandInJob())
+
+    # Assert: the start's wall time ends at a reading of this clock, so both are held to it on this clock
+    assert set(handed) == {"the claim", "the delivery"}
+    assert handed["the claim"] is runtime.monotonic
+    assert handed["the delivery"] is runtime.monotonic
+
+
 # --- the runtime id -----------------------------------------------------------------------------
 
 
@@ -512,6 +679,92 @@ def test_claimed_execution_when_shown_with_repr_should_show_neither_runtime_id_t
     assert [value for value in hidden if value in shown] == []
 
 
+# --- what a start logs --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("claim_answer", "callback", "kind", "outcome", "level"),
+    [
+        pytest.param(_granted(), DELIVERED, RESULT_KIND, "delivered", logging.INFO, id="a-result-delivered"),
+        pytest.param(CLAIM_REFUSED, DELIVERED, UNCLAIMED_KIND, "delivered", logging.INFO, id="an-unclaimed-report-delivered"),
+        pytest.param(_granted(), NO_ANSWER, RESULT_KIND, "not delivered", logging.INFO, id="a-result-never-answered"),
+        pytest.param(_granted(), CALLBACK_REFUSED, RESULT_KIND, "not delivered", logging.INFO, id="a-result-refused"),
+        pytest.param(
+            _granted(),
+            RuntimeError(CALLBACK_ERROR_CANARY),
+            RESULT_KIND,
+            "failed: RuntimeError",
+            logging.ERROR,
+            id="an-unexpected-error",
+        ),
+    ],
+)
+def test_handle_when_the_callback_has_ended_should_log_one_line_naming_the_kind_and_the_outcome(
+    caplog, claim_answer, callback, kind, outcome, level
+):
+    # Arrange
+    caplog.set_level(logging.DEBUG, logger=handler.__name__)
+    clock = FakeClock()
+    transport = _transport(clock, claim_answer)
+    transport.route(CALLBACK_URL, then=callback)
+
+    # Act
+    handle(_job_input(), runtime=_runtime(transport, clock), run_job=StandInJob())
+
+    # Assert: an error is named by its class, never by its own text
+    (logged,) = [record for record in caplog.records if record.name == handler.__name__]
+    line = logged.getMessage()
+    assert logged.levelno == level
+    assert line.endswith(f"a {kind} {outcome}")
+    assert CALLBACK_ERROR_CANARY not in line
+
+
+@pytest.mark.parametrize(
+    ("claim_answers", "claim_then", "callback"),
+    [
+        pytest.param((_granted(),), None, DELIVERED, id="granted-and-delivered"),
+        pytest.param((CLAIM_REFUSED,), None, DELIVERED, id="refused"),
+        pytest.param((), NO_ANSWER, DELIVERED, id="unreachable"),
+        pytest.param((HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None),), None, DELIVERED, id="invalid-answer"),
+        pytest.param((_granted(),), None, NO_ANSWER, id="granted-and-never-delivered"),
+        pytest.param((_granted(),), None, CALLBACK_REFUSED, id="granted-and-the-callback-refused"),
+        pytest.param((_granted(),), None, RuntimeError(CALLBACK_ERROR_CANARY), id="granted-and-the-callback-broke"),
+    ],
+)
+def test_handle_when_it_ends_any_way_should_log_nothing_of_a_message_a_signature_the_token_or_a_key(
+    caplog, claim_answers, claim_then, callback
+):
+    # Arrange
+    caplog.set_level(logging.DEBUG)
+    clock = FakeClock()
+    transport = _transport(clock, *claim_answers, claim_then=claim_then)
+    transport.route(CALLBACK_URL, then=callback)
+    job_input, request, grant = _job_input(), _request(), json.loads(files.read_bytes(GRANT_ENCRYPTED))
+    answers = [answer for answer in (*claim_answers, claim_then, callback) if isinstance(answer, HttpAnswer)]
+    # A line may name the dispatch, the execution, the kind of the message it reports and the code of the
+    # Hub's refusal, and nothing else of any of them.
+    nameable = (request["identity"]["dispatch_id"], grant["identity"]["execution_id"], RESULT_KIND, UNCLAIMED_KIND)
+    nameable += (CALLBACK_REFUSAL_CODE,)
+
+    # Act
+    output = handle(job_input, runtime=_runtime(transport, clock), run_job=StandInJob())
+    logging.getLogger(handler.__name__).debug(LOG_PROBE)
+    logged = caplog.text
+
+    # Assert
+    bodies = [job_input["vh_message"], output["vh_message"]]
+    bodies += [call.body.decode("ascii") for call in transport.calls] + [answer.body.decode("ascii") for answer in answers]
+    signatures = [job_input["vh_signature"], output["vh_signature"]]
+    signatures += [call.signature for call in transport.calls] + [answer.signature for answer in answers if answer.signature]
+    # A key is held as bytes, so it is looked for as bytes are printed too, not as hex alone.
+    keys = [bytes.fromhex(MEDIA_KEY_HEX), WORKER_KEY, HUB_KEY]
+    secrets = [request["claim"]["bootstrap_token"], RUNTIME_ID, *(form for key in keys for form in key_forms(key))]
+    secrets += ["vh_", "bootstrap_token", "key_hex", CALLBACK_ERROR_CANARY, *signatures]
+    assert LOG_PROBE in logged
+    assert [secret for secret in secrets if secret in logged] == []
+    assert [piece for body in bodies for piece in slices_shown(logged, body, nameable)] == []
+
+
 # --- the process's runtime ----------------------------------------------------------------------
 
 
@@ -527,6 +780,17 @@ def test_load_runtime_when_the_environment_is_valid_should_return_its_settings_a
     assert isinstance(runtime.transport, HttpsTransport)
     assert runtime.clock().utcoffset() == timedelta(0)
     assert LOWERCASE_UUID.fullmatch(runtime.new_uuid()) is not None
+
+
+def test_load_runtime_when_the_environment_is_valid_should_wire_the_monotonic_clock_and_a_source_of_random_uuids():
+    # Act
+    runtime = load_runtime(worker_env())
+    drawn = [uuid.UUID(runtime.new_uuid()) for _ in range(2)]
+
+    # Assert: a runtime id is random (README 15.1, rule 1), and a wait is measured in seconds that only pass
+    assert runtime.monotonic is time.monotonic
+    assert [(drawn_id.version, drawn_id.variant) for drawn_id in drawn] == [(UUID_VERSION_RANDOM, uuid.RFC_4122)] * 2
+    assert drawn[0] != drawn[1]
 
 
 def test_load_runtime_when_a_required_variable_is_missing_should_raise_settings_invalid():

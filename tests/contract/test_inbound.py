@@ -3,11 +3,12 @@
 accept_signed() refuses in that order (signature, validation, key_id), so nothing of a body is parsed
 before a configured Hub-to-worker key verified it, and a refusal's text names the step and the verdict's
 layer and reason only. accept_hub_error() validates an unsigned `hub.error` and gives its `error` object,
-or None for anything else. The fixtures carry no signature: each test signs the bytes it sends.
+or None for anything else, and reads nothing under a context that accepts another kind. The fixtures
+carry no signature: each test signs the bytes it sends.
 """
 
 import json
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 
@@ -55,6 +56,8 @@ EXPIRED_BEYOND_THE_SKEW_S = -301
 EXPIRY_POINTER = "/claim/expires_at"
 RETRYABLE_CODE = "service_unavailable"
 RETRY_AFTER_S = 30
+HUB_ERROR_KIND = MessageKind.HUB_ERROR.value
+CLAIM_GRANT_KIND = MessageKind.TRANSCODE_CLAIM_GRANTED.value
 
 
 def _dispatch_context(**changes: Any) -> TrustedContext:
@@ -320,6 +323,44 @@ def test_accept_hub_error_when_the_body_is_anything_else_should_return_none(raw)
 
     # Assert
     assert error is None
+
+
+# A `hub.error` is unsigned, so the context it is read under accepts that kind and no other: one that
+# accepts another kind too would let that kind through without its signature.
+NOT_FOR_A_HUB_ERROR_ALONE = [
+    pytest.param(lambda: catalog_context(WORKER_GRANT_CONTEXT), id="a-context-for-a-claim-grant-alone"),
+    pytest.param(lambda: catalog_context(WORKER_DISPATCH_CONTEXT), id="a-context-for-a-request-alone"),
+    pytest.param(
+        lambda: catalog_context(WORKER_GRANT_CONTEXT, accepted_message_kinds=[HUB_ERROR_KIND, CLAIM_GRANT_KIND]),
+        id="a-context-for-a-hub-error-then-a-claim-grant",
+    ),
+    pytest.param(
+        lambda: catalog_context(WORKER_GRANT_CONTEXT, accepted_message_kinds=[CLAIM_GRANT_KIND, HUB_ERROR_KIND]),
+        id="a-context-for-a-claim-grant-then-a-hub-error",
+    ),
+]
+
+
+@pytest.mark.parametrize("context", NOT_FOR_A_HUB_ERROR_ALONE)
+@pytest.mark.parametrize(
+    "fixture", [HUB_ERROR_FIXTURES[0], GRANT_ENCRYPTED], ids=["a-hub-error-body", "an-unsigned-claim-grant-body"]
+)
+def test_accept_hub_error_when_the_context_accepts_another_kind_should_raise_value_error_before_reading_the_body(
+    monkeypatch, context: Callable[[], TrustedContext], fixture
+):
+    # Arrange: a validator and a parser that fail the test the moment anything is handed to them.
+    raw = files.read_bytes(fixture)
+    trusted = context()
+
+    def reached(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the body was read under a context that accepts another kind")
+
+    monkeypatch.setattr(pipeline, "validate", reached)
+    monkeypatch.setattr(gate, "parse", reached)
+
+    # Act / Assert: a wiring bug, whatever the body is
+    with pytest.raises(ValueError):
+        accept_hub_error(raw, context=trusted)
 
 
 # --- only the exact bytes -----------------------------------------------------------------------

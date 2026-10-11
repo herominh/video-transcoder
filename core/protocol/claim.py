@@ -49,14 +49,11 @@ from .messages import ExecutionIdentity
 from .outbox import SealedMessage, seal_message
 from .registry import MessageKind, load_registry
 from .settings import WorkerSettings
-from .transport import HttpAnswer, Transport, TransportFailed
+from .transport import GATEWAY_FAILURE_STATUSES, HTTP_ERROR_STATUSES, HttpAnswer, Transport, TransportFailed
 
 logger = logging.getLogger(__name__)
 
 HTTP_OK = 200
-_HTTP_ERROR_STATUSES = range(400, 600)
-# What a gateway answers while it cannot reach the Hub behind it.
-_GATEWAY_FAILURE_STATUSES = frozenset({502, 503, 504})
 CAUSE_REFUSED = "refused"
 CAUSE_UNREACHABLE = "unreachable"
 CAUSE_INVALID_ANSWER = "invalid_answer"
@@ -218,11 +215,11 @@ def _judge(
         logger.info("claim of dispatch %s granted: execution %s", dispatch_id, grant.identity.execution_id)
         return grant
     error = None
-    if answer.status in _HTTP_ERROR_STATUSES:
+    if answer.status in HTTP_ERROR_STATUSES:
         error = accept_hub_error(
             answer.body, context=messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
         )
-    if error is None and answer.status in _GATEWAY_FAILURE_STATUSES:
+    if error is None and answer.status in GATEWAY_FAILURE_STATUSES:
         logger.info("claim of dispatch %s did not reach the Hub: status %d", dispatch_id, answer.status)
         return None
     if error is None:

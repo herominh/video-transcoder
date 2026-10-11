@@ -127,13 +127,16 @@ def handle(job_input: object, *, runtime: Runtime, run_job: JobRunner) -> dict[s
         new_message_id=runtime.new_uuid,
         wall_time_ends_at=wall_time_ends_at,
     )
-    if isinstance(outcome, Unclaimed):
-        report = _unclaimed_report(dispatch, runtime_id, outcome, runtime)
-    else:
+    # Work only on a Grant, tested for by name: whatever else the claim returned is never worked on.
+    if isinstance(outcome, Grant):
         claimed = ClaimedExecution(
             dispatch=dispatch, grant=outcome, runtime_id=runtime_id, wall_time_ends_at=wall_time_ends_at
         )
         report = run_job(claimed, runtime)
+    elif isinstance(outcome, Unclaimed):
+        report = _unclaimed_report(dispatch, runtime_id, outcome, runtime)
+    else:
+        raise TypeError("the claim ended as neither a Grant nor an Unclaimed")
     output = runpod_output(report)
     _deliver_best_effort(report, runtime, wall_time_ends_at)
     return output

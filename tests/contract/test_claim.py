@@ -758,6 +758,28 @@ def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_not_cl
     assert clock.waits == []
 
 
+@pytest.mark.parametrize("past_the_expiry_s", [0.0, 60.0], ids=["to-the-expiry", "a-minute-past-the-expiry"])
+def test_claim_execution_when_the_wall_clock_is_stepped_to_or_past_the_expiry_while_claiming_should_not_claim_again(
+    past_the_expiry_s,
+):
+    # Arrange: the first claim gets no answer, and while it is out the wall clock is set forward. The
+    # patience and the start's wall time, both counted in seconds that passed, are nowhere near their end.
+    dispatch, clock = _dispatch(), FakeClock()
+    until_the_expiry_s = (dispatch.claim_expires_at - clock()).total_seconds()
+    transport = _SteppedOnItsFirstPost(clock, until_the_expiry_s + past_the_expiry_s)
+    assert until_the_expiry_s > PATIENCE_S
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert: the expiry is judged on the wall clock, as the contract states it
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+    assert clock() >= dispatch.claim_expires_at
+    assert clock.elapsed_s < PATIENCE_S
+
+
 @pytest.mark.parametrize(
     ("expires_in_s", "retry_after_s"),
     [(None, RETRY_AFTER_AN_HOUR_S), (EXPIRES_SOON_S, EXPIRES_SOON_S)],
