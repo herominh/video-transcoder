@@ -3,9 +3,10 @@
 claim_execution() sends `transcode.claim` to the configured claim address and returns a Grant only for a
 `200` whose body verifies under a Hub-to-worker key and is an accepted `transcode.claim.granted` for this
 dispatch, this runtime and this encryption. Every other ending is Unclaimed: `refused` (a `hub.error`),
-`unreachable` (no answer) or `invalid_answer` (anything else, never retried). It claims again only after
-a transport failure or a retryable `hub.error`, never at or after the dispatch's `claim.expires_at`, and
-never for longer than its patience. Nothing of a claim or of an answer is logged.
+`unreachable` (no answer from the Hub) or `invalid_answer` (anything else, never retried). A gateway's
+502, 503 or 504 that carries no accepted `hub.error` is no answer from the Hub. It claims again only after
+a transport failure, such a gateway failure or a retryable `hub.error`, never at or after the dispatch's
+`claim.expires_at`, and never for longer than its patience. Nothing of a claim or of an answer is logged.
 
 The transport and the clock are the test's own (v2_support): no network, no real waiting.
 """
@@ -13,6 +14,7 @@ The transport and the clock are the test's own (v2_support): no network, no real
 import dataclasses
 import json
 import logging
+import re
 from datetime import timedelta
 from typing import Any, Mapping, Sequence
 
@@ -87,19 +89,37 @@ AES_128_KEY_BYTES = 16
 HTTP_OK = 200
 EXPIRES_SOON_S = 5
 EXPIRED_ALREADY_S = -10
+# A bootstrap that outlasts the first claim and not the wait before a second.
+EXPIRES_BEFORE_A_SECOND_CLAIM_S = FIRST_BACKOFF_S / 2
 OTHER_UUID = "9a9a9a9a-9a9a-79a9-89a9-9a9a9a9a9a9a"
 UNKNOWN_HUB_ERROR_CODE = "made_up_refusal"
-HTML_BODY = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
+# A value no log line may show, placed in the error page of a server that is not the Hub.
+ERROR_PAGE_CANARY = "CANARY-error-page"
+HTML_BODY = b"<html><body><h1>The service is unavailable: " + ERROR_PAGE_CANARY.encode("ascii") + b"</h1></body></html>"
 HTTP_CREATED = 201
 HTTP_NO_CONTENT = 204
 HTTP_FOUND = 302
+HTTP_BAD_REQUEST = 400
 HTTP_UNAUTHORIZED = 401
+HTTP_NOT_FOUND = 404
 HTTP_CONFLICT = 409
+HTTP_INTERNAL_ERROR = 500
+HTTP_NOT_IMPLEMENTED = 501
 HTTP_BAD_GATEWAY = 502
 HTTP_UNAVAILABLE = 503
+HTTP_GATEWAY_TIMEOUT = 504
+HTTP_VERSION_NOT_SUPPORTED = 505
+# What a gateway in front of the Hub answers while it cannot reach it.
+GATEWAY_STATUSES = [HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
+GATEWAY_FAILURE = HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None)
 NO_ANSWER = TransportFailed("ConnectTimeout")
 RETRYABLE_REFUSAL_CODE = "service_unavailable"
+OTHER_RETRYABLE_REFUSAL_CODE = "internal_error"
 FINAL_REFUSAL_CODE = "claim_conflict"
+# What the log says of a claiming that ends unreachable: no claim was sent, or so many were.
+NOTHING_WAS_SENT = "nothing was sent"
+ENDED_UNREACHABLE = "ended unreachable"
+ENDED_UNREACHABLE_AFTER = re.compile(r"ended unreachable after (\d+) claims")
 # Steps of the wall clock while the Hub does not answer: set back an hour, set forward a minute.
 WALL_CLOCK_STEPS_S = {"set-back-an-hour": -3600.0, "set-forward-a-minute": 60.0}
 # A log line may name these two ids; any longer slice of a claim or of a grant is a leak.
@@ -342,10 +362,22 @@ def test_claim_execution_when_a_200_is_not_an_accepted_grant_for_this_runtime_sh
     assert clock.waits == []
 
 
+def _oversized_hub_error(status: int) -> HttpAnswer:
+    """A retryable `hub.error` one byte above its kind's limit: well formed, and not accepted."""
+    body = padded_to(hub_error_body(RETRYABLE_REFUSAL_CODE, retryable=True), HUB_ERROR_MAX_BYTES + 1)
+    return HttpAnswer(status, body, None)
+
+
 @pytest.mark.parametrize(
     "answer",
     [
-        pytest.param(HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None), id="an-html-502"),
+        pytest.param(HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None), id="an-html-500"),
+        pytest.param(HttpAnswer(HTTP_NOT_IMPLEMENTED, HTML_BODY, None), id="an-html-501-just-below-the-gateway-statuses"),
+        pytest.param(
+            HttpAnswer(HTTP_VERSION_NOT_SUPPORTED, HTML_BODY, None), id="an-html-505-just-above-the-gateway-statuses"
+        ),
+        pytest.param(HttpAnswer(HTTP_NOT_FOUND, HTML_BODY, None), id="an-html-404"),
+        pytest.param(HttpAnswer(HTTP_BAD_REQUEST, HTML_BODY, None), id="an-html-400"),
         pytest.param(HttpAnswer(HTTP_FOUND, b"", None), id="a-redirect"),
         pytest.param(HttpAnswer(HTTP_NO_CONTENT, b"", None), id="no-content"),
         pytest.param(
@@ -356,16 +388,9 @@ def test_claim_execution_when_a_200_is_not_an_accepted_grant_for_this_runtime_sh
         ),
         pytest.param(signed_answer(files.read_bytes(GRANT_ENCRYPTED), HUB_KEY, status=HTTP_CREATED), id="a-grant-with-status-201"),
         pytest.param(
-            hub_error_answer(HTTP_UNAVAILABLE, UNKNOWN_HUB_ERROR_CODE, retryable=True), id="a-hub-error-with-an-unknown-code"
+            hub_error_answer(HTTP_CONFLICT, UNKNOWN_HUB_ERROR_CODE, retryable=True), id="a-hub-error-with-an-unknown-code"
         ),
-        pytest.param(
-            HttpAnswer(
-                HTTP_UNAVAILABLE,
-                padded_to(hub_error_body(RETRYABLE_REFUSAL_CODE, retryable=True), HUB_ERROR_MAX_BYTES + 1),
-                None,
-            ),
-            id="a-hub-error-above-its-byte-limit",
-        ),
+        pytest.param(_oversized_hub_error(HTTP_INTERNAL_ERROR), id="a-hub-error-above-its-byte-limit"),
     ],
 )
 def test_claim_execution_when_a_non_200_is_not_an_accepted_hub_error_should_end_invalid_after_one_post(answer):
@@ -400,6 +425,21 @@ def test_claim_execution_when_the_hub_refuses_for_good_should_end_refused_with_i
 
     # Assert
     assert outcome == Unclaimed(CAUSE_REFUSED, code)
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize("status", GATEWAY_STATUSES)
+def test_claim_execution_when_a_gateway_status_carries_a_final_hub_error_should_end_refused_after_one_post(status):
+    # Arrange: the Hub itself answered, whatever the status: its refusal counts, not the status.
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(hub_error_answer(status, FINAL_REFUSAL_CODE, retryable=False), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_REFUSED, FINAL_REFUSAL_CODE)
     assert len(transport.calls) == 1
     assert clock.waits == []
 
@@ -467,6 +507,60 @@ def test_claim_execution_when_a_transport_failure_precedes_the_grant_should_clai
     assert all(signing.verify(call.body, WORKER_KEY, call.signature) for call in transport.calls)
 
 
+# What a gateway answers while it cannot reach the Hub: one of its own statuses, and no accepted `hub.error`.
+GATEWAY_FAILURES = [
+    pytest.param(HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None), id="an-html-502"),
+    pytest.param(HttpAnswer(HTTP_UNAVAILABLE, HTML_BODY, None), id="an-html-503"),
+    pytest.param(HttpAnswer(HTTP_GATEWAY_TIMEOUT, HTML_BODY, None), id="an-html-504"),
+    pytest.param(HttpAnswer(HTTP_GATEWAY_TIMEOUT, b"", None), id="an-empty-504"),
+    pytest.param(
+        hub_error_answer(HTTP_UNAVAILABLE, UNKNOWN_HUB_ERROR_CODE, retryable=True), id="a-503-hub-error-with-an-unknown-code"
+    ),
+    pytest.param(_oversized_hub_error(HTTP_UNAVAILABLE), id="a-503-hub-error-above-its-byte-limit"),
+]
+
+
+@pytest.mark.parametrize("gateway_failure", GATEWAY_FAILURES)
+def test_claim_execution_when_a_gateway_failure_precedes_the_grant_should_wait_the_first_back_off_then_claim_again(
+    gateway_failure,
+):
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(gateway_failure, _granted(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert: the same runtime claims again, in a new message.
+    first, second = _sent(transport)
+    assert isinstance(outcome, Grant)
+    assert first["message_id"] != second["message_id"]
+    assert moment(second["sent_at"]) > moment(first["sent_at"])
+    assert first["claim"] == second["claim"] == {"bootstrap_token": dispatch.bootstrap_token, "runtime_id": RUNTIME_ID}
+    assert all(signing.verify(call.body, WORKER_KEY, call.signature) for call in transport.calls)
+    assert clock.waits == [FIRST_BACKOFF_S]
+
+
+@pytest.mark.parametrize("status", GATEWAY_STATUSES)
+def test_claim_execution_when_a_gateway_status_carries_a_retryable_hub_error_should_wait_as_the_hub_asks_then_claim_again(
+    status,
+):
+    # Arrange: the Hub asks for a longer wait than a failure in transport is given.
+    dispatch, clock = _dispatch(), FakeClock()
+    refusal = hub_error_answer(
+        status, RETRYABLE_REFUSAL_CODE, retryable=True, retry_after_s=RETRY_AFTER_LONGER_THAN_THE_BACKOFF_S
+    )
+    transport = FakeTransport(refusal, _granted(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert
+    assert isinstance(outcome, Grant)
+    assert len(transport.calls) == 2
+    assert clock.waits == [RETRY_AFTER_LONGER_THAN_THE_BACKOFF_S]
+
+
 # --- giving up ----------------------------------------------------------------------------------
 
 
@@ -485,6 +579,42 @@ def test_claim_execution_when_no_claim_is_ever_answered_should_end_unreachable_w
     assert len(transport.calls) > 1
     assert [call.at for call in transport.calls if call.at >= PATIENCE_ENDS] == []
     assert sum(clock.waits) < PATIENCE_S
+
+
+@pytest.mark.parametrize("gateway_failure", GATEWAY_FAILURES)
+def test_claim_execution_when_every_claim_meets_a_gateway_failure_should_end_unreachable_within_its_patience(
+    gateway_failure,
+):
+    # Arrange: the bootstrap itself lasts far longer than the patience.
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=gateway_failure, clock=clock)
+    assert dispatch.claim_expires_at > PATIENCE_ENDS
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) > 1
+    assert [call.at for call in transport.calls if call.at >= PATIENCE_ENDS] == []
+    assert sum(clock.waits) < PATIENCE_S
+
+
+def test_claim_execution_when_every_claim_meets_a_gateway_failure_should_wait_and_claim_as_after_transport_failures():
+    # Arrange: what claims that get no answer at all give.
+    unanswered_clock = FakeClock()
+    unanswered = FakeTransport(then=NO_ANSWER, clock=unanswered_clock)
+    _claim(_dispatch(), unanswered, unanswered_clock)
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=GATEWAY_FAILURE, clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert clock.waits == unanswered_clock.waits
+    assert [call.at for call in transport.calls] == [call.at for call in unanswered.calls]
 
 
 class _SteppedOnItsFirstPost(FakeTransport):
@@ -540,14 +670,31 @@ def test_claim_execution_when_one_retryable_refusal_comes_among_transport_failur
     # Arrange
     dispatch, clock = _dispatch(), FakeClock()
     failures_before = (NO_ANSWER, NO_ANSWER)
-    transport = FakeTransport(*failures_before, _retryable_refusal(code="internal_error"), then=NO_ANSWER, clock=clock)
+    refusal = _retryable_refusal(code=OTHER_RETRYABLE_REFUSAL_CODE)
+    transport = FakeTransport(*failures_before, refusal, then=NO_ANSWER, clock=clock)
 
     # Act
     outcome = _claim(dispatch, transport, clock)
 
     # Assert: it kept claiming after the refusal, and the refusal is what it reports.
-    assert outcome == Unclaimed(CAUSE_REFUSED, "internal_error")
+    assert outcome == Unclaimed(CAUSE_REFUSED, OTHER_RETRYABLE_REFUSAL_CODE)
     assert len(transport.calls) > len(failures_before) + 1
+
+
+def test_claim_execution_when_one_retryable_refusal_comes_among_gateway_failures_should_end_refused_with_its_code():
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    failures_before = (GATEWAY_FAILURE,)
+    refusal = _retryable_refusal(code=OTHER_RETRYABLE_REFUSAL_CODE)
+    transport = FakeTransport(*failures_before, refusal, then=GATEWAY_FAILURE, clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert: it kept claiming after the refusal, and the refusal is what it reports.
+    assert outcome == Unclaimed(CAUSE_REFUSED, OTHER_RETRYABLE_REFUSAL_CODE)
+    assert len(transport.calls) > len(failures_before) + 1
+    assert [call.at for call in transport.calls if call.at >= PATIENCE_ENDS] == []
 
 
 # --- never at or after the expiry ---------------------------------------------------------------
@@ -608,6 +755,70 @@ def test_claim_execution_when_the_hub_asks_to_retry_after_the_claiming_ends_shou
     assert clock.waits == []
 
 
+# --- what the log says of an unreachable ending -------------------------------------------------
+
+
+def _claim_log(caplog: pytest.LogCaptureFixture) -> str:
+    """What the claim module logged, one line per message."""
+    return "\n".join(record.getMessage() for record in caplog.records if record.name == claim_module.__name__)
+
+
+@pytest.mark.parametrize("expired_s", [EXPIRED_ALREADY_S, 0], ids=["ten-seconds-ago", "this-very-instant"])
+def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_log_that_nothing_was_sent(caplog, expired_s):
+    # Arrange
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    dispatch, clock = _dispatch(**{"/claim/expires_at": seconds_from_now(expired_s)}), FakeClock()
+    transport = FakeTransport(then=_granted(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+    logged = _claim_log(caplog)
+
+    # Assert: the cause is the contract's, and the log tells a late start from a Hub that did not answer.
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert transport.calls == []
+    assert NOTHING_WAS_SENT in logged
+    assert ENDED_UNREACHABLE not in logged
+
+
+@pytest.mark.parametrize("unanswered", [NO_ANSWER, GATEWAY_FAILURE], ids=["no-answer", "gateway-failures"])
+def test_claim_execution_when_none_of_its_claims_was_answered_should_log_unreachable_with_how_many_it_sent(
+    caplog, unanswered
+):
+    # Arrange
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=unanswered, clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+    logged = _claim_log(caplog)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) > 1
+    assert ENDED_UNREACHABLE_AFTER.findall(logged) == [str(len(transport.calls))]
+    assert NOTHING_WAS_SENT not in logged
+
+
+def test_claim_execution_when_its_one_claim_was_not_answered_should_log_unreachable_after_one_claim(caplog):
+    # Arrange: the bootstrap expires before a second claim could be sent.
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    changes = {"/claim/expires_at": seconds_from_now(EXPIRES_BEFORE_A_SECOND_CLAIM_S)}
+    dispatch, clock = _dispatch(**changes), FakeClock()
+    transport = FakeTransport(then=NO_ANSWER, clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+    logged = _claim_log(caplog)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) == 1
+    assert ENDED_UNREACHABLE_AFTER.findall(logged) == ["1"]
+    assert NOTHING_WAS_SENT not in logged
+
+
 # --- nothing of a claim or of an answer is logged -----------------------------------------------
 
 
@@ -629,6 +840,8 @@ def _slices_shown(logged: str, body: str, nameable: Sequence[str]) -> list[str]:
         ),
         pytest.param((), NO_ANSWER, Unclaimed, id="unreachable"),
         pytest.param((_retryable_refusal(), NO_ANSWER, _granted()), None, Grant, id="granted-after-retries"),
+        pytest.param((GATEWAY_FAILURE, _granted()), None, Grant, id="granted-after-a-gateway-failure"),
+        pytest.param((), GATEWAY_FAILURE, Unclaimed, id="gateway-failures-until-the-end"),
     ],
 )
 def test_claim_execution_when_it_ends_any_way_should_log_nothing_of_a_claim_or_of_an_answer(
@@ -649,8 +862,10 @@ def test_claim_execution_when_it_ends_any_way_should_log_nothing_of_a_claim_or_o
 
     # Assert
     signatures += [call.signature for call in transport.calls]
-    bodies = [call.body.decode("ascii") for call in transport.calls] + [files.read_bytes(GRANT_ENCRYPTED).decode("ascii")]
+    bodies = [call.body.decode("ascii") for call in transport.calls]
+    bodies += [files.read_bytes(GRANT_ENCRYPTED).decode("ascii"), HTML_BODY.decode("ascii")]
     secrets = [dispatch.bootstrap_token, MEDIA_KEY_HEX, RUNTIME_ID, "vh_", "bootstrap_token", "key_hex", *signatures]
+    secrets += [ERROR_PAGE_CANARY]
     assert isinstance(outcome, expected)
     assert LOG_PROBE in logged
     assert [secret for secret in secrets if secret in logged] == []

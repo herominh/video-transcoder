@@ -7,14 +7,18 @@ for exactly this dispatch, this runtime and this encryption. Every other ending 
 and the runtime does no work:
 
     refused         a `hub.error` that is not retryable, or still retryable when the claiming ends
-    unreachable     no answer until the claiming ends
+    unreachable     no answer from the Hub until the claiming ends
     invalid_answer  any other answer: a grant that does not verify or is not accepted, a `200` that is
                     not a grant, a redirect, a body that is no `hub.error` of this version
 
 A `hub.error` is read only under a 4xx or 5xx status: under any other status its body is "any other
-answer". It claims again only after a transport failure or a retryable `hub.error`, with the same runtime
-id and token and a new message id and send time, never at or after the dispatch's `claim.expires_at`, and
-for no longer than CLAIM_PATIENCE_S: a billed runtime does not wait out a bootstrap that can last an hour.
+answer". A 502, 503 or 504 that carries no `hub.error` is no answer from the Hub: it is what a gateway
+in front of the Hub says while it cannot reach the claim core (a restart), so the request failed in
+transport, and claiming again is safe, because the Hub gives one runtime the same grant again (README
+15.2, row 3). It claims again only after such a failure in transport or a retryable `hub.error`, with the
+same runtime id and token and a new message id and send time, never at or after the dispatch's
+`claim.expires_at`, and for no longer than CLAIM_PATIENCE_S: a billed runtime does not wait out a
+bootstrap that can last an hour.
 The contract allows the retries, it does not require them; giving up earlier reports the same outcome as
 the expiry would. The expiry is judged on the wall clock, as the contract states it; the patience is
 measured on a monotonic reading, so a wall clock that is stepped while the Hub does not answer cannot
@@ -44,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 HTTP_OK = 200
 _HTTP_ERROR_STATUSES = range(400, 600)
+# What a gateway answers while it cannot reach the Hub behind it.
+_GATEWAY_FAILURE_STATUSES = frozenset({502, 503, 504})
 CAUSE_REFUSED = "refused"
 CAUSE_UNREACHABLE = "unreachable"
 CAUSE_INVALID_ANSWER = "invalid_answer"
@@ -111,20 +117,25 @@ def claim_execution(
             break
         wait_s = float(CLAIM_BACKOFF_S[min(attempt, len(CLAIM_BACKOFF_S) - 1)])
         answer = _send(dispatch, settings, runtime_id, transport, now, new_message_id(), left_s)
-        if answer is not None:
-            outcome = _judge(answer, dispatch, settings, runtime_id, clock())
-            if not isinstance(outcome, _RetryableRefusal):
-                return outcome
+        outcome = None if answer is None else _judge(answer, dispatch, settings, runtime_id, clock())
+        if isinstance(outcome, (Grant, Unclaimed)):
+            return outcome
+        if isinstance(outcome, _RetryableRefusal):
             last_refusal_code = outcome.code
             wait_s = max(wait_s, float(outcome.retry_after_s or 0))
         attempt += 1
         if wait_s >= time_left_s(clock()):
             break
         sleep(wait_s)
+    dispatch_id = dispatch.identity.dispatch_id
     if last_refusal_code is not None:
-        logger.info("claim of dispatch %s ended refused: %s", dispatch.identity.dispatch_id, last_refusal_code)
+        logger.info("claim of dispatch %s ended refused: %s", dispatch_id, last_refusal_code)
         return Unclaimed(CAUSE_REFUSED, last_refusal_code)
-    logger.info("claim of dispatch %s ended unreachable", dispatch.identity.dispatch_id)
+    if attempt == 0:
+        # The contract has one cause for both; the log tells a late start from a network fault.
+        logger.info("claim of dispatch %s: its bootstrap had expired before the first claim, nothing was sent", dispatch_id)
+    else:
+        logger.info("claim of dispatch %s ended unreachable after %d claims", dispatch_id, attempt)
     return Unclaimed(CAUSE_UNREACHABLE)
 
 
@@ -168,7 +179,8 @@ def _send(
 
 def _judge(
     answer: HttpAnswer, dispatch: AcceptedDispatch, settings: WorkerSettings, runtime_id: str, now: datetime
-) -> Grant | Unclaimed | _RetryableRefusal:
+) -> Grant | Unclaimed | _RetryableRefusal | None:
+    """What an answer means: the grant, the end of the claiming, a refusal for now, or None for no answer from the Hub."""
     dispatch_id = dispatch.identity.dispatch_id
     if answer.status == HTTP_OK:
         grant = _accepted_grant(answer, dispatch, settings, runtime_id, now)
@@ -181,6 +193,9 @@ def _judge(
         error = accept_hub_error(
             answer.body, context=messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
         )
+    if error is None and answer.status in _GATEWAY_FAILURE_STATUSES:
+        logger.info("claim of dispatch %s did not reach the Hub: status %d", dispatch_id, answer.status)
+        return None
     if error is None:
         logger.info("claim of dispatch %s got an answer that is no hub.error: status %d", dispatch_id, answer.status)
         return Unclaimed(CAUSE_INVALID_ANSWER)

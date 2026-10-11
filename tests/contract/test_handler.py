@@ -61,8 +61,9 @@ HUB_ERROR_CODE_MEMBER = "hub_error_code"
 REFUSAL_CODE = "claim_conflict"
 HTTP_OK = 200
 HTTP_CONFLICT = 409
-HTTP_BAD_GATEWAY = 502
-HTML_BODY = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
+# Not a gateway's 502, 503 or 504, which claiming treats as no answer from the Hub and claims again after.
+HTTP_INTERNAL_ERROR = 500
+HTML_BODY = b"<html><body><h1>500 Internal Server Error</h1></body></html>"
 DELIVERED = HttpAnswer(HTTP_OK, b"", None)
 NO_ANSWER = TransportFailed("ConnectTimeout")
 CLAIM_REFUSED = hub_error_answer(HTTP_CONFLICT, REFUSAL_CODE, retryable=False)
@@ -189,7 +190,7 @@ def test_handle_when_the_claim_is_granted_should_return_the_jobs_message_and_pos
     [
         pytest.param((CLAIM_REFUSED,), None, CAUSE_REFUSED, REFUSAL_CODE, id="refused"),
         pytest.param((), NO_ANSWER, CAUSE_UNREACHABLE, None, id="unreachable"),
-        pytest.param((HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None),), None, CAUSE_INVALID_ANSWER, None, id="invalid-answer"),
+        pytest.param((HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None),), None, CAUSE_INVALID_ANSWER, None, id="invalid-answer"),
     ],
 )
 def test_handle_when_the_claim_is_not_granted_should_do_no_work_and_report_unclaimed_both_ways(
