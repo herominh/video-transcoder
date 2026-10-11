@@ -45,6 +45,11 @@ TIME_LEFT_S = 3_600.0
 PATIENCE_S = 20.0
 # The loopback server looks for its shutdown this often here, where the worker's looks twice a second.
 SHUTDOWN_POLL_S = 0.005
+# ffprobe's option for its own I/O time-out, in microseconds, and how much longer than what the
+# preflight's budget leaves that time-out is: the worker's kill at the deadline comes first.
+IO_TIMEOUT_OPTION = "-rw_timeout"
+MICROSECONDS_PER_SECOND = 1_000_000
+PROBER_IO_MARGIN_S = 5.0
 # The two endings of the prober a test names: killed at the preflight's deadline, and the error exit
 # ffprobe makes when the connection it reads from is cut.
 TIMED_OUT = BoundedResult(
@@ -280,6 +285,17 @@ def _typed(failure: Failure) -> tuple[str, str, bool]:
     return failure.error_class, failure.code, failure.retryable
 
 
+def _execution_whose_budget_has_passed() -> ExecutionDeadline:
+    execution = ExecutionDeadline()
+    execution.budget.pass_now()
+    return execution
+
+
+def _io_timeout_us(argv: Sequence[str]) -> int:
+    """ffprobe's own I/O time-out in microseconds, as its command line names it."""
+    return int(argv[argv.index(IO_TIMEOUT_OPTION) + 1])
+
+
 def _probe_log(caplog: pytest.LogCaptureFixture) -> list[tuple[int, str]]:
     return [(record.levelno, record.getMessage()) for record in caplog.records if record.name == "core.probe"]
 
@@ -339,15 +355,15 @@ def test_preflight_when_its_budget_runs_out_after_slow_reads_should_fail_retryab
 
 
 @pytest.mark.parametrize(
-    ("read_seconds", "ffprobe_seconds"),
+    ("read_seconds", "ffprobe_seconds", "logged_seconds"),
     [
-        pytest.param([10.0, 10.0], 40.0, id="reads-took-a-third"),
-        pytest.param([], 60.0, id="no-read-at-all"),
-        pytest.param([], 0.0, id="no-read-and-no-time-seen-to-pass"),
+        pytest.param([10.0, 10.0], 40.0, "20.000 s in reads of 60.000 s elapsed", id="reads-took-a-third"),
+        pytest.param([], 60.0, "0.000 s in reads of 60.000 s elapsed", id="no-read-at-all"),
+        pytest.param([], 0.0, "0.000 s in reads of 0.000 s elapsed", id="no-read-and-no-time-seen-to-pass"),
     ],
 )
 def test_preflight_when_its_budget_runs_out_on_ffprobes_own_work_should_fail_for_good(
-    clock, monkeypatch, caplog, read_seconds, ffprobe_seconds
+    clock, monkeypatch, caplog, read_seconds, ffprobe_seconds, logged_seconds
 ):
     # Arrange: ffprobe is killed after work of its own that took more than the reads did
     caplog.set_level(logging.DEBUG, logger="core.probe")
@@ -364,10 +380,16 @@ def test_preflight_when_its_budget_runs_out_on_ffprobes_own_work_should_fail_for
     # Act
     failure = _failure_of(source, ExecutionDeadline())
 
-    # Assert: final as before, and nothing is logged about a slow storage
+    # Assert: final, and one warning says where the time went and that the storage was not the slow
+    # party, in our own words and the two numbers, with nothing of the URL the prober read
     assert _typed(failure) == ("deadline_exceeded", "probe_deadline_exceeded", False)
     assert failure.detail == "the preflight ran out of time"
-    assert _probe_log(caplog) == []
+    assert _probe_log(caplog) == [
+        (
+            logging.WARNING,
+            f"the preflight ran out of time for good, the storage was not the slow party: {logged_seconds}",
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -398,18 +420,26 @@ def test_preflight_when_its_budget_runs_out_should_take_half_of_the_time_in_read
     assert _typed(failure) == expected
 
 
+@pytest.mark.parametrize(
+    ("read_seconds", "ffprobe_seconds", "logged_seconds"),
+    [
+        pytest.param([25.0, 25.0], 10.0, "50.000 s in reads of 60.000 s elapsed", id="reads-took-five-sixths"),
+        pytest.param([5.0, 5.0], 50.0, "10.000 s in reads of 60.000 s elapsed", id="reads-took-a-sixth"),
+    ],
+)
 def test_preflight_when_the_executions_deadline_has_passed_too_should_fail_for_good_whatever_the_reads_took(
-    clock, monkeypatch, caplog
+    clock, monkeypatch, caplog, read_seconds, ffprobe_seconds, logged_seconds
 ):
-    # Arrange: reads that took 50 s of 60 s, and the job's own wall time gone by the time ffprobe is killed
+    # Arrange: reads that took most of the 60 s, or little of them, and the job's own wall time gone by
+    # the time ffprobe is killed
     caplog.set_level(logging.DEBUG, logger="core.probe")
-    source = TimedSource(clock, [25.0, 25.0])
+    source = TimedSource(clock, read_seconds)
     execution = ExecutionDeadline()
 
     def ffprobe_run(url: str) -> BoundedResult:
-        _read_chunk(url, 0)
-        _read_chunk(url, 1)
-        clock.advance(10.0)
+        for index in range(len(read_seconds)):
+            _read_chunk(url, index)
+        clock.advance(ffprobe_seconds)
         execution.pass_now()
         return TIMED_OUT
 
@@ -418,10 +448,17 @@ def test_preflight_when_the_executions_deadline_has_passed_too_should_fail_for_g
     # Act
     failure = _failure_of(source, execution)
 
-    # Assert
+    # Assert: final, and one warning names the execution's own deadline as what made it final, with
+    # the two numbers: where they alone would have made a slow storage of it, and where the storage
+    # was not the slow party either
     assert _typed(failure) == ("deadline_exceeded", "probe_deadline_exceeded", False)
     assert failure.detail == "the preflight ran out of time"
-    assert _probe_log(caplog) == []
+    assert _probe_log(caplog) == [
+        (
+            logging.WARNING,
+            f"the preflight ran out of time for good, the execution's own deadline had passed: {logged_seconds}",
+        )
+    ]
 
 
 # --- the budgeted reader refused a read past the time budget --------------------------------------------
@@ -688,6 +725,83 @@ def test_preflight_when_a_read_fails_for_good_only_after_the_prober_succeeded_sh
     assert result.decision.admissible
     assert source.reads == 2
     assert in_flight and not in_flight[0].is_alive()
+
+
+# --- the loopback server after a read recorded a failure ------------------------------------------------
+
+
+def test_loopback_server_when_a_read_recorded_a_failure_should_read_nothing_more_of_the_source():
+    # Arrange: the second read of the source fails with a changed source. The storage would answer a
+    # third read with bytes, and the budgeted reader would let it through: its deadline never passes
+    # here, and its budgets cover the whole source
+    source = TimedSource(ReaderClock(), fails_at=2, failure=SOURCE_CHANGED)
+    reader = BudgetedSource(
+        source, max_bytes=SOURCE_BYTES, max_requests=SOURCE_BYTES // CHUNK_BYTES, deadline=DecidedDeadline()
+    )
+    server = probe_module.LoopbackRangeServer(reader, chunk_bytes=CHUNK_BYTES)
+
+    # Act: a chunk that is read, the chunk whose read fails, then a request for a chunk not read yet
+    with server:
+        _read_chunk(server.url, 0)
+        _read_chunk(server.url, 1)
+        recorded = server.failure
+        _read_chunk(server.url, 2)
+
+    # Assert: the request that followed the recorded failure reached the source with no read
+    assert recorded == SOURCE_CHANGED
+    assert source.reads == 2
+
+
+# --- the facts are asked of a prober that timed out -----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "timed_out_result",
+    [
+        pytest.param(TIMED_OUT, id="nothing-else-wrong"),
+        pytest.param(dataclasses.replace(TIMED_OUT, stdout_overflow=True), id="its-output-over-the-cap-too"),
+    ],
+)
+def test_facts_from_when_the_prober_timed_out_should_fail_for_good_as_a_preflight_out_of_time(timed_out_result):
+    # Act: the facts are asked of a prober the worker killed at the deadline, which run_preflight never does
+    with pytest.raises(WorkerFailure) as raised:
+        probe_module._facts_from(timed_out_result)
+
+    # Assert: the final ending of a preflight out of time, before anything else the result holds, and
+    # never the retryable one of a prober that crashed
+    assert _typed(raised.value.failure) == ("deadline_exceeded", "probe_deadline_exceeded", False)
+    assert raised.value.failure.detail == "the preflight ran out of time"
+
+
+# --- ffprobe's own time-out stays behind the worker's kill ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("make_execution", "seconds_left"),
+    [
+        pytest.param(ExecutionDeadline, TIME_LEFT_S, id="an-hour-left"),
+        pytest.param(_execution_whose_budget_has_passed, 0.0, id="none-left"),
+    ],
+)
+def test_preflight_when_it_starts_ffprobe_should_set_its_io_time_out_seconds_past_what_the_budget_leaves(
+    clock, monkeypatch, make_execution, seconds_left
+):
+    # Arrange: a budget that leaves a known time, and a prober that only keeps its command line
+    command_lines: list[Sequence[str]] = []
+
+    def run_bounded(argv: Sequence[str], **limits: Any) -> BoundedResult:
+        command_lines.append(argv)
+        return EXITED_WITH_THE_FACTS
+
+    monkeypatch.setattr(probe_module, "run_bounded", run_bounded)
+
+    # Act
+    _preflight(TimedSource(clock), make_execution())
+
+    # Assert: ffprobe would give up a read by itself only seconds after the worker has killed it
+    assert [_io_timeout_us(argv) for argv in command_lines] == [
+        (seconds_left + PROBER_IO_MARGIN_S) * MICROSECONDS_PER_SECOND
+    ]
 
 
 # --- what is logged ------------------------------------------------------------------------------------

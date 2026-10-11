@@ -65,9 +65,16 @@ PROBE_SOURCE_SLOW = Failure(
     error_class="source_unavailable", code="probe_source_slow", retryable=True,
     detail="the preflight ran out of time while the storage was slow",
 )
+# The two reasons a preflight that ran out of time fails for good, as its warning names them.
+FINAL_EXECUTION_DEADLINE_PASSED = "the execution's own deadline had passed"
+FINAL_STORAGE_NOT_SLOW = "the storage was not the slow party"
 # The child's whole environment: no proxy variable can redirect its one HTTP request.
 FFPROBE_ENV = {"LC_ALL": "C", "PATH": os.defpath}
 MICROSECONDS_PER_SECOND = 1_000_000
+# How much longer than what the preflight's deadline leaves ffprobe's own I/O time-out is, so that
+# the worker's kill at the deadline always comes first: an ffprobe that gives up a read by itself
+# exits with an error, which is typed as the media's fault, never by where the time went.
+PROBER_IO_TIMEOUT_MARGIN_S = 5.0
 RANGE_PATTERN = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 # Codes a parse can end in, and the class each one reports.
@@ -207,12 +214,22 @@ def _out_of_time(budgeted: BudgetedSource, deadline: Deadline) -> WorkerFailure:
     out. The share is taken of the time that had passed by then, so the worker's own teardown (tens
     of milliseconds, a few seconds at worst) counts as elapsed time, and as time in reads while a
     read is still in flight: it moves the boundary a little, in either direction.
+
+    Either ending logs one warning with the two numbers. The final one also names what made it
+    final: the execution's deadline when that had passed, whatever the reads took, and otherwise
+    that the storage was not the slow party. Numbers and our own words only, nothing of the source.
     """
     spent = budgeted.read_time()
     took_the_share = spent.seconds_in_reads >= PROBE_SOURCE_SLOW_SHARE * spent.seconds_elapsed
     # Reads that took no time are never the slow party, not even when no time is seen to have passed.
     storage_was_slow = spent.seconds_in_reads > 0 and took_the_share
-    if deadline.expired() or not storage_was_slow:
+    execution_deadline_passed = deadline.expired()
+    if execution_deadline_passed or not storage_was_slow:
+        logger.warning(
+            "the preflight ran out of time for good, %s: %.3f s in reads of %.3f s elapsed",
+            FINAL_EXECUTION_DEADLINE_PASSED if execution_deadline_passed else FINAL_STORAGE_NOT_SLOW,
+            spent.seconds_in_reads, spent.seconds_elapsed,
+        )
         return WorkerFailure(PROBE_DEADLINE_EXCEEDED)
     logger.warning(
         "the preflight ran out of time while the storage was slow: %.3f s in reads of %.3f s elapsed",
@@ -263,7 +280,7 @@ def _resolve_ffprobe(ffprobe_path: str | None) -> str:
 
 
 def _ffprobe_argv(executable: str, url: str, profile: MediaProfile, deadline: Deadline) -> list[str]:
-    io_timeout_us = max(1, int(deadline.remaining_s() * MICROSECONDS_PER_SECOND))
+    io_timeout_us = int((deadline.remaining_s() + PROBER_IO_TIMEOUT_MARGIN_S) * MICROSECONDS_PER_SECOND)
     return [
         executable,
         "-hide_banner",
@@ -282,7 +299,14 @@ def _ffprobe_argv(executable: str, url: str, profile: MediaProfile, deadline: De
 
 def _facts_from(result: BoundedResult) -> SourceFacts:
     """The facts of a prober that was not killed at the deadline: run_preflight deals with that
-    ending before it asks for the facts (_ran_out_of_time)."""
+    ending before it asks for the facts (_ran_out_of_time).
+
+    A result that timed out is refused here all the same, before anything else it holds, with the
+    final deadline_exceeded / probe_deadline_exceeded: a caller that asked without that look would
+    otherwise get the retryable prober_crashed for a prober the worker itself killed.
+    """
+    if result.timed_out:
+        raise WorkerFailure(PROBE_DEADLINE_EXCEEDED)
     if result.stdout_overflow:
         raise _failure(
             "input_limits_exceeded", "probe_output_too_large",
