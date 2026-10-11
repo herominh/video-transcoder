@@ -68,6 +68,7 @@ FAILED_KIND = "transcode.result.failed"
 MANIFEST_KIND = "generation.manifest"
 MANIFEST_VERSION = "1.0.0-draft"
 MANIFEST_NAME = "generation-manifest.json"
+MILLISECONDS_PER_SECOND = 1000
 
 
 # --- deadlines no real clock decides -----------------------------------------------------------------
@@ -238,12 +239,16 @@ def claimed_execution(
     *, encrypted: bool = True, request_changes: Mapping[str, Any] | None = None, settings: WorkerSettings = SETTINGS
 ) -> ClaimedExecution:
     """The fixtures' dispatch (P01, or P02 unencrypted) with `request_changes` applied (JSON pointer to
-    value), accepted by the worker's own code, and the fixtures' grant for it (P24 or P27), claimed by it."""
+    value), accepted by the worker's own code, and the fixtures' grant for it (P24 or P27), claimed by it.
+
+    Its start began where every FakeClock begins and its claim took no time: a runtime on a fresh
+    FakeClock has the dispatch's whole wall time left."""
     request_fixture, grant_fixture = (
         (REQUEST_ENCRYPTED, GRANT_ENCRYPTED) if encrypted else (REQUEST_UNENCRYPTED, GRANT_UNENCRYPTED)
     )
     dispatch = accepted_dispatch(modified_fixture(request_fixture, request_changes or {}), settings=settings)
     clock = FakeClock()
+    wall_time_ends_at = clock.monotonic() + dispatch.limits.max_wall_time_ms / MILLISECONDS_PER_SECOND
     grant = claim_execution(
         dispatch,
         settings=settings,
@@ -253,10 +258,13 @@ def claimed_execution(
         monotonic=clock.monotonic,
         sleep=clock.sleep,
         new_message_id=uuid_source(),
+        wall_time_ends_at=wall_time_ends_at,
     )
     if not isinstance(grant, Grant):
         raise AssertionError("the fixtures' grant was not accepted for the changed dispatch")
-    return ClaimedExecution(dispatch=dispatch, grant=grant, runtime_id=RUNTIME_ID)
+    return ClaimedExecution(
+        dispatch=dispatch, grant=grant, runtime_id=RUNTIME_ID, wall_time_ends_at=wall_time_ends_at
+    )
 
 
 def runtime_of(transport: FakeTransport, clock: FakeClock, settings: WorkerSettings = SETTINGS) -> Runtime:

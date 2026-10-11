@@ -7,9 +7,12 @@ the typed failure and the stage it ended in.
 
 The stages, in order (the `stage` of a progress message and of a failed result; null before the first):
 
-    (none)        the wall-time limit starts; both storage access profiles, the media profile, the
-                  grant's key, the ffmpeg version and both storage clients are settled before anything
-                  is read: what cannot work is found before a byte is downloaded or encoded
+    (none)        what is left of the start's wall time becomes the execution's deadline (the handler
+                  counts that time from the moment the start began, so the claim has already spent
+                  some of it; with none left the execution ends here, before anything else); both
+                  storage access profiles, the media profile, the grant's key, the ffmpeg version and
+                  both storage clients are settled before anything is read: what cannot work is found
+                  before a byte is downloaded or encoded
     probing       the preflight: the source's facts from a bounded conditional read and its admission;
                   then the plan: the renditions and the room they may take, so that a source that
                   cannot be planned or does not fit fails before it is downloaded
@@ -31,6 +34,7 @@ import errno
 import logging
 import shutil
 import tempfile
+import time
 import traceback
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -38,7 +42,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.admission import RequestLimits
-from core.bounded_process import Deadline
+from core.bounded_process import MS_PER_SECOND, Deadline
 from core.encode import ArtifactFile, OutputAllowance, RenditionOutput, encode_rendition
 from core.encode_command import EncodeSource
 from core.failure import Diagnostic, Failure, WorkerFailure, make_detail
@@ -68,13 +72,13 @@ from core.protocol.registry import Channel, MessageKind, Role
 from core.protocol.settings import StorageProfile, UnknownCredentialRef
 from core.renditions import RenditionPlan, plan_renditions
 from core.source_facts import SourceFacts
-from core.source_reader import S3RangeSource
+from core.source_reader import RangeSource, S3RangeSource
 from core.thumbnail import ThumbnailResult, make_thumbnail
 
 from .config import JobSettings
 from .ffmpeg_version import installed_ffmpeg_version
 from .progress import ProgressReporter
-from .storage import download_source, storage_client, upload_client, upload_generation
+from .storage import DeadlineSource, download_source, storage_client, upload_client, upload_generation
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +110,14 @@ UNSUPPORTED_PROFILE = Failure(
 GRANT_KEY_MISMATCH = Failure(
     "internal_error", "grant_key_mismatch", False,
     "the grant's media key does not fit the dispatch's encryption",
+)
+# Retryable, unlike a deadline that passes during a stage: only the claim phase can spend a start's wall
+# time before the execution begins, which is a passing fault (a Hub that was slow to grant), and the
+# execution did nothing (no read, no encode, no write). A new dispatch has a fresh budget, and the
+# attempt it repeats cost nothing.
+WALL_TIME_SPENT_BEFORE_START = Failure(
+    "deadline_exceeded", "wall_time_spent_before_start", True,
+    "the start's wall time was spent before the execution could begin",
 )
 
 
@@ -222,11 +234,12 @@ class JobRunner:
         *,
         source_client_factory: Callable[[StorageProfile], Any] = storage_client,
         output_client_factory: Callable[[StorageProfile], Any] = upload_client,
-        ffmpeg_version: Callable[[], str] = installed_ffmpeg_version,
+        ffmpeg_version: Callable[[Deadline], str] = installed_ffmpeg_version,
     ) -> None:
         """`source_client_factory` makes the S3 client the source is read with and `output_client_factory`
         the one the generation is stored with, each from an access profile; `ffmpeg_version` names the
-        installed ffmpeg, or raises WorkerFailure when it cannot."""
+        installed ffmpeg within the execution's deadline, which it is handed, or raises WorkerFailure
+        when it cannot."""
         if not isinstance(job_settings, JobSettings):
             raise TypeError("job_settings must be a JobSettings")
         if not all(callable(given) for given in (source_client_factory, output_client_factory, ffmpeg_version)):
@@ -239,8 +252,10 @@ class JobRunner:
     def run(self, claimed: ClaimedExecution, runtime: Runtime) -> SealedMessage:
         """Run the granted execution and return its sealed `transcode.result.completed` or `.failed`.
 
-        The dispatch's wall-time limit counts from this call. Raises only for arguments of the wrong
-        type and when the failed result itself cannot be built or sealed (a wiring bug).
+        The execution has what is left of its start's wall time: up to `claimed.wall_time_ends_at`, a
+        reading of `runtime.monotonic`, so the time the claim took is already counted. With none left
+        it does nothing and returns a failed result. Raises only for arguments of the wrong type and
+        when the failed result itself cannot be built or sealed (a wiring bug).
         """
         if not isinstance(claimed, ClaimedExecution):
             raise TypeError("claimed must be a ClaimedExecution")
@@ -266,7 +281,7 @@ class _Execution:
         job_settings: JobSettings,
         source_client_factory: Callable[[StorageProfile], Any],
         output_client_factory: Callable[[StorageProfile], Any],
-        ffmpeg_version: Callable[[], str],
+        ffmpeg_version: Callable[[Deadline], str],
     ) -> None:
         self._dispatch = claimed.dispatch
         self._grant = claimed.grant
@@ -275,7 +290,13 @@ class _Execution:
         self._source_client_factory = source_client_factory
         self._output_client_factory = output_client_factory
         self._ffmpeg_version = ffmpeg_version
-        self._deadline = Deadline.after_ms(claimed.dispatch.limits.max_wall_time_ms)
+        # A reading of the runtime's clock is only ever compared with another reading of it: what is left
+        # of the start's wall time is taken as a duration, and the Deadline (on time.monotonic) is built
+        # once, from that duration.
+        left_ms = int((claimed.wall_time_ends_at - runtime.monotonic()) * MS_PER_SECOND)
+        self._wall_time_spent = left_ms < 1
+        # With no time left the execution ends at its first step, and its deadline is one that has passed.
+        self._deadline = Deadline(time.monotonic()) if self._wall_time_spent else Deadline.after_ms(left_ms)
         self._progress = ProgressReporter(claimed, runtime)
         self._stage: str | None = None
         self._bytes_read = 0
@@ -310,13 +331,18 @@ class _Execution:
 
     def _stored_generation(self) -> _Generation:
         """Every stage in order; returns once the generation and its manifest are stored."""
+        if self._wall_time_spent:
+            # Before anything else: no profile is looked up, no client made, nothing read, written or reported.
+            raise WorkerFailure(WALL_TIME_SPENT_BEFORE_START)
         source_access, output_access = self._storage_profiles()
         profile = self._media_profile()
         self._require_grant_key_fits()
         encoder = self._identified_encoder(profile)
         source = self._source(self._client(SIDE_SOURCE, self._source_client_factory, source_access))
         output_client = self._client(SIDE_OUTPUT, self._output_client_factory, output_access)
-        plan = self._probe(source, profile)
+        # The preflight makes its own reads of the source: this holds each of them to the execution's
+        # deadline while it is in flight, as the download and the upload hold theirs.
+        plan = self._probe(DeadlineSource(source, self._deadline), profile)
         scratch = self._download(source)
         encoded = self._transcode(scratch, plan, profile)
         generation = self._finalize(scratch, encoded, profile, encoder)
@@ -365,7 +391,7 @@ class _Execution:
         """What encodes this execution; kept, so that a failed result names it too."""
         encoder = Encoder(
             image_digest=self._job_settings.image_digest,
-            ffmpeg_version=self._ffmpeg_version(),
+            ffmpeg_version=self._ffmpeg_version(self._deadline),
             video_encoder=profile.encode.video_encoder,
             preset=profile.encode.encoder_preset,
         )
@@ -408,7 +434,7 @@ class _Execution:
             etag=located.etag,
         )
 
-    def _probe(self, source: S3RangeSource, profile: MediaProfile) -> _Plan:
+    def _probe(self, source: RangeSource, profile: MediaProfile) -> _Plan:
         self._enter(STAGE_PROBING)
         limits = self._dispatch.limits
         preflight = run_preflight(

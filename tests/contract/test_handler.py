@@ -6,13 +6,18 @@ the claimed execution to the job runner exactly once; unclaimed, it does no work
 the same signed bytes both ways, and no failure of the callback costs the output. Every start draws its
 own runtime id. load_runtime() checks the contract tree before it reads the configuration.
 
+One start has one wall-time budget, counted from the moment handle() begins: the claiming ends by it,
+the job is told when it ends, and the callback is not attempted once it is spent (the output still is
+returned).
+
 The transport and the clock are the test's own (v2_support): no network, no real waiting.
 """
 
+import dataclasses
 import json
 import re
-from datetime import timedelta
-from typing import Any, Optional
+from datetime import datetime, timedelta
+from typing import Any, Callable, Optional
 
 import pytest
 
@@ -45,6 +50,7 @@ from tests.contract.v2_support import (
     accepted_dispatch,
     catalog_context,
     hub_error_answer,
+    modified_fixture,
     signed_answer,
     signed_carrier,
     uuid_source,
@@ -74,6 +80,21 @@ STAND_IN_FAILURE = Failure(
 )
 LOWERCASE_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 REMOVED_VARIABLE = "VH_CLAIM_URL"
+HTTP_UNAVAILABLE = 503
+RETRYABLE_REFUSAL_CODE = "service_unavailable"
+WALL_TIME_LIMIT_POINTER = "/limits/max_wall_time_ms"
+# A wall-time limit of one start, shorter than the two minutes a claiming would otherwise last.
+WALL_TIME_MS = 90_000
+WALL_TIME_S = 90.0
+SHORT_WALL_TIME_MS = 30_000
+SHORT_WALL_TIME_S = 30.0
+# How long the process has been up when a start begins: its monotonic clock does not read zero.
+UPTIME_S = 1234.5
+CLAIM_TOOK_S = 7
+ACCEPTING_TOOK_S = 2.0
+# The callback's own time-out, and how long a POST that times out takes on the fake clock.
+CALLBACK_TIMEOUT_S = 10.0
+SLOW_POST_S = 15.0
 
 
 class StandInJob:
@@ -82,9 +103,12 @@ class StandInJob:
     def __init__(self) -> None:
         self.calls: list[tuple[ClaimedExecution, Runtime]] = []
         self.returned: list[SealedMessage] = []
+        # What the job does besides, once it has been handed its execution (a test makes it take time).
+        self.work: Callable[[], None] = lambda: None
 
     def __call__(self, execution: ClaimedExecution, runtime: Runtime) -> SealedMessage:
         self.calls.append((execution, runtime))
+        self.work()
         now = runtime.clock()
         identity: ExecutionIdentity = execution.grant.identity
         message = messages.result_failed(
@@ -114,6 +138,35 @@ def _request() -> dict[str, Any]:
 
 def _job_input(key: bytes = HUB_KEY) -> dict[str, str]:
     return signed_carrier(files.read_bytes(REQUEST_ENCRYPTED), key)
+
+
+def _job_input_with_wall_time(milliseconds: int) -> dict[str, str]:
+    """The fixtures' dispatch with another wall-time limit, signed by the Hub after the change."""
+    return signed_carrier(modified_fixture(REQUEST_ENCRYPTED, {WALL_TIME_LIMIT_POINTER: milliseconds}), HUB_KEY)
+
+
+def _clock_of_a_process_up_for_a_while() -> FakeClock:
+    """A clock whose monotonic reading is UPTIME_S while its wall clock still shows the fixtures' now."""
+    clock = FakeClock()
+    clock.advance(UPTIME_S)
+    clock.step_wall(-UPTIME_S)
+    return clock
+
+
+class SlowFirstReading:
+    """A wall clock whose first reading takes `seconds` of the monotonic clock and shows the same time:
+    handle() reads the wall clock first to accept the dispatch, and accepting takes time."""
+
+    def __init__(self, clock: FakeClock, seconds: float) -> None:
+        self._clock = clock
+        self._seconds: Optional[float] = seconds
+
+    def __call__(self) -> datetime:
+        if self._seconds is not None:
+            self._clock.advance(self._seconds)
+            self._clock.step_wall(-self._seconds)
+            self._seconds = None
+        return self._clock()
 
 
 def _granted() -> HttpAnswer:
@@ -274,6 +327,146 @@ def test_handle_when_the_callback_fails_for_an_unclaimed_report_should_still_ret
     # Assert
     assert json.loads(output["vh_message"])["cause"] == CAUSE_REFUSED
     assert len(transport.calls_to(CALLBACK_URL)) >= 1
+
+
+# --- one wall-time budget for the whole start ---------------------------------------------------
+
+
+def test_handle_when_the_claim_is_granted_at_once_should_tell_the_job_its_wall_time_ends_one_limit_after_the_start():
+    # Arrange: the start begins when the process's monotonic clock reads UPTIME_S
+    clock = _clock_of_a_process_up_for_a_while()
+    transport = _transport(clock, _granted())
+    job = StandInJob()
+
+    # Act
+    handle(_job_input_with_wall_time(WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert
+    ((execution, _),) = job.calls
+    assert execution.dispatch.limits.max_wall_time_ms == WALL_TIME_MS
+    assert execution.wall_time_ends_at == UPTIME_S + WALL_TIME_S
+
+
+def test_handle_when_accepting_the_dispatch_took_time_should_count_the_wall_time_from_before_it():
+    # Arrange: accepting the dispatch takes 2 s of the start
+    clock = _clock_of_a_process_up_for_a_while()
+    transport = _transport(clock, _granted())
+    runtime = dataclasses.replace(_runtime(transport, clock), clock=SlowFirstReading(clock, ACCEPTING_TOOK_S))
+    job = StandInJob()
+
+    # Act
+    handle(_job_input_with_wall_time(WALL_TIME_MS), runtime=runtime, run_job=job)
+
+    # Assert: the limit counts from the moment the start began, not from the accepted dispatch
+    ((execution, _),) = job.calls
+    assert clock.monotonic() == UPTIME_S + ACCEPTING_TOOK_S
+    assert execution.wall_time_ends_at == UPTIME_S + WALL_TIME_S
+
+
+def test_handle_when_the_claim_took_time_should_still_count_the_jobs_wall_time_from_the_start_of_the_start():
+    # Arrange: the Hub refuses the first claim for 7 s, then grants: the claim takes 7 s of the start
+    clock = _clock_of_a_process_up_for_a_while()
+    wait_then_grant = hub_error_answer(
+        HTTP_UNAVAILABLE, RETRYABLE_REFUSAL_CODE, retryable=True, retry_after_s=CLAIM_TOOK_S
+    )
+    transport = _transport(clock, wait_then_grant, _granted())
+    read_when_the_job_began: list[float] = []
+    job = StandInJob()
+    job.work = lambda: read_when_the_job_began.append(clock.monotonic())
+
+    # Act
+    handle(_job_input_with_wall_time(WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert: the job begins 7 s into the start and is left the limit less those 7 s
+    ((execution, _),) = job.calls
+    assert read_when_the_job_began == [UPTIME_S + CLAIM_TOOK_S]
+    assert execution.wall_time_ends_at == UPTIME_S + WALL_TIME_S
+    assert execution.wall_time_ends_at - read_when_the_job_began[0] == WALL_TIME_S - CLAIM_TOOK_S
+
+
+def test_handle_when_no_claim_is_answered_should_stop_claiming_when_the_starts_wall_time_ends():
+    # Arrange: a start of 30 s; a claiming's own patience would last two minutes
+    clock = _clock_of_a_process_up_for_a_while()
+    transport = _transport(clock, claim_then=NO_ANSWER)
+    job = StandInJob()
+    wall_time_ends = clock() + timedelta(seconds=SHORT_WALL_TIME_S)
+
+    # Act
+    output = handle(_job_input_with_wall_time(SHORT_WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert
+    claims = transport.calls_to(CLAIM_URL)
+    assert json.loads(output["vh_message"])["cause"] == CAUSE_UNREACHABLE
+    assert job.calls == []
+    assert len(claims) > 1
+    assert [call.at for call in claims if call.at >= wall_time_ends] == []
+    assert clock.elapsed_s - UPTIME_S < SHORT_WALL_TIME_S
+
+
+@pytest.mark.parametrize(
+    "job_takes_s",
+    [
+        pytest.param(WALL_TIME_S, id="the-whole-wall-time"),
+        pytest.param(WALL_TIME_S + 45.0, id="longer-than-the-wall-time"),
+    ],
+)
+def test_handle_when_the_job_spent_the_starts_wall_time_should_return_the_output_without_attempting_the_callback(
+    job_takes_s,
+):
+    # Arrange: a Hub that would take the callback at once
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+    job = StandInJob()
+    job.work = lambda: clock.advance(job_takes_s)
+
+    # Act
+    output = handle(_job_input_with_wall_time(WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert: the job output carries the same signed bytes, so nothing is lost but the fast path
+    (sealed,) = job.returned
+    assert output == {"vh_message": sealed.body.decode("ascii"), "vh_signature": sealed.signature}
+    assert transport.calls_to(CALLBACK_URL) == []
+    assert clock.waits == []
+
+
+def test_handle_when_little_of_the_wall_time_is_left_after_the_job_should_give_the_callback_only_what_is_left():
+    # Arrange: the job leaves 4 s of the start's 90 s
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+    job = StandInJob()
+    job.work = lambda: clock.advance(WALL_TIME_S - 4.0)
+
+    # Act
+    output = handle(_job_input_with_wall_time(WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert: posted, with a time-out shorter than the callback's own
+    (sealed,) = job.returned
+    (callback_call,) = transport.calls_to(CALLBACK_URL)
+    assert output == {"vh_message": sealed.body.decode("ascii"), "vh_signature": sealed.signature}
+    assert (callback_call.body, callback_call.signature) == (sealed.body, sealed.signature)
+    assert callback_call.timeout_s == 4.0
+    assert callback_call.timeout_s < CALLBACK_TIMEOUT_S
+
+
+def test_handle_when_claiming_spent_the_starts_wall_time_should_return_the_unclaimed_report_without_a_callback():
+    # Arrange: a start of 30 s on which every POST times out after 15 s
+    clock = FakeClock()
+    transport = FakeTransport(clock=clock, seconds_per_post=SLOW_POST_S)
+    transport.route(CLAIM_URL, then=NO_ANSWER)
+    transport.route(CALLBACK_URL, then=DELIVERED)
+    job = StandInJob()
+
+    # Act
+    output = handle(_job_input_with_wall_time(SHORT_WALL_TIME_MS), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert: the report is the job's output; the callback would have started after the start's end
+    body = output["vh_message"].encode("ascii")
+    report = json.loads(body)
+    assert (report["message_kind"], report["cause"]) == (UNCLAIMED_KIND, CAUSE_UNREACHABLE)
+    assert signing.verify(body, WORKER_KEY, output["vh_signature"])
+    assert job.calls == []
+    assert clock.elapsed_s >= SHORT_WALL_TIME_S
+    assert transport.calls_to(CALLBACK_URL) == []
 
 
 # --- the runtime id -----------------------------------------------------------------------------

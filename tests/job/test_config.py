@@ -166,6 +166,70 @@ def test_from_env_when_the_scratch_directory_holds_a_character_the_stages_refuse
     assert name not in str(refusal)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("scratch-été", id="an-accented-letter"),
+        pytest.param("scratch-視頻", id="letters-of-another-script"),
+        pytest.param("scratch- wide", id="a-no-break-space"),
+        pytest.param("scratch-\twith-a-tab", id="a-tab"),
+        pytest.param("scratch-\x01control", id="a-control-character"),
+        pytest.param("scratch-\x7fdelete", id="the-delete-character"),
+    ],
+)
+def test_from_env_when_the_scratch_directory_holds_anything_but_printable_ascii_should_refuse_it_by_that_rule(
+    tmp_path, name
+):
+    # Arrange: the directory exists, so only the character refuses it
+    directory = tmp_path / name
+    directory.mkdir()
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: str(directory)}))
+
+    # Assert: the variable and the rule, never the value
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "printable ASCII" in refusal.rule
+    assert name not in str(refusal)
+    assert str(directory) not in str(refusal)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("with a space", id="a-space"),
+        pytest.param("with ~!#$&'()+,;=@[]^_`{}-.", id="printable-punctuation"),
+    ],
+)
+def test_from_env_when_the_scratch_directory_holds_only_printable_ascii_should_accept_it(tmp_path, name):
+    # Arrange
+    directory = tmp_path / name
+    directory.mkdir()
+
+    # Act
+    settings = JobSettings.from_env(_env(tmp_path, **{SCRATCH_VARIABLE: str(directory)}))
+
+    # Assert
+    assert settings.scratch_root == directory
+
+
+def test_from_env_when_the_default_temporary_directory_holds_a_non_ascii_character_should_refuse_it(
+    tmp_path, monkeypatch
+):
+    # Arrange: no VH_SCRATCH_DIR, and a system temporary directory with an accented name
+    directory = tmp_path / "temporaire-é"
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(directory))
+
+    # Act
+    refusal = _refusal({DIGEST_VARIABLE: VALID_DIGEST})
+
+    # Assert
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "printable ASCII" in refusal.rule
+    assert str(directory) not in str(refusal)
+
+
 @pytest.mark.parametrize("value", [pytest.param("", id="empty"), pytest.param(7, id="not-a-string")])
 def test_from_env_when_the_scratch_directory_is_not_a_usable_text_should_refuse_it(tmp_path, value):
     # Arrange

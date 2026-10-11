@@ -3,6 +3,16 @@
 Each side has its own client of an access profile: storage_client() reads the source, upload_client()
 stores the generation.
 
+Every request is held to the execution's deadline while it is in flight. The client's read time-out
+bounds a silence only, so a storage that trickles a body or withholds its answer would hold a billed
+worker without limit. Each request therefore runs on a helper thread, and the job waits for it no
+longer than the deadline leaves (_within). A request that has not ended by then is abandoned: the job
+goes on to its typed failure, the helper thread ends when its request does, and whatever the request
+returns or raises afterwards is dropped with it, unseen. A request that ends after the deadline is
+dropped the same way, however soon after it ends. An abandoned upload is given no more of its file,
+which the job's own thread closes as it stops waiting. DeadlineSource holds to the same rule the reads
+this module does not make itself (the preflight's).
+
 download_source() copies the source into the scratch directory through RangeSource.read(), so every byte
 arrives through the reader's own checks: in production an S3RangeSource, whose ranged reads are each
 conditional on the recorded ETag. A source that changed while it was read fails the job.
@@ -11,7 +21,14 @@ upload_generation() stores exactly the files the manifest lists and then the man
 `<prefix>/<relative path>` (contract README 15.1, rule 3: every object a runtime writes has a key that
 starts with the granted prefix and `/`). The manifest is the completion marker, so it goes last, only
 after every artifact was stored. It takes its list from the caller, never from a walk of the output
-directory, and it only ever puts: it lists nothing, reads nothing back and deletes nothing.
+directory, and it only ever puts: it lists nothing, reads nothing back and deletes nothing (the client's
+own region redirector may ask for the bucket's head once after a redirect answer, inside the same
+request and under its deadline). The bytes a client reads of a file are counted and hashed as it reads
+them, and an object counts as stored only when they have the size and the SHA-256 the manifest records.
+A pass over a file that ends with other bytes is refused where it ends: before anything is sent, with a
+client that reads a body through to sign it.
+A refusal that sending the object again cannot change (the credentials may not write, the bucket does
+not exist) ends the upload at once and for good; every other failed request is sent again.
 
 No log line and no failure detail holds an endpoint, a URL, a credential or the storage client's own
 error text: a storage error is named by its class and, for an answer of the storage, its error code.
@@ -20,17 +37,20 @@ error text: a storage error is named by its class and, for an answer of the stor
 from __future__ import annotations
 
 import errno
+import functools
+import hashlib
 import logging
 import os
 import stat
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, TypeVar
 
 import boto3
 from botocore.config import Config
-from botocore.exceptions import BotoCoreError, ClientError
+from botocore.exceptions import BotoCoreError, ClientError, ParamValidationError
 
 from core.bounded_process import Deadline
 from core.encode import ArtifactFile
@@ -77,6 +97,37 @@ CONTENT_TYPES = {
 _COMMON_DEFINITIONS = schema.SCHEMA_BASE_URI + "schemas/common.schema.json#/$defs/"
 _REL_PATH_DEFINITION = _COMMON_DEFINITIONS + "rel_path"
 _OBJECT_KEY_DEFINITION = _COMMON_DEFINITIONS + "object_key"
+# The helper thread one storage request runs on (_within).
+REQUEST_THREAD_NAME = "vh-storage-request"
+# A PutObject the storage answered with a redirect or a client error is refused for good: the same
+# request would get the same answer, so it is not sent again and the job is not worth dispatching again.
+HTTP_FIRST_REDIRECT = 300
+HTTP_LAST_CLIENT_ERROR = 499
+HTTP_FOUND = 302
+HTTP_TEMPORARY_REDIRECT = 307
+HTTP_REQUEST_TIMEOUT = 408
+HTTP_CONFLICT = 409
+HTTP_TOO_MANY_REQUESTS = 429
+# The answers in that range that pass all the same, by their status or by their error code.
+PASSING_REFUSAL_STATUSES = frozenset(
+    {
+        HTTP_FOUND,  # the storage says the object's address is elsewhere for now
+        HTTP_TEMPORARY_REDIRECT,  # as 302: elsewhere for now, not for good
+        HTTP_REQUEST_TIMEOUT,  # the storage stopped waiting for the request to arrive
+        HTTP_CONFLICT,  # another operation on the same key was under way
+        HTTP_TOO_MANY_REQUESTS,  # the storage limits how fast it is asked
+    }
+)
+PASSING_REFUSAL_CODES = frozenset(
+    {
+        "RequestTimeout",  # the body arrived too slowly for the storage's own time-out
+        "RequestTimeTooSkewed",  # this host's clock is off: another start, on another host, can pass
+        "IncompleteBody",  # fewer bytes arrived than were announced: the connection broke
+        "BadDigest",  # the bytes that arrived are not the bytes that were signed: damaged on the way
+        "XAmzContentSHA256Mismatch",  # as BadDigest, by the payload's signed hash: damaged or changed on the way
+        "SlowDown",  # the storage limits how fast it is asked, whatever status it answers with
+    }
+)
 
 DOWNLOAD_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "download_deadline_exceeded", False,
@@ -86,7 +137,17 @@ UPLOAD_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "upload_deadline_exceeded", False,
     "the job ran out of time while it uploaded the generation",
 )
+SOURCE_READ_DEADLINE_EXCEEDED = Failure(
+    "deadline_exceeded", "source_read_deadline_exceeded", False,
+    "the job ran out of time while it read the source",
+)
+STORAGE_REQUEST_START_FAILED = Failure(
+    "resource_exhausted", "storage_request_start_failed", True,
+    "a storage request could not be started: no thread could be made for it",
+)
 SCRATCH_FULL = Failure("resource_exhausted", "scratch_full", True, "the scratch disk is full")
+
+_Returned = TypeVar("_Returned")
 
 
 def storage_client(profile: StorageProfile) -> Any:
@@ -151,6 +212,95 @@ def _require_transfer_arguments(deadline: object, on_bytes: object) -> None:
         raise TypeError("on_bytes must be callable or None")
 
 
+# --- a request in flight -------------------------------------------------------------------------
+
+
+class _Request:
+    """One storage request on its helper thread, and how it ended once `ended` is set."""
+
+    def __init__(self, call: Callable[[], Any], deadline: Deadline) -> None:
+        self._call = call
+        self._deadline = deadline
+        self.ended = threading.Event()
+        self.ended_in_time = False
+        self.returned: Any = None
+        self.raised: BaseException | None = None
+
+    def run(self) -> None:
+        # Whatever the call raises is kept for the thread that waits, or dropped with an abandoned
+        # request. Nothing leaves this thread: the interpreter would print an error that escaped it.
+        try:
+            self.returned = self._call()
+        except BaseException as error:  # noqa: BLE001 - raised again by the thread that waits
+            self.raised = error
+        finally:
+            # Stamped here, where the request ends: the thread that waits may come to look much later.
+            self.ended_in_time = self._deadline.remaining_s() > 0
+            self.ended.set()
+
+
+def _within(deadline: Deadline, call: Callable[[], _Returned], *, expired: Failure) -> _Returned:
+    """What `call()` returns, or raises, when it ends before `deadline`; WorkerFailure(expired) when it does not.
+
+    Nothing can cut short a request the storage client is in the middle of, so the call runs on a helper
+    thread and this one waits for it only as long as the deadline leaves. What the call raises in time is
+    raised here, the same object. A call that has not ended in time is abandoned: its thread goes on until
+    the request ends, and what it then returns or raises is dropped, with nothing printed or logged. So
+    is the outcome of a call that ended after the deadline, however soon after: the helper thread notes
+    at the call's ending whether time was left, and this thread goes by that note, not by when it came
+    to look. When no time is left, no request is started. A helper thread that cannot be started is a
+    retryable WorkerFailure.
+    """
+    remaining_s = deadline.remaining_s()
+    if remaining_s <= 0:
+        raise WorkerFailure(expired)
+    request = _Request(call, deadline)
+    # A daemon thread: an abandoned request never keeps the process from ending.
+    thread = threading.Thread(target=request.run, name=REQUEST_THREAD_NAME, daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:
+        # `from None`: the interpreter's own text says nothing the typed failure does not.
+        raise WorkerFailure(STORAGE_REQUEST_START_FAILED) from None
+    # A wait longer than TIMEOUT_MAX is refused by the lock it waits on (OverflowError).
+    ended = request.ended.wait(min(remaining_s, threading.TIMEOUT_MAX))
+    if not ended or not request.ended_in_time:
+        raise WorkerFailure(expired)
+    if request.raised is not None:
+        raise request.raised
+    return request.returned
+
+
+class DeadlineSource:
+    """A RangeSource whose every read returns or fails by a deadline: for the reads of a source that
+    this module does not make itself (the preflight's).
+
+    A read that has not ended by the deadline raises WorkerFailure (deadline_exceeded /
+    source_read_deadline_exceeded, not retryable) and is abandoned, as _within describes. A read that
+    ends in time returns what the inner source returned or raises what it raised, unchanged.
+    """
+
+    def __init__(self, inner: RangeSource, deadline: Deadline) -> None:
+        if not callable(getattr(inner, "read", None)):
+            raise TypeError("inner must be a RangeSource")
+        size_bytes = getattr(inner, "size_bytes", None)
+        if isinstance(size_bytes, bool) or not isinstance(size_bytes, int):
+            raise TypeError("inner must be a RangeSource whose size_bytes is an integer")
+        if not isinstance(deadline, Deadline):
+            raise TypeError("deadline must be a Deadline")
+        self._inner = inner
+        self._deadline = deadline
+
+    @property
+    def size_bytes(self) -> int:
+        return self._inner.size_bytes
+
+    def read(self, start: int, length: int) -> bytes:
+        return _within(
+            self._deadline, functools.partial(self._inner.read, start, length), expired=SOURCE_READ_DEADLINE_EXCEEDED
+        )
+
+
 # --- the source ----------------------------------------------------------------------------------
 
 
@@ -165,8 +315,9 @@ def download_source(
 
     The object is read in order, DOWNLOAD_CHUNK_BYTES at a time, only through `source.read()`. A chunk
     whose read fails with a retryable WorkerFailure is read again, DOWNLOAD_EXTRA_ATTEMPTS times at
-    most; every other failure of a read ends the download at once. `on_bytes` is called with the bytes
-    written so far after each chunk.
+    most; every other failure of a read ends the download at once. No read starts once `deadline` has
+    passed, and a read still in flight when it passes is abandoned (_within). `on_bytes` is called with
+    the bytes written so far after each chunk.
 
     Raises WorkerFailure for a failed read, a chunk of another length than asked (the object is not the
     recorded size), a passed deadline and a failed write; the partial file is removed first. Raises
@@ -231,13 +382,16 @@ def _copy_source(
 
 
 def _read_chunk(source: RangeSource, start: int, length: int, deadline: Deadline) -> bytes:
-    """One chunk through the source's own checks, read again only after a failure it calls retryable."""
+    """One chunk through the source's own checks, each read held to the deadline, read again only after
+    a failure it calls retryable."""
     extra_attempts_left = DOWNLOAD_EXTRA_ATTEMPTS
     while True:
         if deadline.expired():
             raise WorkerFailure(DOWNLOAD_DEADLINE_EXCEEDED)
         try:
-            return source.read(start, length)
+            return _within(
+                deadline, functools.partial(source.read, start, length), expired=DOWNLOAD_DEADLINE_EXCEEDED
+            )
         except WorkerFailure as failed:
             if not failed.failure.retryable or extra_attempts_left == 0:
                 raise
@@ -291,6 +445,7 @@ class _Upload:
     key: str
     local_path: Path
     size_bytes: int
+    sha256: str
     content_type: str
 
 
@@ -308,16 +463,28 @@ def upload_generation(
     """Store the generation in `bucket` and return the bytes uploaded: `artifacts` in order, then the manifest.
 
     Every key is `prefix`, `/` and the file's path relative to `output_root`. Each object is one
-    PutObject of the file, whose size on disk must still be the recorded one; a failed request is sent
-    again, UPLOAD_EXTRA_ATTEMPTS times at most, from the start of the file. `on_bytes` is called with
-    the bytes uploaded so far after each object.
+    PutObject of the file, whose size on disk must still be the recorded one and whose bytes, as the
+    client read them, must have the recorded size and SHA-256. A failed request is sent again,
+    UPLOAD_EXTRA_ATTEMPTS times at most, from the start of the file, unless it was refused for good: an
+    answer with an HTTP status from 300 to 499 that is none of PASSING_REFUSAL_STATUSES and carries none
+    of PASSING_REFUSAL_CODES, or parameters the client itself refuses, is final. No request starts once
+    `deadline` has passed; a request still in flight when it passes is abandoned (_within), its file is
+    closed and it is given no more of it; a request that ends after it has passed does not count
+    either. `on_bytes` is called with the bytes uploaded so far after each object.
 
     Raises TypeError or ValueError, before any request, for anything that would put an object where the
     generation does not belong (a wiring bug): a prefix that is no contract object key, a path that is
     no contract rel_path, two files with one path, a file that is not a regular file of the output root
     or has no content type here; a ValueError about a file names its relative path only. Raises
-    WorkerFailure for a file that changed, a passed deadline and an upload that kept failing: the
-    manifest is then not stored.
+    WorkerFailure for a file that changed, a passed deadline, a refusal (not retryable) and an upload
+    that kept failing (retryable): no later object is then put, so the manifest is stored only after
+    every artifact was. With a client that reads a body through before it sends it (botocore does, to
+    sign the payload), a file whose bytes are not the recorded ones is refused before a byte of it is
+    sent, the manifest included; a file that changes between that pass and the sending pass is refused
+    at the end of the sending pass, when its bytes have gone out under a signature that no longer fits
+    them, which a storage that checks the signed payload hash refuses. Only with a client that reads a
+    body once, or a storage that does not check that hash, can a wrong object have been stored before
+    the upload fails.
     """
     if not callable(getattr(client, "put_object", None)):
         raise TypeError("client must be an S3 client")
@@ -342,23 +509,24 @@ def _planned_uploads(prefix: object, output_root: object, artifacts: object, man
     # Resolved once, so that a link below the root is the only thing that can still move a file.
     root = output_root.resolve()
     return [
-        _planned_upload(prefix, root, relative_path, size_bytes)
-        for relative_path, size_bytes in _listed_files(artifacts, manifest)
+        _planned_upload(prefix, root, relative_path, size_bytes, sha256)
+        for relative_path, size_bytes, sha256 in _listed_files(artifacts, manifest)
     ]
 
 
-def _listed_files(artifacts: object, manifest: object) -> list[tuple[str, int]]:
-    """(relative path, recorded size) of every artifact in order, then of the manifest; no path twice."""
+def _listed_files(artifacts: object, manifest: object) -> list[tuple[str, int, str]]:
+    """(relative path, recorded size, recorded SHA-256) of every artifact in order, then of the manifest;
+    no path twice."""
     if isinstance(artifacts, (str, bytes)) or not isinstance(artifacts, Sequence):
         raise TypeError("artifacts must be a sequence of ArtifactFile")
     if not all(isinstance(artifact, ArtifactFile) for artifact in artifacts):
         raise TypeError("artifacts must hold ArtifactFile entries")
     if not isinstance(manifest, ManifestOutput):
         raise TypeError("manifest must be a ManifestOutput")
-    listed = [(artifact.path, artifact.size_bytes) for artifact in artifacts]
-    listed.append((manifest.path, manifest.size_bytes))
+    listed = [(artifact.path, artifact.size_bytes, artifact.sha256) for artifact in artifacts]
+    listed.append((manifest.path, manifest.size_bytes, manifest.sha256))
     seen: set[str] = set()
-    for relative_path, _ in listed:
+    for relative_path, _, _ in listed:
         if not isinstance(relative_path, str) or schema.error_pointers_for_schema(
             {"$ref": _REL_PATH_DEFINITION}, relative_path
         ):
@@ -370,7 +538,7 @@ def _listed_files(artifacts: object, manifest: object) -> list[tuple[str, int]]:
     return listed
 
 
-def _planned_upload(prefix: str, root: Path, relative_path: str, size_bytes: int) -> _Upload:
+def _planned_upload(prefix: str, root: Path, relative_path: str, size_bytes: int, sha256: str) -> _Upload:
     content_type = CONTENT_TYPES.get(os.path.splitext(relative_path)[1])
     if content_type is None:
         raise ValueError(f"{relative_path!r} has no content type this worker uploads")
@@ -382,6 +550,7 @@ def _planned_upload(prefix: str, root: Path, relative_path: str, size_bytes: int
         key=f"{prefix}{KEY_SEPARATOR}{relative_path}",
         local_path=local_path,
         size_bytes=size_bytes,
+        sha256=sha256,
         content_type=content_type,
     )
 
@@ -397,26 +566,52 @@ def _is_regular_file_below(root: Path, local_path: Path) -> bool:
 
 
 def _store(client: Any, bucket: str, upload: _Upload, deadline: Deadline) -> None:
-    """Put one object; a failed request is sent again, UPLOAD_EXTRA_ATTEMPTS times at most."""
+    """Put one object, each request held to the deadline. A failed request is sent again,
+    UPLOAD_EXTRA_ATTEMPTS times at most; one that was refused for good is not."""
     extra_attempts_left = UPLOAD_EXTRA_ATTEMPTS
     while True:
         if deadline.expired():
             raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
         try:
-            _put(client, bucket, upload)
+            _send(client, bucket, upload, deadline)
             return
         except (BotoCoreError, ClientError) as error:
             name = _storage_error_name(error)
+            # `from None`, both times: the client's own error names the endpoint, and must not travel with ours.
+            if _refused_for_good(error):
+                logger.warning("an upload was refused for good and is not sent again: %s", name)
+                raise _upload_refused(name) from None
             if extra_attempts_left == 0:
-                # `from None`: the client's own error names the endpoint, and must not travel with this one.
                 raise _upload_failed(name) from None
             extra_attempts_left -= 1
             logger.warning("an upload failed and is tried again: %s", name)
 
 
-def _put(client: Any, bucket: str, upload: _Upload) -> None:
-    """One PutObject of the file as it is on disk now, opened anew so that every attempt sends it from its start."""
-    with _opened_artifact(upload) as body:
+def _send(client: Any, bucket: str, upload: _Upload, deadline: Deadline) -> None:
+    """One request of the file as it is on disk now, opened anew so that every attempt sends it from
+    its start, and held to the deadline.
+
+    The file is opened and closed here, on the thread that waits, whatever becomes of the request. A
+    request that was abandoned at the deadline goes on for as long as the storage lets it: it must not
+    keep the file open until then, nor the disk space of a scratch file that was removed meanwhile.
+    Closing waits for a local read of the file that request has under way, never for the storage.
+    """
+    with _CheckedBody(_opened_artifact(upload), deadline, upload.size_bytes, upload.sha256) as body:
+        _within(deadline, functools.partial(_put, client, bucket, upload, body), expired=UPLOAD_DEADLINE_EXCEEDED)
+
+
+def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
+    """One PutObject of `body`. It counts only when the bytes the client read of the file are the
+    recorded ones.
+
+    What the body itself refused the client decides first, whatever the client returned or raised: a
+    read after the deadline, then a pass over the file that ended with other bytes than the recorded
+    ones. An error of the client's own comes next, raised again as it is: a pass it had read only a
+    part of says nothing about the file. A request that returned is judged by its last pass. (The step
+    for a read after the deadline is a belt: such a request also ended out of time, and _within's own
+    note of that already makes it the deadline failure.)
+    """
+    try:
         client.put_object(
             Bucket=bucket,
             Key=upload.key,
@@ -424,6 +619,161 @@ def _put(client: Any, bucket: str, upload: _Upload) -> None:
             ContentLength=upload.size_bytes,
             ContentType=upload.content_type,
         )
+    except Exception:
+        if not body.cut_at_deadline and body.found_difference is None:
+            raise
+    if body.cut_at_deadline:
+        raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
+    difference = body.found_difference or body.difference_of_the_last_pass()
+    if difference is not None:
+        raise _artifact_changed(upload, difference)
+
+
+class _BodyCutAtDeadline(Exception):
+    """What an upload's body raises to a storage client that still uses it once its request was cut: the
+    deadline has passed, or the thread that waited for the request has closed the body."""
+
+
+class _BodyNotAsRecorded(Exception):
+    """What an upload's body raises to a storage client where a pass over the file ended with other
+    bytes than the recorded ones, and at every read after that."""
+
+
+class _CheckedBody:
+    """The body of one PutObject: the opened file, read through a count and a SHA-256 of its bytes.
+
+    What a client reads here is what it sends, so a pass over the file tells what was, or would be,
+    handed to the HTTP layer. (One exception: when the storage answers before the body was sent, the
+    client drops what it reads, and the storage's answer alone decides.) A client may read a body more
+    than once (botocore reads it through to sign the request, rewinds it with `seek(0)` and reads it
+    again to send it), so a rewind to the start
+    begins the count and the hash again: what follows it is a whole pass, whatever seek came before
+    (botocore can also measure a body by its end first, and rewinds it then). A seek anywhere else
+    leaves bytes that were read out of order, or never: until the next rewind the body no longer tells
+    what was sent, and its last pass matches nothing. Only read() gives bytes (there is no fileno() and
+    no iteration), and nothing is kept of them but the hash, however large the file is.
+
+    A pass ends where a read that asked for bytes gets none from the file. A pass that ends with another
+    size or SHA-256 than the recorded ones is refused there: that read raises, and so does every read
+    after it. So with a client that reads the body through before it sends it (botocore does, to sign
+    the payload), a file whose bytes are not the recorded ones is refused before a byte of it is sent. A
+    file that changes between that pass and the sending pass is refused at the end of the sending pass:
+    its bytes have gone out by then, under a signature that no longer fits them, which a storage that
+    checks the signed payload hash refuses. Only with a client that reads the body once, or a storage
+    that does not check that hash, can a wrong object have been stored by the time it is refused. A
+    client that stops before the end of the file is judged by its last pass once its request returned.
+
+    Once the deadline has passed read() raises too: the request was abandoned by then (_within), and an
+    abandoned upload must not go on sending. The thread that waited closes the body when it stops
+    waiting, while the request may still run on its helper thread: whatever that thread then asks of the
+    closed body is refused the same way, and nothing else comes of it.
+    """
+
+    def __init__(self, artifact: BinaryIO, deadline: Deadline, size_bytes: int, sha256: str) -> None:
+        self._artifact = artifact
+        self._deadline = deadline
+        self._recorded_bytes = size_bytes
+        self._recorded_sha256 = sha256
+        self._pass_digest = hashlib.sha256()
+        self._pass_bytes = 0
+        self._moved_within_the_pass = False
+        self._cut_at_deadline = False
+        self._found_difference: str | None = None
+        self._closed = False
+
+    @property
+    def cut_at_deadline(self) -> bool:
+        """Whether the client was refused because the deadline had passed, or the body was closed for it."""
+        return self._cut_at_deadline
+
+    @property
+    def found_difference(self) -> str | None:
+        """What told the first pass that ended otherwise from the recorded bytes, in our own words; None
+        when every pass that ended so far ended as recorded."""
+        return self._found_difference
+
+    def difference_of_the_last_pass(self) -> str | None:
+        """What tells the bytes read since the last rewind from the recorded ones, in our own words; None
+        when nothing does. It is the check of a request that returned: it also finds a client that
+        stopped before the end of the file, or moved within it and did not rewind it."""
+        if self._moved_within_the_pass:
+            return "the storage client moved within it, so the bytes it sent are not known"
+        return self._difference_of_the_pass()
+
+    def _difference_of_the_pass(self) -> str | None:
+        if self._pass_bytes != self._recorded_bytes:
+            return f"{self._pass_bytes} bytes of it were read where the manifest records {self._recorded_bytes}"
+        if self._pass_digest.hexdigest() != self._recorded_sha256:
+            return "the bytes read of it do not have the SHA-256 the manifest records"
+        return None
+
+    def read(self, amount: int | None = -1) -> bytes:
+        # The question _within asks of the deadline, so the body stops when its request is abandoned.
+        if self._closed or self._deadline.remaining_s() <= 0:
+            raise self._cut()
+        self._refuse_a_pass_that_ended_otherwise()
+        wanted = -1 if amount is None else amount
+        data = self._of_the_open_file(functools.partial(self._artifact.read, wanted))
+        self._pass_digest.update(data)
+        self._pass_bytes += len(data)
+        if not data and wanted != 0:
+            # The file gave no more bytes: the pass ends here, as recorded or refused.
+            self._found_difference = self._difference_of_the_pass()
+            self._refuse_a_pass_that_ended_otherwise()
+        return data
+
+    def _refuse_a_pass_that_ended_otherwise(self) -> None:
+        if self._found_difference is not None:
+            raise _BodyNotAsRecorded(self._found_difference)
+
+    def _cut(self) -> _BodyCutAtDeadline:
+        """Note that the request was cut, and give what is raised to the client that still uses the body."""
+        self._cut_at_deadline = True
+        return _BodyCutAtDeadline("an upload's body was asked for more after its request was cut at the deadline")
+
+    def _of_the_open_file(self, ask: Callable[[], _Returned]) -> _Returned:
+        """What `ask()` gets of the file. A body that is closed, before the question or under it, is the
+        body of a request that was cut: the client is refused as it is after the deadline."""
+        if self._closed:
+            raise self._cut()
+        try:
+            return ask()
+        except ValueError:
+            # What a file raises that is closed under a read. Any other ValueError is the client's own.
+            if not self._closed:
+                raise
+            raise self._cut() from None
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        position = self._of_the_open_file(functools.partial(self._artifact.seek, offset, whence))
+        if offset == 0 and whence == os.SEEK_SET:
+            # A rewind: what follows is a whole pass again, whatever seek came before it.
+            self._pass_digest = hashlib.sha256()
+            self._pass_bytes = 0
+            self._moved_within_the_pass = False
+        else:
+            self._moved_within_the_pass = True
+        return position
+
+    def tell(self) -> int:
+        return self._of_the_open_file(self._artifact.tell)
+
+    def readable(self) -> bool:
+        return self._of_the_open_file(self._artifact.readable)
+
+    def seekable(self) -> bool:
+        return self._of_the_open_file(self._artifact.seekable)
+
+    def close(self) -> None:
+        # Marked before the file is closed, so that a question asked just as it is closed is known for what it is.
+        self._closed = True
+        self._artifact.close()
+
+    def __enter__(self) -> _CheckedBody:
+        return self
+
+    def __exit__(self, *exception: object) -> None:
+        self.close()
 
 
 def _open_without_following(path: str, flags: int) -> int:
@@ -465,12 +815,51 @@ def _upload_failed(storage_error_name: str) -> WorkerFailure:
     )
 
 
+def _upload_refused(storage_error_name: str) -> WorkerFailure:
+    return WorkerFailure(
+        Failure(
+            "output_write_failed", "upload_refused", False,
+            make_detail(f"an object could not be stored: {storage_error_name}"),
+        )
+    )
+
+
+def _refused_for_good(error: BotoCoreError | ClientError) -> bool:
+    """Whether sending the same PutObject again cannot change how it ended: the client refused its
+    parameters before it sent anything, or the storage answered with a redirect or a client error that
+    is none of the passing ones. An answer of an unknown shape counts as passing: sending an object
+    again for nothing costs less than giving up a job that could have ended well."""
+    if isinstance(error, ParamValidationError):
+        return True
+    if not isinstance(error, ClientError):
+        # No answer of the storage at all: a connection that failed or timed out, which passes.
+        return False
+    status = _answered_status(error)
+    if status is None or not HTTP_FIRST_REDIRECT <= status <= HTTP_LAST_CLIENT_ERROR:
+        return False
+    return status not in PASSING_REFUSAL_STATUSES and _error_code(error) not in PASSING_REFUSAL_CODES
+
+
+def _answered_status(error: ClientError) -> int | None:
+    """The HTTP status of the storage's error answer; None when the answer names none that is a number."""
+    metadata = error.response.get("ResponseMetadata")
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, Mapping) else None
+    if isinstance(status, bool) or not isinstance(status, int):
+        return None
+    return status
+
+
+def _error_code(error: ClientError) -> str | None:
+    """The error code of the storage's error answer; None when the answer names none."""
+    code = error.response.get("Error", {}).get("Code")
+    return code if isinstance(code, str) and code else None
+
+
 def _storage_error_name(error: BotoCoreError | ClientError) -> str:
     """The error's class name and, for an answer of the storage, its error code: never the error's own
     text, which names the endpoint and the object."""
     name = type(error).__name__
-    if isinstance(error, ClientError):
-        code = error.response.get("Error", {}).get("Code")
-        if isinstance(code, str) and code:
-            name = f"{name} {code}"
+    code = _error_code(error) if isinstance(error, ClientError) else None
+    if code is not None:
+        name = f"{name} {code}"
     return make_detail(name)

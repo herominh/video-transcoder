@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -36,12 +37,13 @@ from core.failure import Diagnostic, Failure, WorkerFailure
 from core import profile as profile_module
 from core.job import runner as runner_module
 from core.job import storage as storage_module
+from core.job.ffmpeg_version import forget_installed_ffmpeg_version, installed_ffmpeg_version
 from core.job.runner import JobRunner
 from core.package import reserve_package
 from core.probe import PreflightResult
 from core.profile import PILOT_PROFILE, MediaProfile, profile_digest
 from core.protocol import files, pipeline
-from core.protocol.handler import ClaimedExecution, Runtime, handle
+from core.protocol.handler import Runtime, handle
 from core.protocol.messages import ExecutionIdentity
 from core.protocol.outbox import SealedMessage, SelfCheckFailed
 from core.protocol.settings import StorageProfile, WorkerSettings
@@ -60,6 +62,7 @@ from tests.contract.v2_support import (
     RUNTIME_ID,
     FakeClock,
     FakeTransport,
+    hub_error_answer,
     modified_fixture,
     signed_answer,
     signed_carrier,
@@ -105,6 +108,10 @@ CANARY = "CANARYtextOfAnUnexpectedError0123"
 CAUSE_CANARY = "CAUSEcanaryOfTheErrorBehindIt4567"
 PATH_CANARY = "/CANARY/path/of/a/leftover"
 HTTP_FORBIDDEN = 403
+HTTP_INTERNAL_SERVER_ERROR = 500
+# How long a storage stand-in that never answers holds a request before it lets it go by itself, so that
+# a regression fails a test instead of hanging the suite; far longer than any deadline a test sets.
+HANG_RELEASE_S = 20.0
 HTTP_SERVER_ERROR = 500
 STAGES = ("probing", "downloading", "transcoding", "finalizing", "uploading")
 # The function of core.job.runner whose failure ends each stage.
@@ -130,6 +137,9 @@ POSTS_THE_ALLOWANCE_HOLDS_WHEN_SLOW = 11  # ten take 29 s, the eleventh reaches 
 # A wall-time limit all the reports of one job, each that slow, would outlast.
 WALL_TIME_A_SLOW_HUB_WOULD_OUTLAST_S = 35
 CLIENT_CANARY = "CANARYendpointInAClientError.example.invalid/bucket?X-Amz-Signature=0123"
+WALL_TIME_POINTER = "/limits/max_wall_time_ms"
+HTTP_UNAVAILABLE = 503
+PROGRESS_KIND = "transcode.progress"
 
 
 def _video(index: int = 0, **changes: Any) -> VideoStreamFacts:
@@ -305,9 +315,23 @@ class StandInStages:
         return ThumbnailResult(artifact=_artifact(output_root, "thumbnail.jpg", "thumbnail", picture), diagnostic=None)
 
 
+class FfmpegVersionAsked:
+    """A stand-in of the ffmpeg version check: it answers FFMPEG_VERSION and records the deadline of each ask."""
+
+    def __init__(self) -> None:
+        self.deadlines: list[Deadline] = []
+
+    def __call__(self, deadline: Deadline) -> str:
+        self.deadlines.append(deadline)
+        return FFMPEG_VERSION
+
+
 class Harness:
     """One execution ready to run: the fixtures' dispatch and grant, a source object in the fake storage,
-    the stand-in stages, and the Hub's side to judge what comes back."""
+    the stand-in stages, and the Hub's side to judge what comes back.
+
+    The execution's start began when the harness's clock read zero and its claim took no time, so the
+    dispatch's whole wall time is left until a test advances that clock before it runs."""
 
     def __init__(
         self,
@@ -317,7 +341,7 @@ class Harness:
         encrypted: bool = True,
         request_changes: Mapping[str, Any] | None = None,
         facts: SourceFacts | None = None,
-        ffmpeg_version: Callable[[], str] = lambda: FFMPEG_VERSION,
+        ffmpeg_version: Callable[[Deadline], str] = lambda deadline: FFMPEG_VERSION,
         profile: MediaProfile = PILOT_PROFILE,
         settings: WorkerSettings = SETTINGS,
         seconds_per_post: float = 0.0,
@@ -373,9 +397,11 @@ class Harness:
         """Make the execution's wall-time deadline pass on the test's clock, not on the real one."""
         clock = self.clock
 
-        class DeadlineOnTheFakeClock:
-            @staticmethod
-            def after_ms(milliseconds: int) -> ClockDeadline:
+        class DeadlineOnTheFakeClock(Deadline):
+            """A Deadline where the runner names one; the one it counts from a duration passes on the test's clock."""
+
+            @classmethod
+            def after_ms(cls, milliseconds: int) -> ClockDeadline:
                 return ClockDeadline(clock, milliseconds / 1000)
 
         monkeypatch.setattr(runner_module, "Deadline", DeadlineOnTheFakeClock)
@@ -404,7 +430,7 @@ class Harness:
     def regrant(self, **changes: Any) -> None:
         """Hand the runner the fixtures' grant with some fields changed, as only a bug before it could."""
         grant = dataclasses.replace(self.claimed.grant, **changes)
-        self.claimed = ClaimedExecution(dispatch=self.claimed.dispatch, grant=grant, runtime_id=self.claimed.runtime_id)
+        self.claimed = dataclasses.replace(self.claimed, grant=grant)
 
     @property
     def progress(self) -> list[dict[str, Any]]:
@@ -748,6 +774,211 @@ def test_run_when_the_wall_time_has_passed_should_fail_with_deadline_exceeded(tm
     assert harness.left_in_scratch == []
 
 
+# --- the start's wall time, of which the claim has already taken some -------------------------------
+
+
+def test_run_when_the_claim_took_part_of_the_wall_time_should_fail_a_stage_that_outlasts_the_rest(
+    tmp_path, monkeypatch
+):
+    # Arrange: a start of 100 s on the test's clock whose claim took 90 s of them; the preflight takes 11 s
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 100_000})
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    harness.clock.advance(90)
+    harness.stages.after_preflight = lambda: harness.clock.advance(11)
+
+    # Act
+    result = harness.result()
+
+    # Assert: the stages had the 10 s the claim left, not the dispatch's whole 100 s
+    assert _error_of(result) == ("deadline_exceeded", "download_deadline_exceeded", False, "downloading")
+    assert harness.stages.encodes == []
+
+
+def test_run_when_the_claim_took_part_of_the_wall_time_should_complete_a_job_that_fits_the_rest(
+    tmp_path, monkeypatch
+):
+    # Arrange: the same start; the preflight takes 9 s of the 10 s the claim left
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 100_000})
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    harness.clock.advance(90)
+    harness.stages.after_preflight = lambda: harness.clock.advance(9)
+
+    # Act
+    result = harness.result()
+
+    # Assert
+    assert result["message_kind"] == COMPLETED_KIND
+    assert MANIFEST_NAME in harness.uploaded
+
+
+def test_run_when_the_claim_took_part_of_the_wall_time_should_give_every_stage_a_deadline_that_much_sooner(
+    tmp_path, monkeypatch
+):
+    # Arrange: 600 s of wall time, 90 s of them gone on the runtime's clock before the run
+    wall_time_ms, spent_s = 600_000, 90
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: wall_time_ms})
+    harness.clock.advance(spent_s)
+    started = time.monotonic()
+
+    # Act
+    harness.run()
+    ended = time.monotonic()
+
+    # Assert
+    left_s = wall_time_ms / 1000 - spent_s
+    stages = harness.stages
+    deadlines = [*stages.preflight_deadlines, *(call.deadline for call in stages.encodes), *stages.thumbnail_deadlines]
+    assert len(deadlines) == 5
+    assert len({deadline.expires_at for deadline in deadlines}) == 1
+    assert started + left_s <= deadlines[0].expires_at <= ended + left_s
+
+
+@pytest.mark.parametrize(
+    "spent_before_the_run_s",
+    [
+        pytest.param(5.0, id="exactly-the-wall-time"),
+        pytest.param(65.0, id="a-minute-more-than-the-wall-time"),
+        pytest.param(4.9996, id="all-but-less-than-a-millisecond"),
+    ],
+)
+def test_run_when_the_starts_wall_time_is_spent_should_fail_before_any_client_read_directory_or_report(
+    tmp_path, monkeypatch, spent_before_the_run_s
+):
+    # Arrange: a start of 5 s whose claim took them all
+    ffmpeg_version = FfmpegVersionAsked()
+    harness = Harness(
+        tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 5_000}, ffmpeg_version=ffmpeg_version
+    )
+    harness.clock.advance(spent_before_the_run_s)
+
+    # Act: the runner seals the result only if the worker's own validator accepts it, and result() returns
+    # it once the Hub's validator accepted the signed bytes too
+    result = harness.result()
+
+    # Assert: typed, at no stage, before a client, a read, a put, a directory, a tool or a report; and
+    # worth another dispatch, because nothing was done and only the claim took the time
+    assert result["message_kind"] == FAILED_KIND
+    assert _error_of(result) == ("deadline_exceeded", "wall_time_spent_before_start", True, None)
+    assert harness.access_profiles == []
+    assert harness.s3.request_count == 0
+    assert ffmpeg_version.deadlines == []
+    assert harness.stages.preflight_deadlines == [] and harness.stages.encodes == []
+    assert harness.left_in_scratch == []
+    assert harness.progress == [] and harness.transport.calls == []
+    assert "encoder" not in result and "source" not in result
+
+
+def test_run_when_the_starts_wall_time_is_spent_should_make_no_scratch_directory(tmp_path, monkeypatch):
+    # Arrange: note every directory the runner asks for
+    made: list[object] = []
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 5_000})
+    harness.clock.advance(5.0)
+    monkeypatch.setattr(runner_module.tempfile, "mkdtemp", lambda **named: made.append(named))
+
+    # Act
+    result = harness.result()
+
+    # Assert
+    assert _error_of(result)[:2] == ("deadline_exceeded", "wall_time_spent_before_start")
+    assert made == []
+
+
+def test_run_when_a_whole_millisecond_of_the_wall_time_is_left_should_still_run(tmp_path, monkeypatch):
+    # Arrange: a start of 5 s on the test's clock with about 2 ms left; nothing takes time on that clock
+    harness = Harness(tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 5_000})
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    harness.clock.advance(4.998)
+
+    # Act
+    result = harness.result()
+
+    # Assert
+    assert result["message_kind"] == COMPLETED_KIND
+
+
+def test_handle_when_the_claim_took_most_of_the_wall_time_should_leave_the_runner_only_the_rest(
+    tmp_path, monkeypatch
+):
+    # Arrange: one whole start of 100 s on the test's clock: the Hub refuses the first claim for 90 s, then
+    # grants; the preflight takes 11 s
+    harness = Harness(tmp_path, monkeypatch)
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    harness.stages.after_preflight = lambda: harness.clock.advance(11)
+    request = modified_fixture(
+        REQUEST_ENCRYPTED,
+        {"/source/size_bytes": len(SOURCE_OBJECT), "/profile": dict(PILOT_TRIPLE), WALL_TIME_POINTER: 100_000},
+    )
+    transport = FakeTransport(clock=harness.clock)
+    transport.route(
+        CLAIM_URL,
+        hub_error_answer(HTTP_UNAVAILABLE, "service_unavailable", retryable=True, retry_after_s=90),
+        signed_answer(files.read_bytes(GRANT_ENCRYPTED), HUB_KEY),
+    )
+    transport.route(CALLBACK_URL, then=DELIVERED)
+    runtime = Runtime(
+        settings=SETTINGS,
+        transport=transport,
+        clock=harness.clock,
+        monotonic=harness.clock.monotonic,
+        sleep=harness.clock.sleep,
+        new_uuid=uuid_source(first=RUNTIME_ID),
+    )
+
+    # Act
+    output = handle(signed_carrier(request, HUB_KEY), runtime=runtime, run_job=harness.runner.run)
+
+    # Assert: the stages had 10 s, and the result, sealed after the start's end, is returned and not posted
+    result = accepted_bytes_by_the_hub(
+        output["vh_message"].encode("ascii"), output["vh_signature"], harness.claimed, now=harness.clock()
+    )
+    posted_kinds = {json.loads(call.body)["message_kind"] for call in transport.calls_to(CALLBACK_URL)}
+    assert harness.clock.waits == [90.0]
+    assert _error_of(result) == ("deadline_exceeded", "download_deadline_exceeded", False, "downloading")
+    assert posted_kinds == {PROGRESS_KIND}
+
+
+def test_run_when_it_asks_for_the_ffmpeg_version_should_hand_it_the_deadline_every_stage_is_held_to(
+    tmp_path, monkeypatch
+):
+    # Arrange
+    ffmpeg_version = FfmpegVersionAsked()
+    harness = Harness(tmp_path, monkeypatch, ffmpeg_version=ffmpeg_version)
+
+    # Act
+    result = harness.result()
+
+    # Assert: asked once, under the execution's own deadline
+    (asked_under,) = ffmpeg_version.deadlines
+    assert result["message_kind"] == COMPLETED_KIND
+    assert isinstance(asked_under, Deadline)
+    assert asked_under is harness.stages.preflight_deadlines[0]
+
+
+def test_run_when_the_wall_time_ends_before_the_ffmpeg_version_is_known_should_fail_retryable_before_any_request(
+    tmp_path, monkeypatch
+):
+    # Arrange: the real version check with no version remembered, in a start of 5 s on the test's clock
+    # whose time runs out just as the check is asked
+    forget_installed_ffmpeg_version()
+
+    def asked_too_late(deadline: Deadline) -> str:
+        harness.clock.advance(6)
+        return installed_ffmpeg_version(deadline)
+
+    harness = Harness(
+        tmp_path, monkeypatch, request_changes={WALL_TIME_POINTER: 5_000}, ffmpeg_version=asked_too_late
+    )
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+
+    # Act: result() returns once the Hub's validator accepted the signed bytes
+    result = harness.result()
+
+    # Assert
+    assert _error_of(result) == ("deadline_exceeded", "ffmpeg_version_deadline_exceeded", True, None)
+    assert harness.s3.request_count == 0
+    assert "encoder" not in result
+
+
 # --- settled before anything is read ----------------------------------------------------------------
 
 
@@ -883,6 +1114,10 @@ def test_run_when_a_storage_client_cannot_be_made_should_tell_the_errors_class_a
         pytest.param(OSError(errno.ENOMEM, "Cannot allocate memory"), "OSError (ENOMEM)", id="no-system-memory-left"),
         pytest.param(MemoryError(CLIENT_CANARY), "MemoryError", id="no-python-memory-left"),
         pytest.param(OSError(), "OSError (unknown)", id="an-os-error-without-an-errno"),
+        pytest.param(
+            OSError(errno.EAGAIN, "Resource temporarily unavailable"), "BlockingIOError (EAGAIN)",
+            id="a-subclass-of-os-error",
+        ),
     ],
 )
 def test_run_when_a_storage_client_start_meets_a_passing_shortage_should_fail_retryable_before_any_request(
@@ -1241,7 +1476,9 @@ def test_run_when_an_unexpected_error_comes_before_any_stage_should_still_return
     tmp_path, monkeypatch
 ):
     # Arrange: the configured ffmpeg names itself with text no result can carry
-    harness = Harness(tmp_path, monkeypatch, ffmpeg_version=lambda: "see https://ffmpeg.example.invalid/version")
+    harness = Harness(
+        tmp_path, monkeypatch, ffmpeg_version=lambda deadline: "see https://ffmpeg.example.invalid/version"
+    )
 
     # Act
     result = harness.result()
@@ -1260,10 +1497,52 @@ def test_run_when_the_storage_refuses_the_generation_should_fail_at_uploading_wi
     # Act
     result = harness.result()
 
-    # Assert
-    assert _error_of(result) == ("output_write_failed", "upload_failed", True, "uploading")
+    # Assert: final, so that the Hub does not dispatch an encode again for a write that is never allowed,
+    # and the refused object was sent once
+    assert _error_of(result) == ("output_write_failed", "upload_refused", False, "uploading")
+    assert len(harness.s3.put_calls) == 1
     assert harness.s3.stored == []
     assert result["source"]["bytes_read"] == len(SOURCE_OBJECT)
+
+
+def test_run_when_the_storage_keeps_failing_a_write_for_now_should_fail_retryable_at_uploading(harness):
+    # Arrange: the storage answers every write with an error of its own
+    failing_for_now = client_error("InternalError", HTTP_INTERNAL_SERVER_ERROR, "PutObject")
+    harness.s3.fail_put(1, failing_for_now, and_every_later_one=True)
+
+    # Act
+    result = harness.result()
+
+    # Assert: worth another dispatch, and the manifest was never stored
+    assert _error_of(result) == ("output_write_failed", "upload_failed", True, "uploading")
+    assert harness.s3.stored == []
+
+
+def test_run_when_a_read_of_the_preflight_never_returns_should_fail_at_probing_once_the_wall_time_ends(harness):
+    # Arrange: a start with a fifth of a second left, and a storage that takes the preflight's read and
+    # never answers it
+    never_answered = threading.Event()
+    answer = harness.s3.get_object
+
+    def get_object_that_hangs(**request):
+        never_answered.wait(HANG_RELEASE_S)
+        return answer(**request)
+
+    harness.s3.get_object = get_object_that_hangs
+    claimed = dataclasses.replace(harness.claimed, wall_time_ends_at=harness.clock.monotonic() + 0.2)
+    started = time.monotonic()
+
+    # Act
+    try:
+        sealed = harness.runner.run(claimed, harness.runtime)
+    finally:
+        never_answered.set()
+
+    # Assert: the read in flight was given up at the deadline, not waited out
+    result = accepted_by_the_hub(sealed, claimed, now=harness.clock())
+    assert _error_of(result) == ("deadline_exceeded", "source_read_deadline_exceeded", False, "probing")
+    assert time.monotonic() - started < HANG_RELEASE_S
+    assert harness.stages.encodes == [] and harness.s3.stored == []
 
 
 def test_run_when_the_manifest_it_wrote_fails_its_self_check_should_fail_and_upload_nothing(harness, monkeypatch):
@@ -1342,6 +1621,51 @@ def test_run_when_an_argument_has_the_wrong_type_should_raise_type_error(harness
 
 
 @pytest.mark.parametrize(
+    "wall_time_ends_at",
+    [pytest.param(True, id="a-bool"), pytest.param("3600.0", id="text"), pytest.param(None, id="none")],
+)
+def test_claimed_execution_when_the_end_of_its_wall_time_is_no_number_should_raise_type_error(
+    harness, wall_time_ends_at
+):
+    # Arrange
+    claimed = harness.claimed
+
+    # Act and Assert
+    with pytest.raises(TypeError):
+        dataclasses.replace(claimed, wall_time_ends_at=wall_time_ends_at)
+
+
+@pytest.mark.parametrize(
+    "wall_time_ends_at",
+    [
+        pytest.param(float("nan"), id="not-a-number"),
+        pytest.param(float("inf"), id="infinite"),
+        pytest.param(float("-inf"), id="minus-infinite"),
+    ],
+)
+def test_claimed_execution_when_the_end_of_its_wall_time_is_not_finite_should_raise_value_error(
+    harness, wall_time_ends_at
+):
+    # Arrange
+    claimed = harness.claimed
+
+    # Act and Assert
+    with pytest.raises(ValueError):
+        dataclasses.replace(claimed, wall_time_ends_at=wall_time_ends_at)
+
+
+@pytest.mark.parametrize("wall_time_ends_at", [3600, 3600.5, -2.5], ids=["a-whole-number", "a-fraction", "negative"])
+def test_claimed_execution_when_the_end_of_its_wall_time_is_a_finite_number_should_hold_it(
+    harness, wall_time_ends_at
+):
+    # Act
+    claimed = dataclasses.replace(harness.claimed, wall_time_ends_at=wall_time_ends_at)
+
+    # Assert
+    assert claimed.wall_time_ends_at == wall_time_ends_at
+
+
+@pytest.mark.parametrize(
     "arguments",
     [
         pytest.param({"job_settings": {"image_digest": IMAGE_DIGEST}}, id="settings-as-a-mapping"),
@@ -1356,7 +1680,7 @@ def test_runner_when_built_with_an_argument_of_the_wrong_type_should_raise_type_
         "job_settings": job_settings(tmp_path),
         "source_client_factory": lambda access: FakeS3(),
         "output_client_factory": lambda access: FakeS3(),
-        "ffmpeg_version": lambda: "7",
+        "ffmpeg_version": lambda deadline: "7",
     }
     valid.update(arguments)
 

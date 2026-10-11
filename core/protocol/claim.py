@@ -17,12 +17,18 @@ in front of the Hub says while it cannot reach the claim core (a restart), so th
 transport, and claiming again is safe, because the Hub gives one runtime the same grant again (README
 15.2, row 3). It claims again only after such a failure in transport or a retryable `hub.error`, with the
 same runtime id and token and a new message id and send time, never at or after the dispatch's
-`claim.expires_at`, and for no longer than CLAIM_PATIENCE_S: a billed runtime does not wait out a
-bootstrap that can last an hour.
+`claim.expires_at`, for no longer than CLAIM_PATIENCE_S (a billed runtime does not wait out a bootstrap
+that can last an hour), and never at or after the instant its start's wall time ends
+(`wall_time_ends_at`: the handler counts the dispatch's wall-time limit from the moment the start
+began). The claiming ends at the earliest of the three, so a dispatch whose wall-time limit is shorter
+than the patience stops claiming at its limit. Building and sealing a claim takes time, so the time
+left is read twice for each: before the claim is built, and again once it is sealed, immediately before
+the POST. A claim whose time ran out in between is not sent, and it counts neither as a claim nor as a
+failure in transport: the claiming ends as when no time was left to build it.
 The contract allows the retries, it does not require them; giving up earlier reports the same outcome as
-the expiry would. The expiry is judged on the wall clock, as the contract states it; the patience is
-measured on a monotonic reading, so a wall clock that is stepped while the Hub does not answer cannot
-stretch it.
+the expiry would. The expiry is judged on the wall clock, as the contract states it; the patience and
+the wall time are measured on a monotonic reading, so a wall clock that is stepped while the Hub does not
+answer cannot stretch either.
 
 The body of a claim and of a claim response is never logged, stored or put in an error, and the media key
 of a grant exists only inside the returned Grant, whose repr() does not show it (README 15.1, rules 4, 5).
@@ -31,6 +37,7 @@ of a grant exists only inside the returned Grant, whose repr() does not show it 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
@@ -39,7 +46,7 @@ from . import messages
 from .dispatch import AcceptedDispatch
 from .inbound import NotAccepted, accept_hub_error, accept_signed
 from .messages import ExecutionIdentity
-from .outbox import seal_message
+from .outbox import SealedMessage, seal_message
 from .registry import MessageKind, load_registry
 from .settings import WorkerSettings
 from .transport import HttpAnswer, Transport, TransportFailed
@@ -97,26 +104,41 @@ def claim_execution(
     monotonic: Callable[[], float],
     sleep: Callable[[float], None],
     new_message_id: Callable[[], str],
+    wall_time_ends_at: float,
 ) -> Grant | Unclaimed:
     """Claim the dispatch for this runtime.
 
     `clock` gives the aware current time, `monotonic` seconds that only ever move forward, and `sleep` waits
-    that many seconds.
+    that many seconds. `wall_time_ends_at` is the reading of `monotonic`, a finite number, at which the
+    start's wall time ends (ValueError otherwise, before any claim): no claim is sent at or after it.
     """
-    patience_ends_at = monotonic() + CLAIM_PATIENCE_S
+    if (
+        isinstance(wall_time_ends_at, bool)
+        or not isinstance(wall_time_ends_at, (int, float))
+        or not math.isfinite(wall_time_ends_at)
+    ):
+        raise ValueError("wall_time_ends_at must be a finite reading of the monotonic clock")
+    claiming_ends_at = min(monotonic() + CLAIM_PATIENCE_S, wall_time_ends_at)
 
     def time_left_s(now: datetime) -> float:
-        return min((dispatch.claim_expires_at - now).total_seconds(), patience_ends_at - monotonic())
+        return min((dispatch.claim_expires_at - now).total_seconds(), claiming_ends_at - monotonic())
 
     last_refusal_code: str | None = None
     attempt = 0
     while True:
         now = clock()
+        if time_left_s(now) <= 0:
+            break
+        wait_s = float(CLAIM_BACKOFF_S[min(attempt, len(CLAIM_BACKOFF_S) - 1)])
+        sealed = _sealed_claim(dispatch, settings, runtime_id, now, new_message_id())
+        # Building and sealing took time (milliseconds, more on a starved host), so both ends are read
+        # again, immediately before the POST. A claim whose time ran out meanwhile is not sent: the
+        # claiming ends here as it does above, and what was sealed was neither a claim nor a failure.
+        now = clock()
         left_s = time_left_s(now)
         if left_s <= 0:
             break
-        wait_s = float(CLAIM_BACKOFF_S[min(attempt, len(CLAIM_BACKOFF_S) - 1)])
-        answer = _send(dispatch, settings, runtime_id, transport, now, new_message_id(), left_s)
+        answer = _send(dispatch, settings, transport, sealed, left_s)
         outcome = None if answer is None else _judge(answer, dispatch, settings, runtime_id, clock())
         if isinstance(outcome, (Grant, Unclaimed)):
             return outcome
@@ -131,24 +153,24 @@ def claim_execution(
     if last_refusal_code is not None:
         logger.info("claim of dispatch %s ended refused: %s", dispatch_id, last_refusal_code)
         return Unclaimed(CAUSE_REFUSED, last_refusal_code)
-    if attempt == 0:
-        # The contract has one cause for both; the log tells a late start from a network fault.
+    # The contract has one cause for all three; the log tells a late start, and a start whose own time
+    # was spent before it could claim, from a network fault.
+    if attempt > 0:
+        logger.info("claim of dispatch %s ended unreachable after %d claims", dispatch_id, attempt)
+    elif dispatch.claim_expires_at <= now:
         logger.info("claim of dispatch %s: its bootstrap had expired before the first claim, nothing was sent", dispatch_id)
     else:
-        logger.info("claim of dispatch %s ended unreachable after %d claims", dispatch_id, attempt)
+        logger.info(
+            "claim of dispatch %s: the start's wall time was spent before the first claim, nothing was sent",
+            dispatch_id,
+        )
     return Unclaimed(CAUSE_UNREACHABLE)
 
 
-def _send(
-    dispatch: AcceptedDispatch,
-    settings: WorkerSettings,
-    runtime_id: str,
-    transport: Transport,
-    now: datetime,
-    message_id: str,
-    left_s: float,
-) -> HttpAnswer | None:
-    """One claim request, `left_s` seconds before the claiming ends; None when it got no answer."""
+def _sealed_claim(
+    dispatch: AcceptedDispatch, settings: WorkerSettings, runtime_id: str, now: datetime, message_id: str
+) -> SealedMessage:
+    """One claim of this runtime, sent at `now`: built, self-checked and signed, not yet posted."""
     claim = messages.claim(
         protocol_version=dispatch.protocol_version,
         message_id=message_id,
@@ -159,7 +181,14 @@ def _send(
         runtime_id=runtime_id,
     )
     context = messages.worker_sender_context(MessageKind.TRANSCODE_CLAIM, dispatch.identity, settings=settings, now=now)
-    sealed = seal_message(claim, context, settings=settings)
+    return seal_message(claim, context, settings=settings)
+
+
+def _send(
+    dispatch: AcceptedDispatch, settings: WorkerSettings, transport: Transport, sealed: SealedMessage, left_s: float
+) -> HttpAnswer | None:
+    """Post one sealed claim, `left_s` seconds (more than none) before the claiming ends, as read
+    immediately before this call; None when it got no answer."""
     timeout_s = max(CLAIM_MIN_REQUEST_TIMEOUT_S, min(CLAIM_REQUEST_TIMEOUT_S, left_s))
     largest_answer = max(
         load_registry().max_bytes(MessageKind.TRANSCODE_CLAIM_GRANTED), load_registry().max_bytes(MessageKind.HUB_ERROR)

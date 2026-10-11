@@ -8,6 +8,11 @@ its self-check is a wiring bug and is never sent.
 A result or a `transcode.unclaimed` report travels two ways with the same bytes: deliver() posts it to
 the callback address (best effort: the provider's job output is the path the Hub can always read), and
 runpod_output() is the value the handler returns. A claim travels neither way (README 15.1, rule 5).
+
+A delivery can be held to an instant of the caller's monotonic clock (`give_up_at`): the handler gives
+the one at which its start's wall time ends, so no callback attempt starts at or after it (one that
+started just before it may take its least time-out past it). A delivery that stops there costs nothing
+but time: the job output carries the same signed bytes.
 """
 
 from __future__ import annotations
@@ -33,6 +38,9 @@ MESSAGE_MEMBER = "vh_message"
 SIGNATURE_MEMBER = "vh_signature"
 CALLBACK_ATTEMPTS = 3
 CALLBACK_TIMEOUT_S = 10.0
+# A POST that starts with less time left than this before the delivery gives up still gets this long: it
+# started before the end.
+CALLBACK_MIN_TIMEOUT_S = 1.0
 CALLBACK_BACKOFF_S = (1, 2)
 _HTTP_SUCCESS = range(200, 300)
 # What the handler returns as the job's output, and what goes to the callback address.
@@ -87,6 +95,8 @@ def deliver(
     sleep: Callable[[float], None],
     attempts: int = CALLBACK_ATTEMPTS,
     timeout_s: float = CALLBACK_TIMEOUT_S,
+    give_up_at: float | None = None,
+    monotonic: Callable[[], float] | None = None,
 ) -> bool:
     """POST the message to the callback address; True when the Hub answered 2xx. It never raises for a failed delivery.
 
@@ -94,21 +104,39 @@ def deliver(
     delivery is not sent again after a gateway's 502, 503 or 504 without a `hub.error`: the job output
     carries the same bytes, so the Hub loses nothing but time. `timeout_s` is each POST's time-out, a
     positive finite number of seconds (ValueError otherwise, before any POST).
+
+    `give_up_at` and `monotonic` come together or not at all (ValueError otherwise, before any POST):
+    `monotonic` gives seconds that only ever move forward, and `give_up_at` is the reading of it, a finite
+    number, at which the delivery ends. With them no attempt starts at or after that instant (the first
+    included: then nothing is sent), no wait between attempts is started that would end at or after it,
+    and each POST's time-out is the smaller of `timeout_s` and the time left, where less time left than
+    CALLBACK_MIN_TIMEOUT_S counts as that much: an attempt that started before the end gets that long,
+    never more than `timeout_s`. Without them nothing bounds the delivery but its attempts.
     """
     if sealed.kind not in _CALLBACK_KINDS:
         raise ValueError(f"a {sealed.kind.value} never goes to the callback address")
     if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not 0 < timeout_s < math.inf:
         raise ValueError("timeout_s must be a positive finite number of seconds")
+    time_left_s = _time_left(give_up_at, monotonic)
     hub_error_context = messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
     for attempt in range(attempts):
         if attempt > 0:
-            sleep(float(CALLBACK_BACKOFF_S[min(attempt, len(CALLBACK_BACKOFF_S)) - 1]))
+            wait_s = float(CALLBACK_BACKOFF_S[min(attempt, len(CALLBACK_BACKOFF_S)) - 1])
+            if time_left_s is not None and wait_s >= time_left_s():
+                return _stopped_for_want_of_time(sealed)
+            sleep(wait_s)
+        post_timeout_s = timeout_s
+        if time_left_s is not None:
+            left_s = time_left_s()
+            if left_s <= 0:
+                return _stopped_for_want_of_time(sealed)
+            post_timeout_s = min(timeout_s, max(CALLBACK_MIN_TIMEOUT_S, left_s))
         try:
             answer = transport.post(
                 settings.callback_url,
                 sealed.body,
                 sealed.signature,
-                timeout_s=timeout_s,
+                timeout_s=post_timeout_s,
                 max_body_bytes=load_registry().max_bytes(MessageKind.HUB_ERROR),
             )
         except TransportFailed as failure:
@@ -122,4 +150,26 @@ def deliver(
             logger.info("callback of a %s refused: status %d, code %s", sealed.kind.value, answer.status, code)
             return False
         logger.info("callback of a %s refused for now: %s", sealed.kind.value, error["code"])
+    return False
+
+
+def _time_left(
+    give_up_at: float | None, monotonic: Callable[[], float] | None
+) -> Callable[[], float] | None:
+    """How many seconds a delivery has until `give_up_at`, to be asked whenever it matters; None when
+    nothing bounds the delivery. ValueError unless both are given or neither, and unless `give_up_at` is
+    a finite number."""
+    if give_up_at is None and monotonic is None:
+        return None
+    if give_up_at is None or monotonic is None:
+        raise ValueError("give_up_at and monotonic are given together or not at all")
+    if isinstance(give_up_at, bool) or not isinstance(give_up_at, (int, float)) or not math.isfinite(give_up_at):
+        raise ValueError("give_up_at must be a finite reading of the monotonic clock")
+    ends_at, read_clock = give_up_at, monotonic
+    return lambda: ends_at - read_clock()
+
+
+def _stopped_for_want_of_time(sealed: SealedMessage) -> bool:
+    """A delivery that ends because its time is spent: logged once by the message's kind, and not delivered."""
+    logger.info("callback of a %s stopped: no time is left for it", sealed.kind.value)
     return False

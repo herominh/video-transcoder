@@ -4,12 +4,15 @@ seal_message() encodes a built message, validates those exact bytes under the se
 them: a message its own validator refuses raises SelfCheckFailed and is never sealed. runpod_output() is
 the job's output carrier of a result or an unclaimed report; deliver() posts the same bytes to the
 configured callback address, sends again only after a transport failure or a retryable `hub.error`, and
-never raises for a delivery that failed. A claim travels neither way.
+never raises for a delivery that failed. A claim travels neither way. Given the instant it must give up
+at, deliver() starts neither an attempt nor a wait that would reach it, and shortens each POST's
+time-out to the time left; given none, it behaves as it always did.
 
 The transport and the clock are the test's own (v2_support): no network, no real waiting.
 """
 
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Iterator
 
@@ -17,6 +20,7 @@ import pytest
 
 from core.failure import Failure
 from core.protocol import files, messages, schema, signing
+from core.protocol import outbox as outbox_module
 from core.protocol.context import TrustedContext
 from core.protocol.messages import DispatchIdentity, ExecutionIdentity
 from core.protocol.outbox import (
@@ -67,6 +71,13 @@ HTML_BODY = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
 NO_ANSWER = TransportFailed("ReadTimeout")
 DELIVERED = HttpAnswer(HTTP_OK, b"", None)
 RETRY_LATER = hub_error_answer(HTTP_UNAVAILABLE, "service_unavailable", retryable=True)
+# What a delivery waits before its second and its third attempt, and the least time-out of a POST that
+# started before the delivery's end.
+FIRST_WAIT_S = 1.0
+SECOND_WAIT_S = 2.0
+LEAST_POST_TIMEOUT_S = 1.0
+FAILED_RESULT_KIND = "transcode.result.failed"
+STOPPED_FOR_WANT_OF_TIME = "no time is left"
 
 
 def _fixture(path: str) -> dict[str, Any]:
@@ -161,6 +172,26 @@ def _text_values(document: Any) -> Iterator[str]:
 
 def _deliver(sealed: SealedMessage, transport: FakeTransport, **options: Any) -> bool:
     return deliver(sealed, settings=SETTINGS, transport=transport, sleep=FakeClock().sleep, **options)
+
+
+def _deliver_within(
+    sealed: SealedMessage, transport: FakeTransport, clock: FakeClock, seconds: float, **options: Any
+) -> bool:
+    """Deliver on the test's clock with `seconds` left until the delivery must give up."""
+    return deliver(
+        sealed,
+        settings=SETTINGS,
+        transport=transport,
+        sleep=clock.sleep,
+        give_up_at=clock.monotonic() + seconds,
+        monotonic=clock.monotonic,
+        **options,
+    )
+
+
+def _slow_transport(clock: FakeClock, seconds_per_post: float) -> FakeTransport:
+    """A transport no POST is answered on, each taking `seconds_per_post` of the test's clock."""
+    return FakeTransport(then=NO_ANSWER, clock=clock, seconds_per_post=seconds_per_post)
 
 
 # --- sealing ------------------------------------------------------------------------------------
@@ -383,6 +414,206 @@ def test_deliver_when_given_a_claim_should_raise_value_error_without_posting():
     with pytest.raises(ValueError):
         _deliver(_sealed_claim(), transport)
     assert transport.calls == []
+
+
+# --- a delivery that must give up at an instant -------------------------------------------------
+
+
+def test_deliver_when_the_hub_answers_2xx_with_time_left_should_return_true_after_one_post():
+    # Arrange
+    clock = FakeClock()
+    transport = FakeTransport(DELIVERED, clock=clock)
+    message = _sealed_failed_result()
+
+    # Act
+    delivered = _deliver_within(message, transport, clock, seconds=30.0)
+
+    # Assert
+    (call,) = transport.calls
+    assert delivered is True
+    assert (call.url, call.body, call.signature) == (CALLBACK_URL, message.body, message.signature)
+
+
+@pytest.mark.parametrize("seconds_left", [0.0, -5.0], ids=["at-that-very-instant", "five-seconds-late"])
+def test_deliver_when_its_time_is_already_spent_should_send_nothing_and_return_false(seconds_left):
+    # Arrange: a Hub that would take the message at once
+    clock = FakeClock()
+    transport = FakeTransport(then=DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, seconds=seconds_left)
+
+    # Assert
+    assert delivered is False
+    assert transport.calls == []
+    assert clock.waits == []
+
+
+def test_deliver_when_its_time_runs_out_between_attempts_should_start_no_attempt_at_or_after_the_end():
+    # Arrange: no POST is answered and each takes 4 s; the delivery must give up 6 s from now
+    clock = FakeClock()
+    transport = _slow_transport(clock, seconds_per_post=4.0)
+    gives_up_at = clock() + timedelta(seconds=6.0)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, seconds=6.0)
+
+    # Assert: one attempt at once, one after the first wait, and no third: it would start after the end
+    assert delivered is False
+    assert [call.at - clock.start for call in transport.calls] == [timedelta(0), timedelta(seconds=5.0)]
+    assert [call.at for call in transport.calls if call.at >= gives_up_at] == []
+    assert len(transport.calls) < CALLBACK_ATTEMPTS
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "waits", "posts"),
+    [
+        pytest.param(FIRST_WAIT_S, [], 1, id="the-first-wait-would-end-at-the-end"),
+        pytest.param(FIRST_WAIT_S + 0.5, [FIRST_WAIT_S], 2, id="the-first-wait-ends-before-the-end"),
+        pytest.param(FIRST_WAIT_S + SECOND_WAIT_S, [FIRST_WAIT_S], 2, id="the-second-wait-would-end-at-the-end"),
+        pytest.param(
+            FIRST_WAIT_S + SECOND_WAIT_S + 0.5, [FIRST_WAIT_S, SECOND_WAIT_S], 3, id="both-waits-end-before-the-end"
+        ),
+    ],
+)
+def test_deliver_when_a_wait_would_end_at_or_after_the_end_should_not_start_it(seconds_left, waits, posts):
+    # Arrange: no POST is answered, each fails at once, so only the waits take time
+    clock = FakeClock()
+    transport = _slow_transport(clock, seconds_per_post=0.0)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, seconds=seconds_left)
+
+    # Assert
+    assert delivered is False
+    assert clock.waits == waits
+    assert len(transport.calls) == posts
+    assert clock.elapsed_s < seconds_left
+
+
+@pytest.mark.parametrize(
+    ("seconds_left", "options", "expected_timeout_s"),
+    [
+        pytest.param(30.0, {}, 10.0, id="more-time-left-than-the-callbacks-own-time-out"),
+        pytest.param(4.0, {}, 4.0, id="less-time-left-than-the-callbacks-own-time-out"),
+        pytest.param(LEAST_POST_TIMEOUT_S, {}, 1.0, id="exactly-the-least-time-out-left"),
+        pytest.param(0.25, {}, 1.0, id="less-left-than-the-least-time-out"),
+        pytest.param(30.0, {"timeout_s": 3.0}, 3.0, id="more-time-left-than-a-given-time-out"),
+        pytest.param(2.0, {"timeout_s": 3.0}, 2.0, id="less-time-left-than-a-given-time-out"),
+        pytest.param(0.2, {"timeout_s": 0.5}, 0.5, id="a-given-time-out-below-the-least-one"),
+    ],
+)
+def test_deliver_when_it_must_give_up_should_cap_a_posts_time_out_at_the_time_left_counted_as_a_second_at_least(
+    seconds_left, options, expected_timeout_s
+):
+    # Arrange: less time left than a second counts as a second, and a POST never gets more than its own
+    # time-out, even one below a second
+    clock = FakeClock()
+    transport = FakeTransport(DELIVERED, clock=clock)
+
+    # Act
+    _deliver_within(_sealed_failed_result(), transport, clock, seconds=seconds_left, **options)
+
+    # Assert
+    assert [call.timeout_s for call in transport.calls] == [expected_timeout_s]
+    assert CALLBACK_TIMEOUT_S == 10.0
+
+
+def test_deliver_when_time_passes_between_attempts_should_give_each_post_only_what_is_then_left():
+    # Arrange: no POST is answered and each takes 3 s; the delivery must give up 12 s from now
+    clock = FakeClock()
+    transport = _slow_transport(clock, seconds_per_post=3.0)
+
+    # Act
+    _deliver_within(_sealed_failed_result(), transport, clock, seconds=12.0)
+
+    # Assert: 12 s left at first, 8 s after a post and a wait, then 3 s
+    assert [call.timeout_s for call in transport.calls] == [10.0, 8.0, 3.0]
+
+
+def test_deliver_when_it_stops_for_want_of_time_should_log_once_and_name_the_kind_only(caplog):
+    # Arrange
+    caplog.set_level(logging.DEBUG, logger=outbox_module.__name__)
+    clock = FakeClock()
+    message = _sealed_failed_result()
+    fixture = _fixture(FAILED_RESULT)
+
+    # Act
+    _deliver_within(message, FakeTransport(then=DELIVERED, clock=clock), clock, seconds=0.0)
+
+    # Assert
+    (logged,) = [record for record in caplog.records if record.name == outbox_module.__name__]
+    line = logged.getMessage()
+    assert logged.levelno == logging.INFO
+    assert STOPPED_FOR_WANT_OF_TIME in line and FAILED_RESULT_KIND in line
+    assert [hidden for hidden in (fixture["message_id"], message.signature, CALLBACK_URL) if hidden in line] == []
+
+
+@pytest.mark.parametrize(
+    "end",
+    [
+        pytest.param({"give_up_at": 5.0}, id="an-instant-without-a-clock"),
+        pytest.param({"monotonic": FakeClock().monotonic}, id="a-clock-without-an-instant"),
+        pytest.param({"give_up_at": float("nan"), "monotonic": FakeClock().monotonic}, id="not-a-number"),
+        pytest.param({"give_up_at": float("inf"), "monotonic": FakeClock().monotonic}, id="infinite"),
+        pytest.param({"give_up_at": float("-inf"), "monotonic": FakeClock().monotonic}, id="minus-infinite"),
+        pytest.param({"give_up_at": True, "monotonic": FakeClock().monotonic}, id="a-bool"),
+        pytest.param({"give_up_at": "5.0", "monotonic": FakeClock().monotonic}, id="text"),
+    ],
+)
+def test_deliver_when_its_end_is_given_by_half_or_is_no_finite_number_should_raise_value_error_without_posting(end):
+    # Arrange
+    transport = FakeTransport(then=DELIVERED)
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        _deliver(_sealed_failed_result(), transport, **end)
+    assert transport.calls == []
+
+
+def test_deliver_when_its_end_is_a_whole_number_should_take_it_as_an_instant():
+    # Arrange: five whole seconds of the clock, as an int
+    clock = FakeClock()
+    transport = FakeTransport(DELIVERED, clock=clock)
+
+    # Act
+    delivered = deliver(
+        _sealed_failed_result(),
+        settings=SETTINGS, transport=transport, sleep=clock.sleep, give_up_at=5, monotonic=clock.monotonic,
+    )
+
+    # Assert
+    assert delivered is True
+    assert [call.timeout_s for call in transport.calls] == [5.0]
+
+
+# --- a delivery given no such instant behaves as it always did ----------------------------------
+
+
+def test_deliver_when_given_no_end_should_wait_before_each_further_attempt_however_long_the_posts_take():
+    # Arrange: no POST is answered and each takes a minute
+    clock = FakeClock()
+    transport = _slow_transport(clock, seconds_per_post=60.0)
+
+    # Act
+    delivered = deliver(_sealed_failed_result(), settings=SETTINGS, transport=transport, sleep=clock.sleep)
+
+    # Assert: every attempt is made, each with the callback's own time-out, after the same two waits
+    assert delivered is False
+    assert len(transport.calls) == CALLBACK_ATTEMPTS == 3
+    assert clock.waits == [FIRST_WAIT_S, SECOND_WAIT_S]
+    assert [call.timeout_s for call in transport.calls] == [10.0, 10.0, 10.0]
+
+
+def test_deliver_when_given_no_end_should_post_with_a_time_out_below_one_second_as_given():
+    # Arrange: the least time-out belongs to a delivery that must give up, not to this one
+    transport = FakeTransport(DELIVERED)
+
+    # Act
+    _deliver(_sealed_progress(), transport, timeout_s=0.5)
+
+    # Assert
+    assert [call.timeout_s for call in transport.calls] == [0.5]
 
 
 # --- what a sealed message shows ----------------------------------------------------------------

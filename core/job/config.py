@@ -4,7 +4,8 @@
                       from. A result reports it as `encoder.image_digest`, and a container cannot learn
                       its own digest, so the deployment states it.
     VH_SCRATCH_DIR    optional: the existing directory every job makes its scratch directory in;
-                      default the system's temporary directory.
+                      default the system's temporary directory. Either way its path holds printable
+                      ASCII only, and none of the characters the stages refuse in a path.
 
 A refusal is the protocol settings' SettingsInvalid: it names the variable and the rule, never the value.
 """
@@ -22,6 +23,9 @@ from core.protocol.settings import SettingsInvalid
 
 IMAGE_DIGEST_VARIABLE = "VH_IMAGE_DIGEST"
 SCRATCH_DIR_VARIABLE = "VH_SCRATCH_DIR"
+# The characters a scratch path may hold: printable ASCII, the space included.
+PRINTABLE_ASCII_FIRST = 0x20
+PRINTABLE_ASCII_LAST = 0x7E
 _IMAGE_DIGEST_DEFINITION = (
     schema.SCHEMA_BASE_URI + "schemas/common.schema.json#/$defs/encoder/properties/image_digest"
 )
@@ -63,6 +67,10 @@ def _scratch_root(env: Mapping[str, str]) -> Path:
     # The stages refuse a path holding one of these: ffmpeg's command line would read it as something else.
     if any(character in text for character in UNSAFE_PATH_CHARACTERS):
         raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must not hold `:`, `%` or a line break")
+    # The encode writes the playlist it checks a rendition through, which quotes this path, as ASCII:
+    # with any other character in it every job would fail after its first rendition was encoded.
+    if not all(PRINTABLE_ASCII_FIRST <= ord(character) <= PRINTABLE_ASCII_LAST for character in text):
+        raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must hold printable ASCII characters only")
     scratch_root = Path(text)
     if not scratch_root.is_absolute():
         raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must be an absolute path")
