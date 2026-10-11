@@ -1,9 +1,16 @@
-"""The versioned media profile: the worker's ceilings for a source and for probing it."""
+"""The versioned media profile: the worker's ceilings for a source and for probing it.
+
+A dispatch names the profile it wants as `{id, version, sha256}`. `profile_digest()` is that SHA-256
+and `supported_profile()` the lookup: the worker runs a job only with a profile it holds under exactly
+that id, version and digest.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
 from fractions import Fraction
 
 KIB = 1024
@@ -366,3 +373,34 @@ PILOT_PROFILE = MediaProfile(
         thumbnail_at_max_ms=PILOT_THUMBNAIL_AT_MAX_MS,
     ),
 )
+
+
+def profile_digest(profile: MediaProfile) -> str:
+    """The profile's SHA-256 (lowercase hex): the `sha256` a dispatch names beside its id and version.
+
+    It is taken over the profile's canonical JSON: every field, nested values included, as an object
+    with its keys sorted, compact, in ASCII. Any changed field therefore changes the digest: a changed
+    profile is a new revision, whatever its id and version say.
+    """
+    if not isinstance(profile, MediaProfile):
+        raise TypeError("profile must be a MediaProfile")
+    canonical = json.dumps(asdict(profile), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+# Every profile revision this worker can run a job with.
+SUPPORTED_PROFILES: tuple[MediaProfile, ...] = (PILOT_PROFILE,)
+
+
+def supported_profile(profile_id: str, version: int, sha256: str) -> MediaProfile | None:
+    """The held profile whose id, version and digest all equal the arguments, or None.
+
+    A dispatch that names a revision this worker does not hold must fail explicitly: running it with
+    another revision would produce a generation the Hub did not ask for.
+    """
+    if not _is_strict_int(version):
+        return None
+    for profile in SUPPORTED_PROFILES:
+        if (profile.profile_id, profile.version, profile_digest(profile)) == (profile_id, version, sha256):
+            return profile
+    return None

@@ -1,0 +1,212 @@
+"""The job's own configuration: the image digest a result reports and the directory jobs make their
+scratch directories in. Whole or refused; a refusal names the variable and the rule, never the value."""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from core.job.config import JobSettings
+from core.protocol.settings import SettingsInvalid
+
+DIGEST_VARIABLE = "VH_IMAGE_DIGEST"
+SCRATCH_VARIABLE = "VH_SCRATCH_DIR"
+VALID_DIGEST = "sha256:" + "0123456789abcdef" * 4
+HEX_DIGITS = 64
+
+
+def _env(tmp_path: Path, **changes: object) -> dict[str, object]:
+    env: dict[str, object] = {DIGEST_VARIABLE: VALID_DIGEST, SCRATCH_VARIABLE: str(tmp_path)}
+    env.update(changes)
+    return env
+
+
+def _refusal(env: object) -> SettingsInvalid:
+    with pytest.raises(SettingsInvalid) as raised:
+        JobSettings.from_env(env)  # type: ignore[arg-type]
+    return raised.value
+
+
+def test_from_env_when_both_variables_are_valid_should_hold_the_digest_and_the_scratch_directory(tmp_path):
+    # Arrange
+    env = _env(tmp_path)
+
+    # Act
+    settings = JobSettings.from_env(env)
+
+    # Assert
+    assert settings.image_digest == VALID_DIGEST
+    assert settings.scratch_root == tmp_path
+
+
+def test_from_env_when_the_scratch_directory_is_not_set_should_use_the_systems_temporary_directory():
+    # Arrange
+    env = {DIGEST_VARIABLE: VALID_DIGEST}
+
+    # Act
+    settings = JobSettings.from_env(env)
+
+    # Assert
+    assert settings.scratch_root == Path(tempfile.gettempdir())
+    assert settings.scratch_root.is_dir()
+
+
+def test_from_env_when_the_image_digest_is_missing_should_refuse_it_as_required(tmp_path):
+    # Arrange
+    env = _env(tmp_path)
+    del env[DIGEST_VARIABLE]
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert refusal.variable == DIGEST_VARIABLE
+    assert "required" in refusal.rule
+
+
+@pytest.mark.parametrize(
+    "digest",
+    [
+        pytest.param("0123456789abcdef" * 4, id="no-algorithm-prefix"),
+        pytest.param("sha512:" + "0123456789abcdef" * 4, id="another-algorithm"),
+        pytest.param("sha256:" + "0" * (HEX_DIGITS - 1), id="one-digit-short"),
+        pytest.param("sha256:" + "0" * (HEX_DIGITS + 1), id="one-digit-long"),
+        pytest.param("sha256:" + "0123456789ABCDEF" * 4, id="upper-case-hex"),
+        pytest.param("SHA256:" + "0123456789abcdef" * 4, id="upper-case-prefix"),
+        pytest.param("sha256:" + "g" * HEX_DIGITS, id="not-hex"),
+        pytest.param(" " + VALID_DIGEST, id="leading-space"),
+        pytest.param(VALID_DIGEST + "\n", id="trailing-line-break"),
+        pytest.param("registry.example/worker@" + VALID_DIGEST, id="an-image-reference"),
+        pytest.param(12345, id="not-a-string"),
+    ],
+)
+def test_from_env_when_the_image_digest_is_malformed_should_refuse_it_without_showing_it(tmp_path, digest):
+    # Arrange
+    env = _env(tmp_path, **{DIGEST_VARIABLE: digest})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert refusal.variable == DIGEST_VARIABLE
+    assert str(digest).strip() not in str(refusal)
+
+
+def test_from_env_when_the_image_digest_is_empty_should_refuse_it(tmp_path):
+    # Arrange
+    env = _env(tmp_path, **{DIGEST_VARIABLE: ""})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert refusal.variable == DIGEST_VARIABLE
+
+
+def test_from_env_when_the_scratch_directory_is_relative_should_refuse_it(tmp_path, monkeypatch):
+    # Arrange: the relative path exists from the working directory, so only its being relative refuses it
+    (tmp_path / "relative-scratch").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: "relative-scratch"}))
+
+    # Assert
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "absolute" in refusal.rule
+    assert "relative-scratch" not in str(refusal)
+
+
+def test_from_env_when_the_scratch_directory_does_not_exist_should_refuse_it(tmp_path):
+    # Arrange
+    missing = tmp_path / "never-made"
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: str(missing)}))
+
+    # Assert
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "never-made" not in str(refusal)
+
+
+def test_from_env_when_the_scratch_directory_is_a_file_should_refuse_it(tmp_path):
+    # Arrange
+    a_file = tmp_path / "a-file"
+    a_file.write_bytes(b"not a directory")
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: str(a_file)}))
+
+    # Assert
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert "a-file" not in str(refusal)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("with:colon", id="colon"),
+        pytest.param("with%percent", id="percent"),
+        pytest.param("with\nline-feed", id="line-feed"),
+        pytest.param("with\rcarriage-return", id="carriage-return"),
+    ],
+)
+def test_from_env_when_the_scratch_directory_holds_a_character_the_stages_refuse_should_refuse_it(tmp_path, name):
+    # Arrange: the directory exists, so only the character refuses it
+    directory = tmp_path / name
+    directory.mkdir()
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: str(directory)}))
+
+    # Assert
+    assert refusal.variable == SCRATCH_VARIABLE
+    assert name not in str(refusal)
+
+
+@pytest.mark.parametrize("value", [pytest.param("", id="empty"), pytest.param(7, id="not-a-string")])
+def test_from_env_when_the_scratch_directory_is_not_a_usable_text_should_refuse_it(tmp_path, value):
+    # Arrange
+    env = _env(tmp_path, **{SCRATCH_VARIABLE: value})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert refusal.variable == SCRATCH_VARIABLE
+
+
+def test_from_env_when_the_process_environment_holds_the_variables_should_read_only_the_given_mapping(
+    tmp_path, monkeypatch
+):
+    # Arrange: the process environment is complete and valid; the mapping given is empty
+    other_directory = tmp_path / "from-the-process"
+    other_directory.mkdir()
+    monkeypatch.setenv(DIGEST_VARIABLE, VALID_DIGEST)
+    monkeypatch.setenv(SCRATCH_VARIABLE, str(other_directory))
+
+    # Act
+    refusal = _refusal({})
+    settings = JobSettings.from_env({DIGEST_VARIABLE: VALID_DIGEST})
+
+    # Assert
+    assert (refusal.variable, refusal.rule) == (DIGEST_VARIABLE, "is required")
+    assert settings.scratch_root != other_directory
+
+
+@pytest.mark.parametrize("env", [None, [("VH_IMAGE_DIGEST", VALID_DIGEST)], "VH_IMAGE_DIGEST"])
+def test_from_env_when_the_environment_is_not_a_mapping_should_raise_type_error(env):
+    # Act and Assert
+    with pytest.raises(TypeError):
+        JobSettings.from_env(env)
+
+
+def test_job_settings_when_built_should_be_immutable(tmp_path):
+    # Arrange
+    settings = JobSettings.from_env(_env(tmp_path))
+
+    # Act and Assert
+    with pytest.raises(AttributeError):
+        settings.image_digest = "sha256:" + "f" * HEX_DIGITS  # type: ignore[misc]

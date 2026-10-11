@@ -19,7 +19,15 @@ from core.failure import Failure
 from core.protocol import files, messages, schema, signing
 from core.protocol.context import TrustedContext
 from core.protocol.messages import DispatchIdentity, ExecutionIdentity
-from core.protocol.outbox import CALLBACK_ATTEMPTS, SealedMessage, SelfCheckFailed, deliver, runpod_output, seal_message
+from core.protocol.outbox import (
+    CALLBACK_ATTEMPTS,
+    CALLBACK_TIMEOUT_S,
+    SealedMessage,
+    SelfCheckFailed,
+    deliver,
+    runpod_output,
+    seal_message,
+)
 from core.protocol.registry import MessageKind
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
@@ -316,6 +324,55 @@ def test_deliver_when_allowed_one_attempt_should_post_exactly_once():
     # Assert
     assert delivered is False
     assert len(transport.calls) == 1
+
+
+def test_deliver_when_given_no_time_out_should_post_with_the_callbacks_own():
+    # Arrange
+    transport = FakeTransport(NO_ANSWER, then=DELIVERED)
+
+    # Act
+    _deliver(_sealed_failed_result(), transport)
+
+    # Assert
+    assert [call.timeout_s for call in transport.calls] == [CALLBACK_TIMEOUT_S, CALLBACK_TIMEOUT_S]
+    assert CALLBACK_TIMEOUT_S == 10.0
+
+
+def test_deliver_when_given_a_time_out_should_post_every_attempt_with_it():
+    # Arrange
+    shorter_than_the_callbacks_own = 3.0
+    transport = FakeTransport(NO_ANSWER, then=DELIVERED)
+
+    # Act
+    delivered = _deliver(_sealed_progress(), transport, timeout_s=shorter_than_the_callbacks_own)
+
+    # Assert
+    assert delivered is True
+    assert [call.timeout_s for call in transport.calls] == [3.0, 3.0]
+
+
+@pytest.mark.parametrize(
+    "timeout_s",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(0.0, id="zero-as-a-float"),
+        pytest.param(-3.0, id="negative"),
+        pytest.param(float("nan"), id="not-a-number"),
+        pytest.param(float("inf"), id="infinite"),
+        pytest.param(float("-inf"), id="minus-infinite"),
+        pytest.param(True, id="a-bool"),
+        pytest.param("3.0", id="text"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_deliver_when_the_time_out_is_no_positive_finite_number_should_raise_value_error_without_posting(timeout_s):
+    # Arrange
+    transport = FakeTransport(then=DELIVERED)
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        _deliver(_sealed_progress(), transport, timeout_s=timeout_s)
+    assert transport.calls == []
 
 
 def test_deliver_when_given_a_claim_should_raise_value_error_without_posting():

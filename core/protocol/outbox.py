@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
@@ -85,15 +86,19 @@ def deliver(
     transport: Transport,
     sleep: Callable[[float], None],
     attempts: int = CALLBACK_ATTEMPTS,
+    timeout_s: float = CALLBACK_TIMEOUT_S,
 ) -> bool:
     """POST the message to the callback address; True when the Hub answered 2xx. It never raises for a failed delivery.
 
     Sent again only after a transport failure or a `hub.error` the Hub called retryable. Unlike a claim, a
     delivery is not sent again after a gateway's 502, 503 or 504 without a `hub.error`: the job output
-    carries the same bytes, so the Hub loses nothing but time.
+    carries the same bytes, so the Hub loses nothing but time. `timeout_s` is each POST's time-out, a
+    positive finite number of seconds (ValueError otherwise, before any POST).
     """
     if sealed.kind not in _CALLBACK_KINDS:
         raise ValueError(f"a {sealed.kind.value} never goes to the callback address")
+    if isinstance(timeout_s, bool) or not isinstance(timeout_s, (int, float)) or not 0 < timeout_s < math.inf:
+        raise ValueError("timeout_s must be a positive finite number of seconds")
     hub_error_context = messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
     for attempt in range(attempts):
         if attempt > 0:
@@ -103,7 +108,7 @@ def deliver(
                 settings.callback_url,
                 sealed.body,
                 sealed.signature,
-                timeout_s=CALLBACK_TIMEOUT_S,
+                timeout_s=timeout_s,
                 max_body_bytes=load_registry().max_bytes(MessageKind.HUB_ERROR),
             )
         except TransportFailed as failure:
