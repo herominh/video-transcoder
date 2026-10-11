@@ -1,6 +1,7 @@
 """The trusted context demands exactly the fields README.md lists per (role, kind), and nothing is silently skipped."""
 
 import copy
+import dataclasses
 from typing import Any
 
 import pytest
@@ -350,3 +351,65 @@ def test_context_when_a_list_field_holds_a_map_should_raise_context_invalid(chan
     # Act / Assert
     with pytest.raises(ContextInvalid):
         TrustedContext.from_dict(context)
+
+
+# --- only from_dict() builds a context, and nothing can change one (TD-086 (c)) ------------------
+
+
+HUB_PUSH_CONTEXT = "fixtures/contexts/ctx-hub-push.json"
+
+
+def _fields_of(context: TrustedContext) -> dict[str, Any]:
+    return {field.name: getattr(context, field.name) for field in dataclasses.fields(context)}
+
+
+def test_context_when_constructed_directly_should_refuse():
+    # Arrange: every field a from_dict() context holds, handed straight to the constructor.
+    values = _fields_of(TrustedContext.from_dict(files.read_json(HUB_PUSH_CONTEXT)))
+
+    # Act / Assert
+    with pytest.raises(TypeError):
+        TrustedContext(**values)
+
+
+def test_context_when_replaced_with_another_value_should_refuse():
+    # Arrange
+    context = TrustedContext.from_dict(files.read_json(HUB_PUSH_CONTEXT))
+
+    # Act / Assert
+    with pytest.raises(TypeError):
+        dataclasses.replace(context, last_event_seq=0)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda expect: expect.__setitem__("org_uuid", "99999999-9999-7999-8999-999999999999"),
+        lambda expect: expect.__delitem__("execution_fence"),
+        lambda expect: expect["profile"].__setitem__("version", 2),
+        lambda expect: expect["encryption"].__setitem__("mode", "none"),
+        lambda expect: expect["renditions"].append("1080p"),
+    ],
+    ids=["replace-a-member", "delete-a-member", "nested-profile", "nested-encryption", "renditions-list"],
+)
+def test_context_expect_when_mutated_should_refuse(mutate):
+    # Arrange
+    context = TrustedContext.from_dict(files.read_json(HUB_PUSH_CONTEXT))
+
+    # Act / Assert
+    with pytest.raises((TypeError, AttributeError)):
+        mutate(context.expect)
+
+
+def test_context_when_its_source_mapping_changes_afterwards_should_keep_its_own_values():
+    # Arrange
+    data = files.read_json(HUB_PUSH_CONTEXT)
+    context = TrustedContext.from_dict(data)
+
+    # Act
+    data["expect"]["profile"]["version"] = 2
+    data["expect"]["renditions"].append("1080p")
+
+    # Assert
+    assert context.expect["profile"]["version"] == 1
+    assert context.value("expect.renditions") == ("720p", "480p", "360p")

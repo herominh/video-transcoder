@@ -85,7 +85,8 @@ def verify_contract_tree(root: Path | None = None) -> None:
     try:
         _verify_tree(tree_root)
     except (OSError, ValueError) as error:
-        raise ContractTreeInvalid(f"contract tree at {tree_root} cannot be read: {error!r}") from error
+        # str() of an OSError names the failing file by its repr, so no name can break a log line.
+        raise ContractTreeInvalid(f"contract tree at {tree_root} cannot be read: {error}") from error
 
 
 def _verify_tree(tree_root: Path) -> None:
@@ -118,27 +119,36 @@ def _regular_files(tree_root: Path) -> list[str]:
     as does a name that is not UTF-8. A refusal names the entry by its repr, which any log line can hold.
     """
     found: list[str] = []
-    _collect_regular_files(tree_root, "", found)
+    # Directories still to read, as (path, prefix of their entries): a loop, so no depth exhausts the stack.
+    pending: list[tuple[Path, str]] = [(tree_root, "")]
+    while pending:
+        directory, prefix = pending.pop()
+        for entry in _sorted_entries(directory):
+            relative_path = _checked_entry(entry, prefix)
+            if entry.is_dir(follow_symlinks=False):
+                pending.append((Path(entry.path), relative_path + "/"))
+            else:
+                found.append(relative_path)
     return sorted(found, key=lambda relative_path: relative_path.encode("utf-8"))
 
 
-def _collect_regular_files(directory: Path, prefix: str, found: list[str]) -> None:
+def _sorted_entries(directory: Path) -> list[os.DirEntry[str]]:
     with os.scandir(directory) as scan:
-        entries = sorted(scan, key=lambda entry: os.fsencode(entry.name))
-    for entry in entries:
-        relative_path = prefix + entry.name
-        try:
-            relative_path.encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise ContractTreeInvalid(f"{relative_path!r} is not a UTF-8 name") from error
-        if entry.is_symlink():
-            raise ContractTreeInvalid(f"{relative_path!r} is a symbolic link; the tree holds no links")
-        if entry.is_dir(follow_symlinks=False):
-            _collect_regular_files(Path(entry.path), relative_path + "/", found)
-        elif entry.is_file(follow_symlinks=False):
-            found.append(relative_path)
-        else:
-            raise ContractTreeInvalid(f"{relative_path!r} is neither a directory nor a regular file")
+        return sorted(scan, key=lambda entry: os.fsencode(entry.name))
+
+
+def _checked_entry(entry: os.DirEntry[str], prefix: str) -> str:
+    """The entry's relative path when it is a real directory or a regular file with a UTF-8 name; else refuse."""
+    relative_path = prefix + entry.name
+    try:
+        relative_path.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ContractTreeInvalid(f"{relative_path!r} is not a UTF-8 name") from error
+    if entry.is_symlink():
+        raise ContractTreeInvalid(f"{relative_path!r} is a symbolic link; the tree holds no links")
+    if not entry.is_dir(follow_symlinks=False) and not entry.is_file(follow_symlinks=False):
+        raise ContractTreeInvalid(f"{relative_path!r} is neither a directory nor a regular file")
+    return relative_path
 
 
 def _checksum_entries(tree_root: Path, checksum_bytes: bytes) -> dict[str, tuple[Path, str]]:

@@ -3,6 +3,7 @@
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,10 @@ from core.protocol.files import ContractTreeInvalid, verify_contract_tree
 TAMPERED_FILE = "limits.json"
 REMOVED_FILE = "versions.json"
 UNLISTED_FILE = "schemas/extra.schema.json"
+# A recursive walk needs a stack frame per level: the deep-tree test leaves the walk fewer frames than the
+# tree has levels (a shallow tree and a lowered limit, so every filesystem and platform can hold it).
+DEEP_TREE_LEVELS = 150
+STACK_FRAMES_LEFT_TO_THE_WALK = 60
 
 
 @pytest.fixture
@@ -118,6 +123,10 @@ def test_verify_contract_tree_when_sha256sums_is_missing_should_refuse(tree_copy
         verify_contract_tree(root=tree_copy)
 
 
+@pytest.mark.skipif(
+    os.name != "posix" or sys.getfilesystemencoding() != "utf-8",
+    reason="a name that is not UTF-8 exists only where names are bytes decoded as UTF-8",
+)
 def test_verify_contract_tree_when_an_entry_name_is_not_utf8_should_refuse(tree_copy: Path):
     # Arrange: POSIX names are bytes; Python hands this one over as a lone surrogate.
     raw_name = b"bad\xff.json"
@@ -167,3 +176,30 @@ def test_verify_contract_tree_when_an_entry_is_a_fifo_should_refuse(tree_copy: P
     # Act / Assert
     with pytest.raises(ContractTreeInvalid, match=_named("schemas/pipe") + " is neither a directory nor a regular file"):
         verify_contract_tree(root=tree_copy)
+
+
+def _stack_depth() -> int:
+    depth, frame = 0, sys._getframe()
+    while frame is not None:
+        depth, frame = depth + 1, frame.f_back
+    return depth
+
+
+def test_verify_contract_tree_when_the_tree_is_deeper_than_the_stack_allows_should_still_refuse_its_unlisted_file(
+    tree_copy: Path,
+):
+    # Arrange: one level at a time (Path.mkdir(parents=True) itself recurses).
+    deepest = tree_copy
+    for _ in range(DEEP_TREE_LEVELS):
+        deepest = deepest / "d"
+        deepest.mkdir()
+    (deepest / "stray.json").write_bytes(b"{}\n")
+    default_limit = sys.getrecursionlimit()
+
+    # Act / Assert
+    sys.setrecursionlimit(_stack_depth() + STACK_FRAMES_LEFT_TO_THE_WALK)
+    try:
+        with pytest.raises(ContractTreeInvalid, match="stray.json' is in the tree but not listed"):
+            verify_contract_tree(root=tree_copy)
+    finally:
+        sys.setrecursionlimit(default_limit)
