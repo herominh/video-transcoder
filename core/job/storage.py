@@ -28,6 +28,10 @@ read's bytes are dropped, whenever they arrive. An abandoned PutObject and its r
 store the recorded bytes of the same file under the same key (a body whose bytes are not the recorded
 ones is refused), so whichever of them lands, and in whatever order, the object is the same.
 
+abandoned_requests() counts the requests this process abandoned while they still ran, at the deadline
+or at their ceiling. Each keeps its thread and its connection until the storage ends it, so once the
+count is above zero the entry point asks for a fresh process with every job it returns.
+
 download_source() copies the source into the scratch directory through RangeSource.read(), so every byte
 arrives through the reader's own checks: in production an S3RangeSource, whose ranged reads are each
 conditional on the recorded ETag. A source that changed while it was read fails the job.
@@ -306,6 +310,33 @@ def _retry_after_s(error: BotoCoreError | ClientError) -> float:
 
 # --- a request in flight -------------------------------------------------------------------------
 
+# How many requests this process stopped waiting for while they still ran, at the deadline or at their
+# ceiling (_within). It only grows. Under a lock, because two threads can stop waiting at the same
+# instant: the preflight's reads wait on the threads of its loopback server (core/probe.py), which the
+# preflight does not wait for when it ends, so one of them may still be waiting when the job's own
+# thread waits for a download's read, and both wait to the execution's one deadline.
+_abandoned_requests = 0
+_abandoned_requests_lock = threading.Lock()
+
+
+def abandoned_requests() -> int:
+    """How many storage requests this process has abandoned while they still ran, at the deadline or at
+    their ceiling.
+
+    Each of them keeps its helper thread and its connection until the storage ends the request, and it
+    belongs to no single job (a read of the preflight can be given up after its job returned). The count
+    never falls: once it is above zero the process is marked, and the entry point asks for a fresh
+    worker with every job it returns.
+    """
+    with _abandoned_requests_lock:
+        return _abandoned_requests
+
+
+def _count_abandoned_request() -> None:
+    global _abandoned_requests
+    with _abandoned_requests_lock:
+        _abandoned_requests += 1
+
 
 class _Request:
     """One storage request on its helper thread, and how it ended once `ended` is set."""
@@ -366,6 +397,10 @@ def _within(
     this thread waits for the deadline, and a ceiling the deadline passed under counts for nothing. A
     call that ended, in time or not, is judged as without a ceiling: the ceiling bounds this thread's
     wait, so a call that has ended by the time this thread looks counts as ended, even a moment past it.
+
+    Only a call this thread stopped waiting for while it still ran is counted (abandoned_requests()),
+    whether it was given up at its ceiling or at the deadline: a call that ended, in time or not, left
+    no thread and no connection behind.
     """
     remaining_s = deadline.remaining_s()
     if remaining_s <= 0:
@@ -385,6 +420,10 @@ def _within(
         wait_s = ceiling_s
     # A wait longer than TIMEOUT_MAX is refused by the lock it waits on (OverflowError).
     ended = request.ended.wait(min(wait_s, threading.TIMEOUT_MAX))
+    if not ended:
+        # Still running, at its ceiling or at the deadline: its thread and its connection stay until
+        # the storage ends the request.
+        _count_abandoned_request()
     if not ended and stalled is not None and wait_s < remaining_s and deadline.remaining_s() > 0:
         raise WorkerFailure(stalled)
     if not ended or not request.ended_in_time:

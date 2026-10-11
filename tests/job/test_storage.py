@@ -886,6 +886,26 @@ def test_deadline_source_when_the_deadline_passes_under_a_read_that_outlasts_its
     )
 
 
+def test_deadline_source_when_the_wait_was_for_the_deadline_should_fail_as_a_deadline_though_it_still_shows_time_left(
+    hold,
+):
+    # Arrange: a read that never returns. The deadline, 50 ms away, is nearer than the read's ceiling of
+    # 30 s, and its clock never moves: it shows the same time left after the wait as before it. So only
+    # which of the two bounds was the nearer one when the wait began can tell what the read ran into
+    inner = _StubSource(len(OBJECT), _never_answered(hold))
+    source = DeadlineSource(inner, _TimeLeft(0.05))
+
+    # Act
+    failure = _failure_of(lambda: source.read(0, CHUNK_BYTES))
+    assert hold.entered.wait(PROMPT_S)
+
+    # Assert: the deadline, final, not a stalled attempt that would be worth making again
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "deadline_exceeded", "source_read_deadline_exceeded", False
+    )
+    assert inner.reads == [(0, CHUNK_BYTES)]
+
+
 def test_within_when_a_call_that_is_given_no_ceiling_never_returns_should_fail_at_the_deadline_as_before(hold):
     # Arrange: a request held to the deadline alone, as a caller that names no ceiling holds it
     expired = Failure("deadline_exceeded", "request_deadline_exceeded", False, "the test's request ran out of time")
@@ -2654,6 +2674,35 @@ def test_upload_when_a_put_stalls_and_the_next_one_is_taken_should_wait_send_the
     assert uploaded == sum(len(data) for data in expected.values())
 
 
+def test_upload_when_a_put_stalls_after_the_storage_took_its_whole_body_should_send_it_again_and_store_the_same_object(
+    generation, hold, fixed_factor, monkeypatch
+):
+    # Arrange: the storage takes every byte of the first put of the first object and then withholds its
+    # answer, with a minute left on the deadline and a ceiling of 50 ms; it takes every later put at once
+    stalled = _StalledFirst(hold)
+    master_key = f"{PREFIX}/master.m3u8"
+    client = _PausingS3(stalled.request, master_key, reads_first=True)
+    monkeypatch.setattr(storage, "_request_ceiling_s", stalled.ceiling_s)
+
+    # Act: the kept request is let go only once the upload has finished without its answer
+    uploaded = generation.upload(client, sleep=stalled.sleep)
+    hold.release()
+
+    # Assert: the object arrived twice, the abandoned put's and its repeat's, with the same bytes both
+    # times, so whichever of them lands the object is the same; the upload went on to its end, the
+    # manifest last, and counts the object once
+    expected = {f"{PREFIX}/{path}": data for path, data in _Generation.FILES.items()}
+    expected[f"{PREFIX}/{MANIFEST_NAME}"] = _Generation.MANIFEST
+    puts_of_the_object = [call for call in client.put_calls if call.key == master_key]
+    assert hold.entered.is_set()
+    assert stalled.asked == [0.375]
+    assert [(call.body, call.failed) for call in puts_of_the_object] == [(b"#EXTM3U\n#EXT-X-VERSION:3\n", False)] * 2
+    assert {call.key: call.body for call in client.stored} == expected
+    assert client.put_calls[-1].key == f"{PREFIX}/{MANIFEST_NAME}"
+    assert len(client.put_calls) == len(expected) + 1
+    assert uploaded == sum(len(data) for data in expected.values())
+
+
 def test_upload_when_a_put_stalls_on_every_attempt_should_fail_retryable_as_stalled_and_close_its_file(
     generation, hold, fixed_factor, short_ceiling, caplog, capfd, monkeypatch
 ):
@@ -2974,6 +3023,240 @@ def test_upload_when_the_progress_callback_raises_should_still_finish(generation
 
     # Assert
     assert len(client.stored) == len(_Generation.FILES) + 1
+
+
+# --- the count of abandoned requests ----------------------------------------------------------------
+# The count belongs to the process and only grows, so every test compares two readings of it.
+
+# What a deadline that never passes has left where a test wants one request and no repeat of it: more
+# than a short ceiling, so the request outlasts its ceiling with time left, and less than the least wait
+# before a request is made again (0.5 s times a factor of a half at least), so it is not made again.
+NO_TIME_FOR_A_REPEAT_S = 0.2
+
+
+def _read_of_the_preflight(hold: _Hold, tmp_path: Path, generation: _Generation, deadline: Deadline) -> None:
+    source = DeadlineSource(_StubSource(len(OBJECT), _never_answered(hold)), deadline)
+    source.read(0, CHUNK_BYTES)
+
+
+def _read_of_the_download(hold: _Hold, tmp_path: Path, generation: _Generation, deadline: Deadline) -> None:
+    source = _StubSource(CHUNK_BYTES, _never_answered(hold))
+    download_source(source, destination=tmp_path / "source", deadline=deadline, sleep=_Waits())
+
+
+def _put_of_the_upload(hold: _Hold, tmp_path: Path, generation: _Generation, deadline: Deadline) -> None:
+    generation.upload(_PausingS3(hold.keep, f"{PREFIX}/master.m3u8"), deadline=deadline)
+
+
+@pytest.mark.parametrize(
+    "request_that_never_returns",
+    [
+        pytest.param(_read_of_the_preflight, id="a-read-of-the-preflight"),
+        pytest.param(_read_of_the_download, id="a-read-of-the-download"),
+        pytest.param(_put_of_the_upload, id="a-put-of-the-upload"),
+    ],
+)
+def test_abandoned_requests_when_a_request_is_given_up_at_the_deadline_while_it_still_runs_should_grow_by_one(
+    tmp_path, generation, hold, request_that_never_returns
+):
+    # Arrange
+    counted_before = storage.abandoned_requests()
+
+    # Act: the job stops waiting at a real, short deadline; the request is let go only when the test ends
+    failure = _failure_of(
+        lambda: request_that_never_returns(hold, tmp_path, generation, Deadline.after_ms(SHORT_MS))
+    )
+
+    # Assert: the request was under way when the job gave it up
+    assert failure.error_class == "deadline_exceeded"
+    assert hold.entered.is_set()
+    assert storage.abandoned_requests() - counted_before == 1
+
+
+@pytest.mark.parametrize(
+    ("request_that_never_returns", "stalled_as"),
+    [
+        pytest.param(
+            _read_of_the_preflight, ("source_unavailable", "source_read_stalled", True), id="a-read-of-the-preflight"
+        ),
+        pytest.param(
+            _read_of_the_download, ("source_unavailable", "source_read_stalled", True), id="a-read-of-the-download"
+        ),
+        pytest.param(_put_of_the_upload, ("output_write_failed", "upload_stalled", True), id="a-put-of-the-upload"),
+    ],
+)
+def test_abandoned_requests_when_a_request_is_given_up_at_its_ceiling_with_time_left_on_the_deadline_should_grow_by_one(
+    tmp_path, generation, hold, short_ceiling, request_that_never_returns, stalled_as
+):
+    # Arrange: a ceiling of some 50 ms and a deadline that always has 0.2 s left: the request outlasts
+    # its ceiling with time left, and that time is too short for the wait before a repeat of it
+    counted_before = storage.abandoned_requests()
+
+    # Act: the job stops waiting at the ceiling; the request is let go only when the test ends
+    failure = _failure_of(
+        lambda: request_that_never_returns(hold, tmp_path, generation, _TimeLeft(NO_TIME_FOR_A_REPEAT_S))
+    )
+    assert hold.entered.wait(PROMPT_S)
+
+    # Assert: it stalled, which is no deadline, and it left its thread behind just the same
+    assert (failure.error_class, failure.code, failure.retryable) == stalled_as
+    assert storage.abandoned_requests() - counted_before == 1
+
+
+def test_abandoned_requests_when_two_requests_are_given_up_one_after_the_other_should_count_each_of_them(
+    tmp_path, generation, hold
+):
+    # Arrange
+    counted_before = storage.abandoned_requests()
+
+    # Act
+    first_failure = _failure_of(
+        lambda: _read_of_the_preflight(hold, tmp_path, generation, Deadline.after_ms(SHORT_MS))
+    )
+    second_failure = _failure_of(lambda: _put_of_the_upload(hold, tmp_path, generation, Deadline.after_ms(SHORT_MS)))
+
+    # Assert
+    assert (first_failure.code, second_failure.code) == ("source_read_deadline_exceeded", "upload_deadline_exceeded")
+    assert storage.abandoned_requests() - counted_before == 2
+
+
+def test_abandoned_requests_when_a_read_stalls_and_its_repeat_arrives_should_grow_by_one_though_the_download_succeeds(
+    tmp_path, small_chunks, hold, monkeypatch
+):
+    # Arrange: the first read of the first chunk never returns, with a minute left on the deadline and a
+    # ceiling of 50 ms; every later read answers at once
+    stalled = _StalledFirst(hold)
+
+    def first_read_never_returns(start: int, length: int) -> bytes:
+        stalled.request()
+        return OBJECT[start : start + length]
+
+    source = _StubSource(len(OBJECT), first_read_never_returns)
+    monkeypatch.setattr(storage, "_request_ceiling_s", stalled.ceiling_s)
+    destination = tmp_path / "source"
+    counted_before = storage.abandoned_requests()
+
+    # Act: the kept read is let go only when the test ends
+    written = download_source(source, destination=destination, deadline=_deadline(), sleep=stalled.sleep)
+
+    # Assert: the source is whole on disk, and the read that was given up still runs and is counted
+    assert hold.entered.is_set()
+    assert written == len(OBJECT)
+    assert destination.read_bytes() == OBJECT
+    assert storage.abandoned_requests() - counted_before == 1
+
+
+def test_abandoned_requests_when_a_put_stalls_and_its_repeat_is_taken_should_grow_by_one_though_the_upload_succeeds(
+    generation, hold, monkeypatch
+):
+    # Arrange: the storage never answers the first put of the first object, with a minute left on the
+    # deadline and a ceiling of 50 ms; it takes every later put at once
+    stalled = _StalledFirst(hold)
+    client = _PausingS3(stalled.request, f"{PREFIX}/master.m3u8")
+    monkeypatch.setattr(storage, "_request_ceiling_s", stalled.ceiling_s)
+    counted_before = storage.abandoned_requests()
+
+    # Act: the kept request is let go only when the test ends
+    uploaded = generation.upload(client, sleep=stalled.sleep)
+
+    # Assert: the generation is stored, its manifest last, and the put that was given up is counted
+    expected = {f"{PREFIX}/{path}": data for path, data in _Generation.FILES.items()}
+    expected[f"{PREFIX}/{MANIFEST_NAME}"] = _Generation.MANIFEST
+    assert hold.entered.is_set()
+    assert {call.key: call.body for call in client.stored} == expected
+    assert client.stored[-1].key == f"{PREFIX}/{MANIFEST_NAME}"
+    assert uploaded == sum(len(data) for data in expected.values())
+    assert storage.abandoned_requests() - counted_before == 1
+
+
+def test_abandoned_requests_when_a_request_returns_in_time_should_not_grow():
+    # Arrange
+    source = DeadlineSource(_StubSource(len(OBJECT), lambda start, length: bytes(length)), _deadline())
+    counted_before = storage.abandoned_requests()
+
+    # Act
+    data = source.read(0, CHUNK_BYTES)
+
+    # Assert
+    assert len(data) == CHUNK_BYTES
+    assert storage.abandoned_requests() - counted_before == 0
+
+
+def test_abandoned_requests_when_a_request_raises_in_time_should_not_grow():
+    # Arrange
+    def failing(start: int, length: int) -> bytes:
+        raise RuntimeError("a bug in the source")
+
+    source = DeadlineSource(_StubSource(len(OBJECT), failing), _deadline())
+    counted_before = storage.abandoned_requests()
+
+    # Act
+    with pytest.raises(RuntimeError):
+        source.read(0, CHUNK_BYTES)
+
+    # Assert
+    assert storage.abandoned_requests() - counted_before == 0
+
+
+@pytest.mark.parametrize(
+    "overdue_ending",
+    [
+        pytest.param(None, id="it-returns-its-bytes"),
+        pytest.param(RuntimeError("a bug in the source"), id="it-raises"),
+    ],
+)
+def test_abandoned_requests_when_a_request_ends_after_the_deadline_passed_should_not_grow(overdue_ending):
+    # Arrange: the deadline passes while the request runs, and the request then ends: no thread is left behind
+    deadline = _HandPassedDeadline()
+
+    def overdue(start: int, length: int) -> bytes:
+        deadline.pass_now()
+        if overdue_ending is not None:
+            raise overdue_ending
+        return bytes(length)
+
+    source = DeadlineSource(_StubSource(len(OBJECT), overdue), deadline)
+    counted_before = storage.abandoned_requests()
+
+    # Act
+    failure = _failure_of(lambda: source.read(0, CHUNK_BYTES))
+
+    # Assert: out of time, and not abandoned
+    assert failure.code == "source_read_deadline_exceeded"
+    assert storage.abandoned_requests() - counted_before == 0
+
+
+def test_abandoned_requests_when_no_thread_can_be_started_for_a_request_should_not_grow(monkeypatch):
+    # Arrange: the operating system gives this process no more threads, so no request is ever under way
+    source = DeadlineSource(_StubSource(len(OBJECT), lambda start, length: bytes(length)), _deadline())
+    counted_before = storage.abandoned_requests()
+
+    def no_thread(thread: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    # Act
+    with monkeypatch.context() as patched:
+        patched.setattr(threading.Thread, "start", no_thread)
+        failure = _failure_of(lambda: source.read(0, CHUNK_BYTES))
+
+    # Assert
+    assert failure.code == "storage_request_start_failed"
+    assert storage.abandoned_requests() - counted_before == 0
+
+
+def test_abandoned_requests_when_the_deadline_had_passed_before_the_request_should_not_grow():
+    # Arrange
+    inner = _StubSource(len(OBJECT), lambda start, length: bytes(length))
+    source = DeadlineSource(inner, _passed_deadline())
+    counted_before = storage.abandoned_requests()
+
+    # Act
+    failure = _failure_of(lambda: source.read(0, CHUNK_BYTES))
+
+    # Assert: no request was started, so none was abandoned
+    assert failure.code == "source_read_deadline_exceeded"
+    assert inner.reads == []
+    assert storage.abandoned_requests() - counted_before == 0
 
 
 # --- the clients ----------------------------------------------------------------------------------

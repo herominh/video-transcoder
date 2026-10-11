@@ -2,6 +2,68 @@
 
 Deploy the Video Transcoder as a RunPod serverless GPU worker. Scale to zero when idle, pay only during transcoding.
 
+> **Read this first (2026-10-11).** Since D1's last slice the image's entry point (`wrappers/runpod_handler.py`) speaks
+> **transcode contract v2 only**. An image built from this commit cannot serve the Video Hub of today, in one of two
+> ways: on an endpoint that still has only the v1 variables the worker does not start at all (it stops on the first
+> missing `VH_*` variable, so jobs wait in the queue), and with the v2 variables set it refuses the v1 job input the Hub
+> still sends. Build and publish it only together with the Hub release that dispatches contract v2. Only the next
+> section, "The worker under contract v2", describes what this image really does. EVERYTHING after it (from
+> "Architecture" to "Files": the diagram, the prerequisites, the variables of Step 2, the job flow, the auth model,
+> the troubleshooting table) is the v1 text, kept until that release rewrites it.
+
+## The worker under contract v2
+
+What one job is (`wrappers/runpod_handler.py`, `core/protocol/handler.py`, `core/job/runner.py`; the rules are the
+contract's `tests/contracts/transcode/v2/README.md`):
+
+1. **Start of the process.** Before any job is taken the worker checks the contract tree the image ships and reads its
+   whole configuration. A tree or a configuration it cannot trust stops the process; the error names the file or the
+   variable and the rule, never a value.
+2. **The job input** is `{vh_message, vh_signature}`: a `transcode.request` signed by the Hub. Nothing of it is trusted
+   until the signature verifies under a Hub-to-worker key. A job the worker may not act on fails with the refusal's own
+   words (step, layer, reason) and nothing of the input.
+3. **The claim.** The worker claims the dispatch at the Hub's claim address with a fresh random runtime id. Only a
+   signed grant lets it work; every other ending is a signed `transcode.unclaimed` and no work. The grant carries the
+   generation's media key; the job input never does.
+4. **The job.** Preflight, download, encode, package, upload under the granted prefix, the manifest last.
+5. **The result** (`transcode.result.completed` or `.failed`, signed) is the job's output, `{vh_message, vh_signature}`,
+   and is also posted to the Hub's callback address (best effort). The Hub can always read the job output.
+6. **One wall-time budget.** The dispatch's `limits.max_wall_time_ms` counts from the moment the worker begins to
+   handle the job and bounds the claim, the job and the callback. Set RunPod's execution timeout above it, with a
+   margin, so that the worker can still report a typed failure.
+
+Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are not read by this entry point):
+
+- the `VH_*` protocol variables listed in the docstring of `core/protocol/settings.py` (accepted versions, audience,
+  the signing keys of both directions, the claim and callback URLs, the clock skew, and one storage profile per
+  `credential_ref`: endpoint, region and credentials);
+- `VH_IMAGE_DIGEST` (required): `sha256:` and the 64 hex digits of the image the endpoint runs; a container cannot
+  learn its own digest, and a result reports it;
+- `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, printable ASCII only;
+- `FFMPEG_PATH` and `FFPROBE_PATH` (optional): the tools the stages run, when they are not `ffmpeg` and `ffprobe` on
+  the `PATH` (the image links both into `/usr/local/bin`).
+
+Things an operator should know:
+
+- **What RunPod records for a failed job.** Only the worker's own words: `JobRefused` with the refusal's text, or
+  `WorkerFault` naming the class of an unexpected error. The worker's log has the class and the stack of a bug, never
+  an error's own text.
+- **`refresh_worker`.** Once a storage request had to be abandoned, at the job's deadline or at the request's own time
+  ceiling (so also in a job that then completed after a repeat), every job of that process asks
+  RunPod to stop the pod when it returns (the SDK takes that flag out of the output), so that a stuck request's thread
+  and connection end with the process instead of piling up in a warm worker. A stuck request can outlive the job it
+  belonged to until then.
+- **The SDK version matters.** The entry point relies on three behaviours read from RunPod SDK 1.10.1: the
+  `refresh_worker` member is taken out of the output, a failed job is recorded with the error's text and traceback,
+  and one job runs at a time. `requirements.txt` allows a range, so run the whole suite in every rebuilt image (five of
+  its test cases drive the handler through the SDK's own `run_job`), or pin the version when the image is built.
+- **Logs.** The RunPod SDK prints each job's output at its default DEBUG level. A result or an unclaimed report holds no
+  secret. Do not add logging of the job input: the dispatch carries a one-time token. The worker's own lines never name
+  an endpoint, a bucket, a key or a path; for the same reason the entry point raises urllib3's connection-pool logger
+  to ERROR (its "pool is full" warning names the storage host).
+- **Python.** The image starts the worker with `python3`, which is Python 3.10 there; the suite is run in the image
+  for that reason.
+
 ## Architecture
 
 ```

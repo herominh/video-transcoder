@@ -4,6 +4,10 @@ Neither image carries the contract tree (the Modal image carries no jsonschema e
 the source (every import statement, function bodies included, followed through the repository's own
 modules) and runs nothing: an import made by name at run time (importlib, __import__) is not seen.
 The v1 dev server (wrappers/docker_server.py) serves `core.api:app` by name, so core/api.py stands for it.
+
+The RunPod entry point (wrappers/runpod_handler.py) is the other side of that boundary: it reaches one
+start of the worker under contract v2 (core.protocol.handler) and the job runner (core.job.runner), and
+none of the v1 worker's modules.
 """
 
 import ast
@@ -14,6 +18,8 @@ import pytest
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_PACKAGE = "core.protocol"
 ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py", "wrappers/docker_server.py"]
+RUNPOD_ENTRY_POINT = "wrappers/runpod_handler.py"
+V1_MODULES = ["core.api", "core.config", "core.transcoder", "core.storage", "core.callback", "core.signing"]
 
 
 def _module_path(module: str) -> Path | None:
@@ -89,3 +95,19 @@ def test_reachable_modules_when_following_the_modal_app_should_find_what_it_impo
 
     # Assert
     assert {"core", "core.api", "core.callback", "core.storage", "core.transcoder"} <= reachable
+
+
+def test_runpod_entry_point_when_its_imports_are_followed_should_reach_the_v2_start_and_the_job_runner():
+    # Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / RUNPOD_ENTRY_POINT)
+
+    # Assert
+    assert {"core.protocol.handler", "core.job.runner"} <= reachable
+
+
+def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_a_v1_module():
+    # Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / RUNPOD_ENTRY_POINT)
+
+    # Assert
+    assert sorted(name for name in reachable if name in V1_MODULES) == []
