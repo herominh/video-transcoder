@@ -38,7 +38,9 @@ Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are 
   the signing keys of both directions, the claim and callback URLs, the clock skew, and one storage profile per
   `credential_ref`: endpoint, region and credentials);
 - `VH_IMAGE_DIGEST` (required): `sha256:` and the 64 hex digits of the image the endpoint runs; a container cannot
-  learn its own digest, and a result reports it;
+  learn its own digest, and a result reports it. Set the endpoint's container image by that same digest
+  (`<repository>@sha256:<digest>`, not a tag such as `:latest`) and change the two together: a tag can be moved to
+  another image while every result goes on reporting the old digest;
 - `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, printable ASCII only;
 - `FFMPEG_PATH` and `FFPROBE_PATH` (optional): the tools the stages run, when they are not `ffmpeg` and `ffprobe` on
   the `PATH` (the image links both into `/usr/local/bin`).
@@ -59,8 +61,10 @@ Things an operator should know:
   its test cases drive the handler through the SDK's own `run_job`), or pin the version when the image is built.
 - **Logs.** The RunPod SDK prints each job's output at its default DEBUG level. A result or an unclaimed report holds no
   secret. Do not add logging of the job input: the dispatch carries a one-time token. The worker's own lines never name
-  an endpoint, a bucket, a key or a path; for the same reason the entry point raises urllib3's connection-pool logger
-  to ERROR (its "pool is full" warning names the storage host).
+  an endpoint, a bucket, a key or a path; for the same reason the entry point keeps every line of urllib3, the HTTP
+  library under the storage clients, out of the log (its warnings name the storage host, and two of them the request's
+  whole URL, so the bucket and the object key). A storage that answers with malformed headers or fills a connection
+  pool therefore leaves no line of urllib3's; a request that fails is still logged in the worker's own words.
 - **Python.** The image starts the worker with `python3`, which is Python 3.10 there; the suite is run in the image
   for that reason.
 

@@ -69,10 +69,10 @@ REFRESH_WORKER_MEMBER = "refresh_worker"
 # How many errors of a chain (an error, its cause or the error it interrupted, and so on) a bug's log follows.
 MAX_CHAINED_ERRORS = 8
 # The level and the line format of the process's log, and the logger of the HTTP library under the
-# storage clients, whose warnings name the host it talks to.
+# storage clients: the parent of every logger that library writes on.
 LOG_LEVEL = logging.INFO
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
-CONNECTION_POOL_LOGGER = "urllib3.connectionpool"
+HTTP_LIBRARY_LOGGER = "urllib3"
 
 # What the SDK calls with each job, and what it takes as the job's output.
 SdkHandler = Callable[[object], dict[str, Any]]
@@ -88,15 +88,27 @@ class WorkerFault(Exception):
 
 
 def configure_logging() -> None:
-    """Set up the process's log: INFO and above from every logger, in one line format, and errors only
-    from the HTTP library's connection pool. Called when this file is run, never on import.
+    """Set up the process's log: INFO and above from every logger, in one line format, and nothing at
+    all from the HTTP library under the storage clients. Called when this file is run, never on import.
 
-    Once more requests of one storage client are in flight than its pool holds connections (abandoned
-    requests pile up on a client), urllib3 warns "Connection pool is full, discarding connection: <host>".
+    urllib3's own lines name what it talks to, and no log line of the worker holds an endpoint, a bucket
+    or an object key: "Connection pool is full, discarding connection: <host>" (once abandoned requests
+    pile up on one client) and "Certificate did not match expected hostname: <host>" name the storage's
+    host; "Failed to parse headers (url=<url>)", on an answer with a malformed header line, and "Retrying
+    ... after connection broken ...: <url>" name the request, so the bucket and the object key too.
+
+    The library's whole family of loggers is cut off from the process's log at its parent, not logger by
+    logger and not by a level. The library has moved a warning from one of its loggers to another between
+    versions, the image pins none, and the SDK's import gives that parent a level of its own, so one set
+    here would be lost. The price is that none of the library's lines is in the log; a request that fails
+    still ends as an error of the worker's, typed and logged in its own words.
     """
     logging.basicConfig(level=LOG_LEVEL, format=LOG_FORMAT)
-    # Its warnings name the storage endpoint's host, and no log line of the worker holds an endpoint.
-    logging.getLogger(CONNECTION_POOL_LOGGER).setLevel(logging.ERROR)
+    http_library = logging.getLogger(HTTP_LIBRARY_LOGGER)
+    # A handler of its own that writes nothing: a record that meets no handler at all goes to Python's
+    # handler of last resort, which writes a warning's text to standard error.
+    http_library.addHandler(logging.NullHandler())
+    http_library.propagate = False
 
 
 def build_handler(env: Mapping[str, str]) -> SdkHandler:

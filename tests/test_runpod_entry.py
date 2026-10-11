@@ -11,9 +11,9 @@ text.
 
 build_handler() is the real wiring: it refuses a contract tree or a configuration it cannot trust before
 it returns a handler. configure_logging() sets up the process's log when the file is run: the worker's
-own loggers at INFO, and errors only from the HTTP library's connection pool, whose warnings name the
-storage's host. Importing the module loads neither the SDK nor a v1 module, needs no configuration and
-configures no logging.
+own loggers at INFO, and nothing from the HTTP library under the storage clients, whose warnings name
+the storage's host and a request's whole URL. Importing the module loads neither the SDK nor a v1
+module, needs no configuration and configures no logging.
 
 The count of abandoned storage requests belongs to the process, and a test session abandons some long
 before these tests run. So every test here gives the wrapper a count of its own, which starts at zero
@@ -34,6 +34,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -156,11 +157,51 @@ CHAINED_TEXT = f"the connection to {CHAINED_CANARY} was reset"
 # The text of the error a log line fails on when it cannot be built or written.
 LOG_FAILURE_CANARY = "CANARY-quoted-by-a-failing-log"
 LOG_FAILURE_TEXT = f"no memory left for {LOG_FAILURE_CANARY}"
-# The logger urllib3's connection pool warns on, the warning it writes once more requests of one client
-# are in flight than its pool holds connections, and a storage host no log line may show.
-CONNECTION_POOL_LOGGER = "urllib3.connectionpool"
-POOL_IS_FULL = "Connection pool is full, discarding connection: %s. Connection pool size: %s"
+# The HTTP library under the storage clients: the parent of every logger it writes on, and a storage
+# host, bucket and object key no log line may show.
+HTTP_LIBRARY_LOGGER = "urllib3"
 STORAGE_HOST_CANARY = "account-canary.r2.example.invalid"
+STORAGE_BUCKET_CANARY = "bucket-canary"
+STORAGE_KEY_CANARY = "original-videos/uuid-canary/source.mp4"
+STORAGE_URL_CANARY = f"https://{STORAGE_HOST_CANARY}/{STORAGE_BUCKET_CANARY}/{STORAGE_KEY_CANARY}"
+STORAGE_CANARIES = (STORAGE_HOST_CANARY, STORAGE_BUCKET_CANARY, STORAGE_KEY_CANARY)
+# What that library writes with what it talks to, as (logger, level, format, arguments): the four
+# warnings of urllib3 2.7.0 (connectionpool.py and connection.py; 1.26 wrote the third on the pool's
+# logger), and an error on a logger no version has yet.
+HTTP_LIBRARY_LINES = (
+    pytest.param(
+        "urllib3.connectionpool", logging.WARNING,
+        "Connection pool is full, discarding connection: %s. Connection pool size: %s",
+        (STORAGE_HOST_CANARY, 10),
+        id="the-pool-is-full",
+    ),
+    pytest.param(
+        "urllib3.connectionpool", logging.WARNING,
+        "Retrying (%r) after connection broken by '%r': %s",
+        ("Retry(total=0)", "ProtocolError()", f"/{STORAGE_BUCKET_CANARY}/{STORAGE_KEY_CANARY}"),
+        id="a-broken-connection-is-retried",
+    ),
+    pytest.param(
+        "urllib3.connection", logging.WARNING,
+        "Failed to parse headers (url=%s): %s",
+        (STORAGE_URL_CANARY, "[MissingHeaderBodySeparatorDefect()], unparsed data: 'x'"),
+        id="the-headers-of-an-answer-do-not-parse",
+    ),
+    pytest.param(
+        "urllib3.connection", logging.WARNING,
+        "Certificate did not match expected hostname: %s. Certificate: %s",
+        (STORAGE_HOST_CANARY, {"subjectAltName": (("DNS", "another.example.invalid"),)}),
+        id="a-certificate-is-for-another-host",
+    ),
+    pytest.param(
+        "urllib3.a_logger_of_a_later_version", logging.ERROR,
+        "could not finish the request to %s",
+        (STORAGE_URL_CANARY,),
+        id="an-error-on-a-logger-of-a-later-version",
+    ),
+)
+# How long the loopback server of the real library's test and its one request may take.
+LOOPBACK_TIMEOUT_S = 5.0
 # Loggers of the worker's own: the entry point's, the storage's and the start's.
 WORKER_LOGGERS = ("wrappers.runpod_handler", "core.job.storage", "core.protocol.handler")
 
@@ -959,69 +1000,159 @@ def test_build_handler_when_the_tree_and_the_configuration_are_both_broken_shoul
 # --- the process's log ----------------------------------------------------------------------------
 
 
+def _logging_state() -> list[tuple[list[logging.Handler], int, bool]]:
+    """The handlers, the level and the handing-on of the root logger and of the HTTP library's."""
+    return [
+        (list(logger.handlers), logger.level, logger.propagate)
+        for logger in (logging.getLogger(), logging.getLogger(HTTP_LIBRARY_LOGGER))
+    ]
+
+
 @contextlib.contextmanager
 def _logging_nobody_configured() -> Iterator[None]:
     """Inside, the root logger is as in a process that has just started: no handler, its default level.
-    On leaving, its handlers and its level and the connection pool logger's level are what they were
-    before, so that no other test meets what was configured inside.
+    The HTTP library's logger is as nobody touched it either, and barer than the library leaves it: no
+    handler (the library hangs one of its own on it), no level, its records handed on to the root.
+    On leaving, the handlers, the level and the handing-on of both are what they were before, so that no
+    other test meets what was configured inside.
 
     It is a context of the test's body and not a fixture: pytest hangs handlers of its own on the root
     logger for each phase of a test (set-up, call, tear-down) and takes them off when the phase ends, so
     the handlers a fixture saved at set-up are not the ones to put back at tear-down.
     """
-    root, pool = logging.getLogger(), logging.getLogger(CONNECTION_POOL_LOGGER)
-    handlers, root_level, pool_level = list(root.handlers), root.level, pool.level
-    for handler in handlers:
-        root.removeHandler(handler)
+    root, library = logging.getLogger(), logging.getLogger(HTTP_LIBRARY_LOGGER)
+    state_before = _logging_state()
+    for logger in (root, library):
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
     root.setLevel(logging.WARNING)
+    library.setLevel(logging.NOTSET)
+    library.propagate = True
     try:
         yield
     finally:
-        for configured in list(root.handlers):
-            root.removeHandler(configured)
-            configured.close()
-        for handler in handlers:
-            root.addHandler(handler)
-        root.setLevel(root_level)
-        pool.setLevel(pool_level)
+        for logger, (handlers, level, propagate) in zip((root, library), state_before):
+            for configured in list(logger.handlers):
+                logger.removeHandler(configured)
+                configured.close()
+            for handler in handlers:
+                logger.addHandler(handler)
+            logger.setLevel(level)
+            logger.propagate = propagate
 
 
-def test_configure_logging_when_called_in_a_fresh_process_should_log_the_worker_at_info_and_the_pool_at_error():
+class _Records(logging.Handler):
+    """Keeps the records it is handed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def _server_with_a_malformed_header() -> Iterator[int]:
+    """A server on the loopback address that answers one request with an empty 200 whose second header
+    line has no colon; gives its port."""
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(LOOPBACK_TIMEOUT_S)
+
+    def answer_one_request() -> None:
+        try:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(LOOPBACK_TIMEOUT_S)
+                received = b""
+                while b"\r\n\r\n" not in received:
+                    chunk = connection.recv(65536)
+                    if not chunk:
+                        return
+                    received += chunk
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\na header line without its colon\r\n"
+                    b"Connection: close\r\n\r\n"
+                )
+        except OSError:
+            # The test's own assertions say what did not arrive.
+            return
+
+    server = threading.Thread(target=answer_one_request, daemon=True)
+    server.start()
+    try:
+        yield listener.getsockname()[1]
+    finally:
+        listener.close()
+        server.join(LOOPBACK_TIMEOUT_S)
+
+
+def test_configure_logging_when_called_in_a_fresh_process_should_log_the_worker_at_info_through_one_handler():
     # Arrange
-    root, pool = logging.getLogger(), logging.getLogger("urllib3.connectionpool")
-    state_before = (list(root.handlers), root.level, pool.level)
+    state_before = _logging_state()
 
     # Act
     with _logging_nobody_configured():
         runpod_handler.configure_logging()
-        pool_level = pool.level
         worker_levels = [logging.getLogger(name).getEffectiveLevel() for name in WORKER_LOGGERS]
-        root_handlers = len(root.handlers)
+        root_handlers = len(logging.getLogger().handlers)
 
-    # Assert: one handler for the whole process, the worker's loggers at INFO, the pool's at ERROR; and
-    # the logging state of the test session is what it was
-    assert pool_level == logging.ERROR
+    # Assert: one handler for the whole process and the worker's loggers at INFO; and the logging state of
+    # the test session is what it was
     assert worker_levels == [logging.INFO, logging.INFO, logging.INFO]
     assert root_handlers == 1
-    assert (list(root.handlers), root.level, pool.level) == state_before
+    assert _logging_state() == state_before
 
 
-def test_configure_logging_when_the_connection_pool_warns_that_it_is_full_should_keep_the_storages_host_out_of_the_log(
-    capsys,
+@pytest.mark.parametrize(("logger_name", "level", "line", "arguments"), HTTP_LIBRARY_LINES)
+def test_configure_logging_when_the_http_library_logs_what_it_talks_to_should_keep_the_storage_out_of_the_log(
+    logger_name, level, line, arguments, capsys,
 ):
-    # Arrange: what urllib3 writes once abandoned requests have piled up on one storage client
-    pool, worker = logging.getLogger("urllib3.connectionpool"), logging.getLogger("core.job.storage")
+    # Arrange: the library's logger and one of the worker's own
+    library, worker = logging.getLogger(logger_name), logging.getLogger("core.job.storage")
 
-    # Act: the process's log goes to standard error
+    # Act: the process's log goes to standard error. The SDK is imported after the set-up, and its import
+    # gives the parent of the library's loggers a level of its own (runpod/__init__.py: WARNING)
     with _logging_nobody_configured():
         runpod_handler.configure_logging()
-        pool.warning(POOL_IS_FULL, STORAGE_HOST_CANARY, 10)
+        logging.getLogger(HTTP_LIBRARY_LOGGER).setLevel(logging.WARNING)
+        library.log(level, line, *arguments)
         worker.info("a line of the worker's own")
         written = capsys.readouterr().err
 
-    # Assert: the worker's line is there, in the process's format; the host is not
+    # Assert: the worker's line is there, in the process's format; nothing of the library's line is
     assert " INFO core.job.storage: a line of the worker's own\n" in written
-    assert STORAGE_HOST_CANARY not in written
+    assert [canary for canary in STORAGE_CANARIES if canary in written] == []
+    assert logger_name not in written
+
+
+def test_configure_logging_when_the_real_http_library_reads_a_malformed_header_should_keep_the_request_out_of_the_log(
+    capsys,
+):
+    # Arrange: a storage whose answer has a header line without its colon, which the library reports with
+    # the request's whole URL; and a handler on the library's own logger, which still gets what it writes
+    urllib3 = pytest.importorskip("urllib3")
+    library, worker = logging.getLogger(HTTP_LIBRARY_LOGGER), logging.getLogger("core.job.storage")
+    reported = _Records()
+
+    # Act: one request of the real library, after the set-up and the level the SDK's import leaves
+    with _server_with_a_malformed_header() as port, _logging_nobody_configured():
+        runpod_handler.configure_logging()
+        library.setLevel(logging.WARNING)
+        library.addHandler(reported)
+        with urllib3.PoolManager(retries=False, timeout=LOOPBACK_TIMEOUT_S) as pool:
+            answer = pool.request("GET", f"http://127.0.0.1:{port}/{STORAGE_BUCKET_CANARY}/{STORAGE_KEY_CANARY}")
+        worker.info("a line of the worker's own")
+        written = capsys.readouterr().err
+
+    # Assert: the library did report the answer, with the bucket and the key; the process's log has the
+    # worker's line and nothing of the report
+    reports = [record.getMessage() for record in reported.records]
+    assert answer.status == 200
+    assert [report for report in reports if STORAGE_KEY_CANARY in report and STORAGE_BUCKET_CANARY in report] != []
+    assert " INFO core.job.storage: a line of the worker's own\n" in written
+    assert [canary for canary in STORAGE_CANARIES if canary in written] == []
+    assert "urllib3" not in written
 
 
 # --- importing the entry point --------------------------------------------------------------------
@@ -1036,7 +1167,7 @@ def test_entry_point_when_imported_by_a_fresh_interpreter_should_load_no_sdk_or_
         f"print([name for name in {NEVER_IMPORTED!r} if name in sys.modules])\n"
         "print(logging.getLogger().handlers)\n"
         "print(logging.getLogger().level)\n"
-        f"print(logging.getLogger({CONNECTION_POOL_LOGGER!r}).level)\n"
+        f"print(logging.getLogger({HTTP_LIBRARY_LOGGER!r}).propagate)\n"
     )
     env = {name: value for name, value in os.environ.items() if not name.startswith("VH_")}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1049,9 +1180,9 @@ def test_entry_point_when_imported_by_a_fresh_interpreter_should_load_no_sdk_or_
 
     # Assert: it imported, without a configuration to build anything from; it loaded none of the modules,
     # and the logging is as nobody configured it: no handler on the root logger, its default level (30,
-    # WARNING), and no level of its own on the connection pool's logger (0)
+    # WARNING), and the HTTP library's logger still hands its records on
     assert imported.returncode == 0, imported.stderr
-    assert imported.stdout.splitlines() == ["[]", "[]", "30", "0"]
+    assert imported.stdout.splitlines() == ["[]", "[]", "30", "True"]
 
 
 # --- through the SDK's own run_job ------------------------------------------------------------------
