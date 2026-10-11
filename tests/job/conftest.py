@@ -2,6 +2,7 @@
 
 ScriptedDeadline and ClockDeadline are deadlines a test decides, so that no sleep and no real clock does.
 settle_requests_first() takes the host's speed out of a test that has the job wait for a storage request.
+held_at_most_a_while() keeps a test that holds a scratch directory's lock from hanging the suite.
 FakeS3 stands in for the S3 client: it serves ranged, conditional reads of objects it holds with the
 response shape core.source_reader.S3RangeSource checks, and records every PutObject in order. A claimed
 execution is built from the contract's own fixtures (the P01/P02 requests, the P24/P27 grants) through
@@ -14,12 +15,13 @@ and ctx-hub-storage.json.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 from botocore.exceptions import ClientError
@@ -66,6 +68,9 @@ HTTP_PRECONDITION_FAILED = 412
 HTTP_RANGE_NOT_SATISFIABLE = 416
 DELIVERED = HttpAnswer(HTTP_OK, b"", None)
 CLOCK_SKEW_S = 300
+# How long a storage stand-in that never answers holds a request before it lets it go by itself, so that
+# a regression fails a test instead of hanging the suite; far longer than any deadline a test sets.
+HANG_RELEASE_S = 20.0
 PROGRESS_KIND = "transcode.progress"
 COMPLETED_KIND = "transcode.result.completed"
 FAILED_KIND = "transcode.result.failed"
@@ -156,6 +161,38 @@ def settle_requests_first(patched: pytest.MonkeyPatch, arrival: threading.Event 
             thread.join(SETTLE_TICK_S)
 
     patched.setattr(threading.Thread, "start", start_and_see_the_request_settle)
+
+
+# --- a lock a test holds, which no code under test may wait for --------------------------------------
+
+# How long a test that holds a scratch directory's lock, as a live execution of another process would,
+# keeps it before it lets go by itself. The code under test never waits for a lock. Were it ever to, on
+# the test's own thread, it would wait for ever, and nothing times a test out: with this it gets on
+# after a few seconds, and the test fails on what it did with a lock it should never have got.
+LOCK_RELEASE_S = 5.0
+
+
+def held_at_most_a_while(descriptor: int) -> Callable[[], None]:
+    """Close `descriptor`, on which a test holds a lock, by itself after LOCK_RELEASE_S, and return the
+    function that closes it at once if that has not happened. Either way it is closed exactly once."""
+    closed_by_itself: list[bool] = []
+
+    def close_by_itself() -> None:
+        os.close(descriptor)
+        closed_by_itself.append(True)
+
+    timer = threading.Timer(LOCK_RELEASE_S, close_by_itself)
+    timer.daemon = True
+    timer.start()
+
+    def let_go() -> None:
+        # Once the timer's thread has ended it has closed the descriptor, or it never will.
+        timer.cancel()
+        timer.join()
+        if not closed_by_itself:
+            os.close(descriptor)
+
+    return let_go
 
 
 # --- a fake S3 client ---------------------------------------------------------------------------

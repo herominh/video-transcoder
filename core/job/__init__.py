@@ -13,6 +13,9 @@ Modal app and the v1 dev server never load (tests/test_runtime_scope.py).
                     the granted prefix, the manifest last (upload_client())
     ffmpeg_version  the version of the installed ffmpeg, for a result's `encoder` block
     progress        ProgressReporter: best-effort `transcode.progress` messages
+    scratch         the lock an execution holds on its scratch directory, and
+                    remove_leftover_scratch(), for the entry point to call at process start: it
+                    removes the scratch directories a killed process left behind
     runner          JobRunner: the stages in order (preflight and plan, download, encode, package,
                     upload), every ending typed, the scratch directory always removed; it takes one
                     client factory for the source and one for the output
