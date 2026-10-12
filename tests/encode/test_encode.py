@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import errno
+import gc
 import hashlib
 import json
+import logging
 import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
+import weakref
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -23,7 +29,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 import core.encode
 import core.hls_key
-from core.bounded_process import Deadline
+from core.bounded_process import BoundedResult, Deadline
 from core.encode import (
     DURATION_SLACK_MS,
     ArtifactFile,
@@ -45,6 +51,7 @@ from tests.encode.conftest import (
     fast_profile,
     probe_facts,
 )
+from tests.failing_log import reported_log_failures
 from tests.preflight.conftest import FFMPEG_TIMEOUT_S
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the encode runs under POSIX process groups")
@@ -2197,3 +2204,841 @@ def test_encode_rendition_when_the_self_decode_of_an_encrypted_rendition_ends_sh
     assert output.segment_count == 1
     assert list(job.work_dir.iterdir()) == []
     assert all(path.read_bytes() != MEDIA_KEY for path in _all_files(job.output_root, job.work_dir))
+
+
+# --- a log line whose handler fails ------------------------------------------------------------------
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes every line's
+# handler fail; how the rendition ends is how it ends without it. Unless a test takes `encode_media`,
+# no ffmpeg runs: a stand-in for run_bounded ends as the test says, having written what the test says.
+
+# What the text of an error holds that must never reach the worker's output: the path an operating
+# system's error names, the path a removal that failed names, and what a bug choked on.
+PATH_CANARY = "/CANARY/path/in/an/os/errors/text"
+REMOVAL_CANARY = "/CANARY/path/of/what/could/not/be/removed"
+BUG_CANARY = "CANARYtextOfABugUnderTheEncode0123"
+EXITED_CLEANLY = BoundedResult(
+    returncode=0, stdout=b"", stderr_tail=b"", timed_out=False, stdout_overflow=False, stderr_truncated=False
+)
+EXITED_WITH_AN_ERROR = dataclasses.replace(EXITED_CLEANLY, returncode=1)
+STOPPED_BY_ITS_MONITOR = dataclasses.replace(EXITED_CLEANLY, returncode=None, stopped_by_monitor=True)
+ONE_TS_PACKET = bytes([TS_SYNC_BYTE]) + bytes(TS_PACKET_BYTES - 1)
+TWO_SEGMENT_PLAYLIST = _playlist_text(target=1, extinf="1.000000").replace(
+    "#EXT-X-ENDLIST\n", "#EXTINF:1.000000,\nsegment_0001.ts\n#EXT-X-ENDLIST\n"
+)
+SELF_DECODE_CWD = "cwd"
+
+
+def _raising(error: BaseException) -> Callable[..., Any]:
+    """A stand-in for a function that fails with `error`."""
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise error
+
+    return fail
+
+
+def _encode_os(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+    """Replace what core.encode sees of `os`, leaving the real module alone for everything else."""
+    view = SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+    for name, replacement in overrides.items():
+        setattr(view, name, replacement)
+    monkeypatch.setattr(core.encode, "os", view)
+
+
+def _ffmpeg_stand_in(monkeypatch: pytest.MonkeyPatch, run: Callable[[Path, Any], BoundedResult]) -> None:
+    """Put `run` where the encode starts ffmpeg: it is handed the rendition's directory and the output
+    monitor, and returns how ffmpeg ended, or raises what starting it raised."""
+
+    def run_bounded(argv: list[str], **limits: Any) -> BoundedResult:
+        return run(Path(argv[-1]).parent, limits.get("monitor"))
+
+    monkeypatch.setattr(core.encode, "run_bounded", run_bounded)
+
+
+def _wrote_a_shaped_rendition(rendition_dir: Path, monitor: Any) -> BoundedResult:
+    """An ffmpeg that exited well, having written a playlist in exactly its shape and one whole TS
+    packet: the right files, but no video."""
+    (rendition_dir / "playlist.m3u8").write_text(_playlist_text(target=1, extinf="1.000000"), encoding="ascii")
+    (rendition_dir / "segment_0000.ts").write_bytes(ONE_TS_PACKET)
+    return EXITED_CLEANLY
+
+
+def _wrote_nothing(rendition_dir: Path, monitor: Any) -> BoundedResult:
+    return EXITED_CLEANLY
+
+
+def _self_decode_stand_in(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    """Let the encode's own run of ffmpeg through, and have the self-decode's run raise `error`."""
+    _self_decode_raising(monkeypatch, lambda: error)
+
+
+def _self_decode_raising(monkeypatch: pytest.MonkeyPatch, make_error: Callable[[], BaseException]) -> None:
+    """Let the encode's own run of ffmpeg through, and have the self-decode's run raise what
+    `make_error` makes for it."""
+    real_run_bounded = core.encode.run_bounded
+    runs: list[list[str]] = []
+
+    def run_bounded(argv: list[str], **limits: Any) -> BoundedResult:
+        runs.append(argv)
+        if len(runs) > 1:
+            raise make_error()
+        return real_run_bounded(argv, **limits)
+
+    monkeypatch.setattr(core.encode, "run_bounded", run_bounded)
+
+
+def _fail_the_making_of(monkeypatch: pytest.MonkeyPatch, name: str, error: OSError) -> None:
+    """Make the making of a directory called `name` fail with `error`; every other one is made."""
+    real_mkdir = Path.mkdir
+
+    def mkdir(path: Path, *args: Any, **kwargs: Any) -> None:
+        if path.name == name:
+            raise error
+        real_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+
+
+def _refuse_the_removal_of(monkeypatch: pytest.MonkeyPatch, directory: Path) -> None:
+    """Make the removal of `directory` fail, on an error whose own text names a path; every other
+    tree is removed."""
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path: Any, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == directory:
+            raise PermissionError(errno.EACCES, "Permission denied", REMOVAL_CANARY)
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(core.encode.shutil, "rmtree", rmtree)
+
+
+def _refuse_the_removal_of_key_files(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the removal of the key's files fail, on an error whose own text names a path."""
+
+    def refuse(path: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", REMOVAL_CANARY)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+
+def _carries_nothing_of_another_error(raised: pytest.ExceptionInfo[WorkerFailure]) -> bool:
+    return raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_a_monitor_that_cannot_look_should_keep_the_path_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: the rendition directory is gone when the monitor looks, so its look fails on the
+    # operating system's own error, whose text names the directory
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+
+    def lost_its_directory(rendition_dir: Path, monitor: Any) -> BoundedResult:
+        rendition_dir.rmdir()
+        return EXITED_CLEANLY if monitor() else STOPPED_BY_ITS_MONITOR
+
+    _ffmpeg_stand_in(monkeypatch, lost_its_directory)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert: logging did report its failure on that line, with nothing of the path the error named
+    written = reported_log_failures(capsys, "the rendition output could not be read")
+    assert str(tmp_path) not in written
+    _assert_failure(raised, ("internal_error", "output_unreadable", True))
+    assert raised.value.failure.detail == "the rendition output could not be read: ENOENT"
+
+
+def _an_unreadable_playlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    unreadable = OSError(errno.EIO, "Input/output error", PATH_CANARY)
+    monkeypatch.setattr(core.encode, "read_media_playlist", _raising(unreadable))
+
+
+def _an_unlistable_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    _encode_os(monkeypatch, scandir=_raising(OSError(errno.EIO, "Input/output error", PATH_CANARY)))
+
+
+def _a_file_that_cannot_be_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    _encode_os(monkeypatch, open=_raising(OSError(errno.EIO, "Input/output error", PATH_CANARY)))
+
+
+def _a_file_that_cannot_be_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    _encode_os(monkeypatch, read=_raising(OSError(errno.EIO, "Input/output error", PATH_CANARY)))
+
+
+@pytest.mark.parametrize(
+    "make_unreadable",
+    [
+        pytest.param(_an_unreadable_playlist, id="its-playlist-cannot-be-read"),
+        pytest.param(_an_unlistable_directory, id="its-directory-cannot-be-listed"),
+        pytest.param(_a_file_that_cannot_be_opened, id="a-file-cannot-be-opened"),
+        pytest.param(_a_file_that_cannot_be_read, id="a-file-cannot-be-read"),
+    ],
+)
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_an_unreadable_output_should_keep_the_path_out(
+    make_unreadable: Callable[[pytest.MonkeyPatch], None],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: ffmpeg exited well; what it wrote then cannot be read, on an error whose own text names a path
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    _ffmpeg_stand_in(monkeypatch, _wrote_a_shaped_rendition)
+    make_unreadable(monkeypatch)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert: nothing of the path, in the report as in the typed failure, which carries no other error
+    written = reported_log_failures(capsys, "the rendition output could not be read")
+    assert PATH_CANARY not in written
+    _assert_failure(raised, ("internal_error", "output_unreadable", True))
+    assert raised.value.failure.detail == "the rendition output could not be read: EIO"
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("vanishing_under", ["scandir", "open"])
+def test_encode_rendition_when_a_rendition_file_vanishes_while_verified_should_fail_typed_with_no_cause_and_no_context(
+    vanishing_under: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: a file is gone by the time the directory is listed, or by the time the file is opened
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    _ffmpeg_stand_in(monkeypatch, _wrote_a_shaped_rendition)
+    gone = FileNotFoundError(errno.ENOENT, "No such file or directory", PATH_CANARY)
+    _encode_os(monkeypatch, **{vanishing_under: _raising(gone)})
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert
+    _assert_failure(raised, ("encoder_failed", "rendition_output_invalid", False))
+    assert raised.value.failure.detail == "a rendition file vanished while it was verified"
+    assert _carries_nothing_of_another_error(raised)
+
+
+def _no_room_for_the_rendition_directory(monkeypatch: pytest.MonkeyPatch, job: _Job) -> None:
+    full = OSError(errno.ENOSPC, "No space left on device", PATH_CANARY)
+    _fail_the_making_of(monkeypatch, job.plan.name, full)
+
+
+def _no_room_for_the_key(monkeypatch: pytest.MonkeyPatch, job: _Job) -> None:
+    monkeypatch.setattr(core.encode, "hls_key_info", _raising(OSError(errno.ENOSPC, "No space left", PATH_CANARY)))
+
+
+def _no_room_while_the_key_is_held(monkeypatch: pytest.MonkeyPatch, job: _Job) -> None:
+    """An error of the operating system from inside the block that holds the key, before ffmpeg is started."""
+    full = OSError(errno.ENOSPC, "No space left on device", PATH_CANARY)
+    monkeypatch.setattr(core.encode, "rendition_argv", _raising(full))
+
+
+@pytest.mark.parametrize(
+    "fail_the_setup",
+    [
+        pytest.param(_no_room_for_the_rendition_directory, id="the-rendition-directory-cannot-be-made"),
+        pytest.param(_no_room_for_the_key, id="the-key-cannot-be-held"),
+        pytest.param(_no_room_while_the_key_is_held, id="an-os-error-while-the-key-is-held"),
+    ],
+)
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_a_setup_that_failed_should_keep_the_path_out(
+    fail_the_setup: Callable[[pytest.MonkeyPatch, _Job], None],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    _ffmpeg_stand_in(monkeypatch, _wrote_a_shaped_rendition)
+    fail_the_setup(monkeypatch, job)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert
+    written = reported_log_failures(capsys, "the encode could not be set up")
+    assert PATH_CANARY not in written
+    _assert_failure(raised, ("resource_exhausted", "encode_setup_failed", True))
+    assert raised.value.failure.detail == "the encode could not be set up: ENOSPC"
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []
+
+
+def _no_room_for_the_self_decodes_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    _fail_the_making_of(monkeypatch, SELF_DECODE_CWD, OSError(errno.ENOSPC, "No space left on device", PATH_CANARY))
+
+
+def _no_room_for_the_self_decodes_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the encode hold its key, and have the self-decode's own hold of it fail."""
+    hold_the_key = core.encode.hls_key_info
+    holds: list[Path] = []
+
+    def hold_the_first_time(key: bytes, *, parent: Path) -> Any:
+        holds.append(parent)
+        if len(holds) > 1:
+            raise OSError(errno.ENOSPC, "No space left on device", PATH_CANARY)
+        return hold_the_key(key, parent=parent)
+
+    monkeypatch.setattr(core.encode, "hls_key_info", hold_the_first_time)
+
+
+@pytest.mark.parametrize(
+    "fail_the_setup",
+    [
+        pytest.param(_no_room_for_the_self_decodes_directory, id="its-working-directory-cannot-be-made"),
+        pytest.param(_no_room_for_the_self_decodes_key, id="its-key-cannot-be-held"),
+    ],
+)
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_a_self_decode_not_set_up_should_keep_the_path_out(
+    fail_the_setup: Callable[[pytest.MonkeyPatch], None],
+    encode_media: EncodeMedia,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: an output that passes every structural check, and no room for the self-decode's own files
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    fail_the_setup(monkeypatch)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert
+    written = reported_log_failures(capsys, "the encode could not be set up")
+    assert PATH_CANARY not in written
+    _assert_failure(raised, ("resource_exhausted", "encode_setup_failed", True))
+    assert raised.value.failure.detail == "the encode could not be set up: ENOSPC"
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []
+
+
+NOT_STARTED = [
+    pytest.param(
+        BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable", PATH_CANARY),
+        "ffmpeg could not be started: %s errno=%s",
+        ("resource_exhausted", "encoder_start_failed", True),
+        "ffmpeg could not be started: EAGAIN",
+        id="no-process-could-be-started",
+    ),
+    pytest.param(
+        PermissionError(errno.EACCES, "Permission denied", PATH_CANARY),
+        "ffmpeg could not be started: %s errno=%s",
+        ("configuration_error", "ffmpeg_unavailable", False),
+        "ffmpeg could not be started",
+        id="the-program-may-not-be-run",
+    ),
+    pytest.param(
+        RuntimeError(BUG_CANARY),
+        "a reader thread did not start",
+        ("resource_exhausted", "encoder_start_failed", True),
+        "ffmpeg could not be started: unknown",
+        id="a-reader-thread-did-not-start",
+    ),
+]
+
+
+@pytest.mark.parametrize(("start_error", "line_words", "expected", "expected_detail"), NOT_STARTED)
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_an_ffmpeg_not_started_should_keep_the_errors_text_out(
+    start_error: Exception,
+    line_words: str,
+    expected: tuple[str, str, bool],
+    expected_detail: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: ffmpeg cannot be started, on an error whose own text names a path or quotes what it met
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    monkeypatch.setattr(core.encode, "run_bounded", _raising(start_error))
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert
+    written = reported_log_failures(capsys, line_words)
+    assert [canary for canary in (PATH_CANARY, BUG_CANARY) if canary in written] == []
+    _assert_failure(raised, expected)
+    assert raised.value.failure.detail == expected_detail
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(("start_error", "line_words", "expected", "expected_detail"), NOT_STARTED)
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_a_self_decode_not_started_should_keep_the_text_out(
+    start_error: Exception,
+    line_words: str,
+    expected: tuple[str, str, bool],
+    expected_detail: str,
+    encode_media: EncodeMedia,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: an output that passes every structural check, and a self-decode that cannot be started
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    _self_decode_stand_in(monkeypatch, start_error)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert
+    written = reported_log_failures(capsys, line_words)
+    assert [canary for canary in (PATH_CANARY, BUG_CANARY) if canary in written] == []
+    _assert_failure(raised, expected)
+    assert raised.value.failure.detail == expected_detail
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []
+
+
+def test_encode_rendition_when_a_log_handler_fails_on_the_line_of_a_rendition_not_removed_should_keep_its_path_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: ffmpeg failed, and then the rendition's directory cannot be removed
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    _ffmpeg_stand_in(monkeypatch, lambda rendition_dir, monitor: EXITED_WITH_AN_ERROR)
+    _refuse_the_removal_of(monkeypatch, job.rendition_dir)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert: the failure is ffmpeg's, as without the failing log, and the directory is where it was left
+    written = reported_log_failures(capsys, "a failed rendition's directory could not be removed")
+    assert REMOVAL_CANARY not in written
+    _assert_failure(raised, ("encoder_failed", "encode_failed", False))
+    assert _carries_nothing_of_another_error(raised)
+    assert job.rendition_dir.is_dir()
+
+
+def test_encode_rendition_when_a_log_handler_fails_while_a_rendition_is_removed_behind_a_bug_should_keep_its_text_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: the encode ends on a bug, in words that quote what it choked on, and then the rendition's
+    # directory cannot be removed
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    bug = ValueError(BUG_CANARY)
+    monkeypatch.setattr(core.encode, "run_bounded", _raising(bug))
+    _refuse_the_removal_of(monkeypatch, job.rendition_dir)
+
+    # Act
+    with pytest.raises(ValueError) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert: nothing of the bug, which is the error that is raised, as it is, nor of the removal's error
+    written = reported_log_failures(capsys, "a failed rendition's directory could not be removed")
+    assert [canary for canary in (BUG_CANARY, REMOVAL_CANARY) if canary in written] == []
+    assert raised.value is bug
+
+
+def test_encode_rendition_when_a_log_handler_fails_while_the_key_is_released_behind_a_bug_should_keep_its_text_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: the encode ends on a bug while it holds the key, and then the key's files cannot be removed
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    bug = ValueError(BUG_CANARY)
+    monkeypatch.setattr(core.encode, "run_bounded", _raising(bug))
+    _refuse_the_removal_of_key_files(monkeypatch)
+
+    # Act
+    with pytest.raises(ValueError) as raised:
+        job.run(ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert: the key's lines hold nothing of the bug the key was released behind, nor of their own error
+    written = reported_log_failures(capsys, "an HLS key file could not be removed")
+    assert [canary for canary in (BUG_CANARY, REMOVAL_CANARY) if canary in written] == []
+    assert raised.value is bug
+    assert list(job.output_root.iterdir()) == []
+
+
+def test_encode_rendition_when_a_log_handler_fails_while_the_self_decodes_key_is_released_should_keep_the_path_out(
+    encode_media: EncodeMedia,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: an encrypted output that passes every structural check; the self-decode's own files
+    # cannot be made, on an error whose text names a path, and then its key's files cannot be removed
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    _fail_the_making_of(monkeypatch, SELF_DECODE_CWD, OSError(errno.ENOSPC, "No space left on device", PATH_CANARY))
+    _refuse_the_removal_of_key_files(monkeypatch)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert
+    written = reported_log_failures(capsys, "an HLS key file could not be removed")
+    assert [canary for canary in (PATH_CANARY, REMOVAL_CANARY) if canary in written] == []
+    _assert_failure(raised, ("resource_exhausted", "encode_setup_failed", True))
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+
+
+def test_encode_rendition_when_a_log_handler_fails_while_a_self_decode_ends_on_a_bug_should_keep_the_bugs_text_out(
+    encode_media: EncodeMedia,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: an encrypted output that passes every structural check; the self-decode ends on a bug
+    # while it holds the key, and then the key's files cannot be removed
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    bug = ValueError(BUG_CANARY)
+    _self_decode_stand_in(monkeypatch, bug)
+    _refuse_the_removal_of_key_files(monkeypatch)
+
+    # Act
+    with pytest.raises(ValueError) as raised:
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert: the key's lines hold nothing of the bug the key was released behind, nor of their own error
+    written = reported_log_failures(capsys, "an HLS key file could not be removed")
+    assert [canary for canary in (BUG_CANARY, REMOVAL_CANARY) if canary in written] == []
+    assert raised.value is bug
+    assert list(job.output_root.iterdir()) == []
+
+
+def _fail_the_release_of_the_key(monkeypatch: pytest.MonkeyPatch, *, hold: int) -> None:
+    """Have the release of the key fail for the hold numbered `hold` (1 is the encode's, 2 the
+    self-decode's), on an error of the operating system whose own text names a path. The key is held
+    and released as ever; the error comes once that is done."""
+    hold_the_key = core.encode.hls_key_info
+    holds: list[Path] = []
+
+    @contextlib.contextmanager
+    def hold_and_fail_the_release(key: bytes, *, parent: Path) -> Iterator[Any]:
+        holds.append(parent)
+        release_fails = len(holds) == hold
+        try:
+            with hold_the_key(key, parent=parent) as key_info:
+                yield key_info
+        finally:
+            if release_fails:
+                raise OSError(errno.EBADF, "Bad file descriptor", PATH_CANARY)
+
+    monkeypatch.setattr(core.encode, "hls_key_info", hold_and_fail_the_release)
+
+
+def _ended_on_a_bug(rendition_dir: Path, monitor: Any) -> BoundedResult:
+    raise ValueError(BUG_CANARY)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        pytest.param(_ended_on_a_bug, id="behind-a-bug"),
+        pytest.param(_wrote_a_shaped_rendition, id="behind-a-run-that-ended-well"),
+    ],
+)
+def test_encode_rendition_when_the_keys_release_fails_under_a_failing_log_should_keep_every_text_out(
+    run: Callable[[Path, Any], BoundedResult],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: the release of the key fails on an error of the operating system, which stands whatever
+    # the block that held the key ended on
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    _ffmpeg_stand_in(monkeypatch, run)
+    _fail_the_release_of_the_key(monkeypatch, hold=1)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert: the release's error ends the rendition, typed, and neither its text nor the bug's is told
+    written = reported_log_failures(capsys, "the encode could not be set up")
+    assert [canary for canary in (PATH_CANARY, BUG_CANARY) if canary in written] == []
+    _assert_failure(raised, ("resource_exhausted", "encode_setup_failed", True))
+    assert raised.value.failure.detail == "the encode could not be set up: EBADF"
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+
+
+def _a_self_decode_that_ends_on_a_bug(monkeypatch: pytest.MonkeyPatch) -> None:
+    _self_decode_stand_in(monkeypatch, ValueError(BUG_CANARY))
+
+
+def _a_self_decode_that_ends_well(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing to replace: the stand-in encoder hands the self-decode to the real ffmpeg."""
+
+
+@pytest.mark.parametrize(
+    "end_the_self_decode",
+    [
+        pytest.param(_a_self_decode_that_ends_on_a_bug, id="behind-a-bug"),
+        pytest.param(_a_self_decode_that_ends_well, id="behind-a-run-that-ended-well"),
+    ],
+)
+def test_encode_rendition_when_the_self_decodes_key_release_fails_under_a_failing_log_should_keep_every_text_out(
+    end_the_self_decode: Callable[[pytest.MonkeyPatch], None],
+    encode_media: EncodeMedia,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: an encrypted output that passes every structural check; the release of the key the
+    # self-decode held fails on an error of the operating system, whatever the decode ended on
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    end_the_self_decode(monkeypatch)
+    _fail_the_release_of_the_key(monkeypatch, hold=2)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert
+    written = reported_log_failures(capsys, "the encode could not be set up")
+    assert [canary for canary in (PATH_CANARY, BUG_CANARY) if canary in written] == []
+    _assert_failure(raised, ("resource_exhausted", "encode_setup_failed", True))
+    assert raised.value.failure.detail == "the encode could not be set up: EBADF"
+    assert _carries_nothing_of_another_error(raised)
+    assert list(job.output_root.iterdir()) == []
+
+
+def _wrote_two_segments(rendition_dir: Path, monitor: Any) -> BoundedResult:
+    (rendition_dir / "playlist.m3u8").write_text(TWO_SEGMENT_PLAYLIST, encoding="ascii")
+    for name in ("segment_0000.ts", "segment_0001.ts"):
+        (rendition_dir / name).write_bytes(ONE_TS_PACKET)
+    return EXITED_CLEANLY
+
+
+@pytest.mark.parametrize(
+    ("run", "expected"),
+    [
+        pytest.param(_wrote_nothing, ("encoder_failed", "rendition_output_invalid", False), id="no-playlist"),
+        pytest.param(
+            _wrote_two_segments, ("input_limits_exceeded", "too_many_segments", False), id="too-many-segments"
+        ),
+    ],
+)
+def test_encode_rendition_when_the_playlist_is_refused_should_fail_typed_with_no_cause_and_no_context(
+    run: Callable[[Path, Any], BoundedResult],
+    expected: tuple[str, str, bool],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4", profile=fast_profile(max_segments_per_rendition=1))
+    _ffmpeg_stand_in(monkeypatch, run)
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert: the typed failure stands in the playlist reader's refusal's place and carries nothing of it
+    _assert_failure(raised, expected)
+    assert _carries_nothing_of_another_error(raised)
+
+
+def test_encode_rendition_when_a_full_disk_explains_a_refused_output_should_fail_with_no_cause_and_no_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: room after the run, none once the output has been refused
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    _ffmpeg_stand_in(monkeypatch, _wrote_nothing)
+    readings = iter([PLENTY_OF_ROOM])
+    monkeypatch.setattr(os, "statvfs", lambda path: next(readings, NO_ROOM))
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert
+    _assert_failure(raised, ("resource_exhausted", "scratch_full", True))
+    assert _carries_nothing_of_another_error(raised)
+
+
+def test_decoded_frames_when_the_progress_is_not_ascii_should_fail_typed_with_no_cause_and_no_context() -> None:
+    # Arrange
+    progress = b"frame=\xff\nprogress=end\n"
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        core.encode._decoded_frames(progress)
+
+    # Assert
+    _assert_failure(raised, ("internal_error", "self_check_output_invalid", False))
+    assert _carries_nothing_of_another_error(raised)
+
+
+INTERRUPTS = [pytest.param(KeyboardInterrupt(), id="a-keyboard-interrupt"), pytest.param(SystemExit(3), id="an-exit")]
+
+
+@pytest.mark.parametrize("interrupt", INTERRUPTS)
+def test_encode_rendition_when_ffmpeg_is_interrupted_should_leave_nothing_and_raise_the_interrupt_as_it_is(
+    interrupt: BaseException, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: the interrupt arrives while ffmpeg runs, with a segment written and the key held
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+
+    def interrupted(rendition_dir: Path, monitor: Any) -> BoundedResult:
+        (rendition_dir / "segment_0000.ts").write_bytes(ONE_TS_PACKET)
+        raise interrupt
+
+    _ffmpeg_stand_in(monkeypatch, interrupted)
+
+    # Act
+    with pytest.raises(type(interrupt)) as raised:
+        job.run(ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert: the partial rendition, the key and the working directory are gone
+    assert raised.value is interrupt
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("interrupt", INTERRUPTS)
+def test_encode_rendition_when_the_self_decode_is_interrupted_should_leave_nothing_and_raise_the_interrupt_as_it_is(
+    interrupt: BaseException, encode_media: EncodeMedia, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange: an encrypted output that passes every structural check; the interrupt arrives while it is decoded
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    _self_decode_stand_in(monkeypatch, interrupt)
+
+    # Act
+    with pytest.raises(type(interrupt)) as raised:
+        job.run(ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert: the rendition, the check playlist and the key are gone
+    assert raised.value is interrupt
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []
+
+
+def test_encode_rendition_when_ffmpeg_cannot_be_started_should_log_that_before_the_key_is_released(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Arrange: ffmpeg cannot be started, and then the key's files cannot be removed, which is logged too
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    monkeypatch.setattr(core.encode, "run_bounded", _raising(BlockingIOError(errno.EAGAIN, "No more processes")))
+    _refuse_the_removal_of_key_files(monkeypatch)
+
+    # Act
+    with caplog.at_level(logging.WARNING), pytest.raises(WorkerFailure) as raised:
+        job.run(ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert: the line of the start that failed comes first, the lines of the key's release after it
+    logged = [record.getMessage() for record in caplog.records if record.name in ("core.encode", "core.hls_key")]
+    _assert_failure(raised, ("resource_exhausted", "encoder_start_failed", True))
+    assert logged == [
+        "ffmpeg could not be started: BlockingIOError errno=EAGAIN",
+        "an HLS key file could not be removed: errno=EACCES",
+        "an HLS key file could not be removed: errno=EACCES",
+        "an HLS key directory could not be removed: errno=ENOTEMPTY",
+    ]
+
+
+# --- what an error keeps alive ------------------------------------------------------------------------
+# The frames of the encode hold the media key. An error keeps the frames on its stack alive, so a frame
+# that still held the error it raised would live on, with the key, after everyone had let go of the
+# error: until a pass of the cyclic collector, which these tests switch off.
+
+
+class _ABug(Exception):
+    """A bug of a class of its own: a weak reference can be taken of it, as of a typed failure."""
+
+
+def _no_process() -> BaseException:
+    return BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
+
+
+def _raising_a_fresh(make_error: Callable[[], BaseException]) -> Callable[..., Any]:
+    """A stand-in for a function that fails on an error made for that call, which nothing else holds."""
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        raise make_error()
+
+    return fail
+
+
+@contextlib.contextmanager
+def _cyclic_collector_off() -> Iterator[None]:
+    was_on = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if was_on:
+            gc.enable()
+
+
+def _freed_once_let_go(job: _Job, raised_class: type[BaseException], **run_arguments: Any) -> bool:
+    """Run the encode to the error of `raised_class` it raises, let go of that error, and tell whether
+    it was freed at once, with no pass of the cyclic collector."""
+    with _cyclic_collector_off():
+        try:
+            job.run(**run_arguments)
+        except raised_class as error:
+            caught = weakref.ref(error)
+        return caught() is None
+
+
+LIFETIMES = [
+    pytest.param(_no_process, WorkerFailure, id="ffmpeg-could-not-be-started"),
+    pytest.param(_ABug, _ABug, id="a-bug-in-the-block"),
+]
+
+
+@pytest.mark.parametrize(("make_error", "raised_class"), LIFETIMES)
+def test_encode_rendition_when_what_it_raised_is_let_go_of_should_keep_no_frame_that_holds_the_key_alive(
+    make_error: Callable[[], BaseException],
+    raised_class: type[BaseException],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    monkeypatch.setattr(core.encode, "run_bounded", _raising_a_fresh(make_error))
+
+    # Act
+    freed = _freed_once_let_go(job, raised_class, ffmpeg_path=sys.executable, media_key=MEDIA_KEY)
+
+    # Assert
+    assert freed
+
+
+@pytest.mark.parametrize(("make_error", "raised_class"), LIFETIMES)
+def test_encode_rendition_when_what_the_self_decode_raised_is_let_go_of_should_keep_no_frame_that_holds_the_key_alive(
+    make_error: Callable[[], BaseException],
+    raised_class: type[BaseException],
+    encode_media: EncodeMedia,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange: an encrypted output that passes every structural check, so that the self-decode is reached
+    job = _claimed_job(tmp_path, tmp_path / "source.mp4")
+    executable = _copying_fake(tmp_path, *_encrypted_output(encode_media, drop_last_block=False))
+    _self_decode_raising(monkeypatch, make_error)
+
+    # Act
+    freed = _freed_once_let_go(job, raised_class, ffmpeg_path=executable, media_key=MEDIA_KEY)
+
+    # Assert
+    assert freed
