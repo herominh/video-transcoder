@@ -13,6 +13,14 @@ retryable one (`_out_of_time` decides, for a prober that timed out and for a rea
 reader refused alike). A failure a read recorded wins over both, also one that a read still in
 flight recorded only while the loopback server shut down (`_ran_out_of_time` looks again then; a
 prober that ended by itself is judged by what was recorded before the shutdown).
+
+An error the preflight catches is named by its class and its errno, never by its own text, which may
+name a path. The line that tells of one is written, and the typed failure that replaces one is
+raised, once the `except` block that caught it has ended, so the failure carries the error neither
+as its cause nor as its context. A log handler that fails on a line does not raise: Python's logging
+prints a report of its own, with every error that failure is chained to, which inside the block
+would be the caught error with its own text. One line cannot leave its block: the loopback server's
+(`_LoopbackHTTPServer.handle_error`), which the standard library calls from inside its own.
 """
 
 from __future__ import annotations
@@ -102,6 +110,18 @@ def _failure(error_class: str, code: str, detail: str, *, retryable: bool = Fals
     return WorkerFailure(Failure(error_class=error_class, code=code, retryable=retryable, detail=detail))
 
 
+@dataclass(frozen=True, slots=True)
+class _CaughtError:
+    """What is kept of a caught error once the `except` block that caught it has ended: its class's
+    name, its errno (None where it has none, or where its line tells none) and, of an error that kept
+    ffprobe from starting, whether it says that the configured ffprobe itself cannot run. The error
+    itself is not kept: its own text may name a path."""
+
+    class_name: str
+    errno: int | None
+    prober_unusable: bool = False
+
+
 def run_preflight(
     source: RangeSource,
     *,
@@ -142,31 +162,24 @@ def run_preflight(
 
     # Setting up the loopback server and the empty working directory needs descriptors and a
     # thread; running out of either is the worker's passing shortage, never the media's fault.
-    # The prober-start mapping inside raises WorkerFailure, which this except lets through.
+    # A prober that could not be started is no such error: its typed failure is handed back, and
+    # raised below, once the working directory and the server are left.
+    setup_error: _CaughtError | None = None
     try:
         with LoopbackRangeServer(budgeted, chunk_bytes=profile.probe.chunk_bytes) as server:
             with tempfile.TemporaryDirectory(prefix="preflight-", ignore_cleanup_errors=True) as empty_dir:
-                try:
-                    result = run_bounded(
-                        _ffprobe_argv(executable, server.url, profile, probe_deadline),
-                        deadline=probe_deadline,
-                        max_stdout_bytes=profile.probe.max_output_bytes,
-                        max_stderr_bytes=profile.probe.max_stderr_bytes,
-                        env=FFPROBE_ENV,
-                        cwd=empty_dir,
-                    )
-                except OSError as error:
-                    # Also where ffprobe's output could not be fully read (run_bounded raises after
-                    # killing the group): reported with the start failures, same class and retry.
-                    raise _prober_start_failure(error) from None
-                except RuntimeError as error:
-                    # A reader thread could not start; run_bounded has already killed the group.
-                    raise _prober_thread_failure(error) from None
+                ending = _run_prober(executable, server, profile, probe_deadline, empty_dir)
             # Looked at before the server shuts down: a read the prober no longer needed, failing
             # while it shuts down, does not fail a probe that had succeeded by then.
             upstream_failure = server.failure
     except (OSError, RuntimeError) as error:
-        raise _setup_failure(error) from None
+        setup_error = _CaughtError(type(error).__name__, getattr(error, "errno", None))
+    # Raised here, once the handler that caught the error has ended (see the module's last paragraph).
+    if setup_error is not None:
+        raise _setup_failure(setup_error)
+    if isinstance(ending, WorkerFailure):
+        raise ending
+    result = ending
 
     # A storage or budget failure explains whatever ffprobe printed after it, so it wins. The reader's
     # own refusal of a read past the time budget is no such failure: it is the preflight out of time.
@@ -242,33 +255,63 @@ def _out_of_time(budgeted: BudgetedSource, deadline: Deadline) -> WorkerFailure:
     return WorkerFailure(PROBE_SOURCE_SLOW)
 
 
-def _prober_start_failure(error: OSError) -> WorkerFailure:
+def _run_prober(
+    executable: str, server: LoopbackRangeServer, profile: MediaProfile, deadline: Deadline, cwd: str
+) -> BoundedResult | WorkerFailure:
+    """ffprobe's ending; or, of an ffprobe that could not be started, the typed failure of that.
+
+    The failure is handed back, not raised: its line is written here, before the caller leaves the
+    working directory and the loopback server, and the caller raises it once it has left them. Both
+    happen after the `except` block that caught the error has ended (see the module's last paragraph).
+    """
+    try:
+        return run_bounded(
+            _ffprobe_argv(executable, server.url, profile, deadline),
+            deadline=deadline,
+            max_stdout_bytes=profile.probe.max_output_bytes,
+            max_stderr_bytes=profile.probe.max_stderr_bytes,
+            env=FFPROBE_ENV,
+            cwd=cwd,
+        )
+    except OSError as error:
+        # Also where ffprobe's output could not be fully read (run_bounded raises after
+        # killing the group): reported with the start failures, same class and retry.
+        unusable = isinstance(error, (FileNotFoundError, PermissionError)) or error.errno in PROBER_UNUSABLE_ERRNOS
+        caught, reader_thread_failed = _CaughtError(type(error).__name__, error.errno, unusable), False
+    except RuntimeError as error:
+        # A reader thread could not start; run_bounded has already killed the group.
+        caught, reader_thread_failed = _CaughtError(type(error).__name__, None), True
+    if reader_thread_failed:
+        return _prober_thread_failure(caught)
+    return _prober_start_failure(caught)
+
+
+def _prober_start_failure(caught: _CaughtError) -> WorkerFailure:
     """A broken ffprobe installation is permanent; any other start failure is worth a retry."""
-    logger.warning("ffprobe could not be started: %s errno=%s", type(error).__name__, error.errno)
-    if isinstance(error, (FileNotFoundError, PermissionError)) or error.errno in PROBER_UNUSABLE_ERRNOS:
+    logger.warning("ffprobe could not be started: %s errno=%s", caught.class_name, caught.errno)
+    if caught.prober_unusable:
         return _failure("configuration_error", "ffprobe_unavailable", "ffprobe could not be started")
     # The errno's symbolic name only: the exception's own message may carry a path.
-    errno_name = errno.errorcode.get(error.errno, UNKNOWN_ERRNO_NAME)
+    errno_name = errno.errorcode.get(caught.errno, UNKNOWN_ERRNO_NAME)
     return _failure(
         "resource_exhausted", "prober_start_failed",
         f"ffprobe could not be started: {errno_name}", retryable=True,
     )
 
 
-def _prober_thread_failure(error: RuntimeError) -> WorkerFailure:
-    logger.warning("ffprobe could not be started: %s errno=%s", type(error).__name__, None)
+def _prober_thread_failure(caught: _CaughtError) -> WorkerFailure:
+    logger.warning("ffprobe could not be started: %s errno=%s", caught.class_name, None)
     return _failure(
         "resource_exhausted", "prober_start_failed",
         f"ffprobe could not be started: {UNKNOWN_ERRNO_NAME}", retryable=True,
     )
 
 
-def _setup_failure(error: OSError | RuntimeError) -> WorkerFailure:
+def _setup_failure(caught: _CaughtError) -> WorkerFailure:
     """Any setup error is a passing shortage, FileNotFoundError included: mkdtemp reports
     exhausted descriptors as "No usable temporary directory found"."""
-    error_number = getattr(error, "errno", None)
-    logger.warning("preflight setup failed: %s errno=%s", type(error).__name__, error_number)
-    errno_name = errno.errorcode.get(error_number, UNKNOWN_ERRNO_NAME)
+    logger.warning("preflight setup failed: %s errno=%s", caught.class_name, caught.errno)
+    errno_name = errno.errorcode.get(caught.errno, UNKNOWN_ERRNO_NAME)
     return _failure(
         "resource_exhausted", "preflight_setup_failed",
         f"the preflight could not be set up: {errno_name}", retryable=True,
@@ -340,8 +383,10 @@ def _facts_from(result: BoundedResult) -> SourceFacts:
             duration_estimated=DURATION_ESTIMATED_MARKER in result.stderr_tail,
         )
     except ProbeInconclusive as inconclusive:
-        error_class = INCONCLUSIVE_CLASSES.get(inconclusive.code, "input_invalid")
-        raise _failure(error_class, inconclusive.code, inconclusive.detail) from None
+        # Its code and its detail, which is our own words, are all that is kept of the parse's error.
+        code, detail = inconclusive.code, inconclusive.detail
+    # Raised here, once the handler that caught the error has ended (see the module's last paragraph).
+    raise _failure(INCONCLUSIVE_CLASSES.get(code, "input_invalid"), code, detail)
 
 
 class LoopbackRangeServer:
@@ -458,6 +503,9 @@ class _LoopbackHTTPServer(ThreadingHTTPServer):
         error = sys.exc_info()[1]
         if isinstance(error, OSError):
             return
+        # The standard library calls this from inside the `except` block that caught the handler's
+        # error, so this line is written while that error is still being handled: it holds the
+        # error's class name and nothing else of it (never the error itself, never `exc_info`).
         logger.error("preflight loopback handler failed: %s", type(error).__name__)
         self._owner.record_failure(LOOPBACK_SERVER_FAILURE)
 
