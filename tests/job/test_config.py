@@ -1,18 +1,27 @@
 """The job's own configuration: the image digest a result reports and the directory jobs make their
-scratch directories in. Whole or refused; a refusal names the variable and the rule, never the value."""
+scratch directories in. Whole or refused; a refusal names the variable and the rule, never the value.
+
+A start also tries, on a directory it makes in the scratch directory and removes again, the lock every
+job takes on its own scratch directory (core/job/scratch.py lock_refused_in), and is refused where the
+system refuses that lock. No file system of the suite refuses a lock, so the refusal is a stand-in's,
+put where the scratch module asks the system for the lock; everything around it is the real code on a
+real directory."""
 
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import stat
 import tempfile
 import traceback
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any, Callable
 
 import pytest
 
+from core.job import scratch as scratch_module
 from core.job.config import JobSettings
 from core.protocol.settings import SettingsInvalid
 
@@ -25,6 +34,10 @@ HEX_DIGITS = 64
 # A directory the system's own error names when it finds no temporary directory: no refusal may show it.
 TRIED_DIRECTORY = "/CANARY/tried/for/a/temporary/directory"
 CLOSED_DIRECTORY_NAME = "closed-scratch"
+# The rule a start is refused by on a scratch directory in which a directory cannot be locked.
+LOCK_RULE = "must be on a file system on which a directory can be locked"
+# A path the system's own error names when it refuses a lock or a directory: no refusal may show it.
+NAMED_BY_THE_SYSTEM = "/CANARY/named/by/the/systems/error"
 # The worker image runs the suite as root, which no permission bits keep out of a directory.
 needs_permission_bits_to_bind = pytest.mark.skipif(
     os.name != "posix" or os.geteuid() == 0,
@@ -47,6 +60,34 @@ def _refusal(env: object) -> SettingsInvalid:
 def _no_temporary_directory() -> str:
     """tempfile.gettempdir() on a system without a usable temporary directory: its error lists what it tried."""
     raise FileNotFoundError(errno.ENOENT, f"No usable temporary directory found in ['{TRIED_DIRECTORY}']")
+
+
+def _raising(error: BaseException, met: list[BaseException] | None = None) -> Callable[..., Any]:
+    """A stand-in that raises `error` whatever it is called with, and notes in `met` each time it did."""
+
+    def stand_in(*arguments: Any, **named_arguments: Any) -> Any:
+        if met is not None:
+            met.append(error)
+        raise error
+
+    return stand_in
+
+
+def _env_with_scratch_directory(
+    scratch_directory: Path, monkeypatch: pytest.MonkeyPatch, *, is_set: bool
+) -> dict[str, object]:
+    """A valid environment whose scratch directory is `scratch_directory`: named by the variable, or,
+    with the variable not set, as the system's temporary directory."""
+    if is_set:
+        return _env(scratch_directory)
+    monkeypatch.setattr(tempfile, "gettempdir", lambda: str(scratch_directory))
+    return {DIGEST_VARIABLE: VALID_DIGEST}
+
+
+set_or_not_set = pytest.mark.parametrize(
+    "scratch_directory_is_set",
+    [pytest.param(True, id="scratch-directory-set"), pytest.param(False, id="scratch-directory-not-set")],
+)
 
 
 @pytest.fixture
@@ -374,3 +415,134 @@ def test_job_settings_when_built_should_be_immutable(tmp_path):
     # Act and Assert
     with pytest.raises(AttributeError):
         settings.image_digest = "sha256:" + "f" * HEX_DIGITS  # type: ignore[misc]
+
+
+# --- a scratch directory in which a directory cannot be locked ----------------------------------------
+
+
+@set_or_not_set
+def test_from_env_when_a_directory_in_the_scratch_directory_cannot_be_locked_should_refuse_the_start_by_that_rule(
+    tmp_path, monkeypatch, scratch_directory_is_set
+):
+    # Arrange: the system refuses the lock every job takes on its own scratch directory, in words that
+    # name a path
+    env = _env_with_scratch_directory(tmp_path, monkeypatch, is_set=scratch_directory_is_set)
+    no_locks = OSError(errno.ENOLCK, "No locks available", NAMED_BY_THE_SYSTEM)
+    monkeypatch.setattr(scratch_module.fcntl, "flock", _raising(no_locks))
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert: the variable and the rule, and nothing else: no value, and nothing of the system's error,
+    # in the text, in the traceback a refused start prints, or riding along. Nothing stays in the
+    # scratch directory of the try
+    printed = "".join(traceback.format_exception(type(refusal), refusal, refusal.__traceback__))
+    assert type(refusal) is SettingsInvalid
+    assert (refusal.variable, refusal.rule) == (SCRATCH_VARIABLE, LOCK_RULE)
+    assert str(refusal) == f"{SCRATCH_VARIABLE} {LOCK_RULE}"
+    assert str(tmp_path) not in printed and NAMED_BY_THE_SYSTEM not in printed
+    assert refusal.__cause__ is None and refusal.__context__ is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@set_or_not_set
+def test_from_env_when_the_start_goes_on_should_have_tried_a_lock_in_the_scratch_directory_and_left_nothing_there(
+    tmp_path, monkeypatch, scratch_directory_is_set
+):
+    # Arrange: note what the scratch directory holds each time a lock is asked of the system
+    env = _env_with_scratch_directory(tmp_path, monkeypatch, is_set=scratch_directory_is_set)
+    held_at_each_try: list[list[str]] = []
+    lock = fcntl.flock
+
+    def note_then_lock(descriptor: int, operation: int) -> None:
+        held_at_each_try.append(sorted(child.name for child in tmp_path.iterdir()))
+        lock(descriptor, operation)
+
+    monkeypatch.setattr(scratch_module.fcntl, "flock", note_then_lock)
+
+    # Act
+    settings = JobSettings.from_env(env)
+
+    # Assert: one lock was tried, on a directory made there for it and named as a job's own; the start
+    # leaves the scratch directory as it found it
+    ((made,),) = held_at_each_try
+    assert settings.scratch_root == tmp_path
+    assert made.startswith(scratch_module.scratch_prefix())
+    assert list(tmp_path.iterdir()) == []
+
+
+def _make_no_directory(monkeypatch: pytest.MonkeyPatch, scratch_directory: Path) -> list[BaseException]:
+    """The disk is full when the directory of the try is to be made. Returns what notes each such time."""
+    met: list[BaseException] = []
+    full_disk = OSError(errno.ENOSPC, "No space left on device", NAMED_BY_THE_SYSTEM)
+    monkeypatch.setattr(scratch_module.tempfile, "mkdtemp", _raising(full_disk, met))
+    return met
+
+
+def _open_no_directory(monkeypatch: pytest.MonkeyPatch, scratch_directory: Path) -> list[BaseException]:
+    """No descriptor is left when the directory of the try is opened for its lock. Returns what notes
+    each such time."""
+    met: list[BaseException] = []
+    none_left = OSError(errno.EMFILE, "Too many open files", NAMED_BY_THE_SYSTEM)
+    open_file = os.open
+
+    def open_nothing_in_the_scratch_directory(
+        opened_path: Any, flags: int, *arguments: Any, **named_arguments: Any
+    ) -> int:
+        if Path(opened_path).parent == scratch_directory:
+            met.append(none_left)
+            raise none_left
+        return open_file(opened_path, flags, *arguments, **named_arguments)
+
+    monkeypatch.setattr(scratch_module.os, "open", open_nothing_in_the_scratch_directory)
+    return met
+
+
+def _find_the_lock_held(monkeypatch: pytest.MonkeyPatch, scratch_directory: Path) -> list[BaseException]:
+    """Another holds the lock of the directory of the try: the system says so at once. Returns what
+    notes each such time."""
+    met: list[BaseException] = []
+    held = BlockingIOError(errno.EWOULDBLOCK, "Resource temporarily unavailable")
+    monkeypatch.setattr(scratch_module.fcntl, "flock", _raising(held, met))
+    return met
+
+
+@pytest.mark.parametrize(
+    "trouble",
+    [
+        pytest.param(_make_no_directory, id="its-directory-cannot-be-made"),
+        pytest.param(_open_no_directory, id="its-directory-cannot-be-opened"),
+        pytest.param(_find_the_lock_held, id="its-lock-is-held-by-another"),
+    ],
+)
+def test_from_env_when_the_try_at_the_lock_gives_no_refusal_should_go_on_with_the_start_and_leave_nothing(
+    tmp_path, monkeypatch, trouble
+):
+    # Arrange: the lock was not refused: it could not be tried, or it is held, which shows that it works
+    env = _env(tmp_path)
+    met = trouble(monkeypatch, tmp_path)
+
+    # Act
+    settings = JobSettings.from_env(env)
+
+    # Assert: the start did meet that trouble, once, and goes on: no verdict on the lock stops a start,
+    # and a job meets the trouble as its own typed failure
+    assert len(met) == 1
+    assert settings.scratch_root == tmp_path
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_from_env_when_the_scratch_directory_breaks_an_earlier_rule_should_try_no_lock_in_it(tmp_path, monkeypatch):
+    # Arrange: a relative path that exists from the working directory, so a directory could be made in it
+    (tmp_path / "relative-scratch").mkdir()
+    monkeypatch.chdir(tmp_path)
+    tried: list[int] = []
+    monkeypatch.setattr(scratch_module.fcntl, "flock", lambda descriptor, operation: tried.append(operation))
+
+    # Act
+    refusal = _refusal(_env(tmp_path, **{SCRATCH_VARIABLE: "relative-scratch"}))
+
+    # Assert: refused by its own rule, before anything is made or locked in it
+    assert "absolute" in refusal.rule
+    assert tried == []
+    assert list((tmp_path / "relative-scratch").iterdir()) == []

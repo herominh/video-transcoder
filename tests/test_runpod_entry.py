@@ -58,9 +58,10 @@ import pytest
 
 from core.bounded_process import Deadline
 from core.failure import Failure, WorkerFailure
+from core.job import scratch as scratch_module
 from core.job import storage
 from core.job.runner import JobRunner
-from core.job.scratch import SCRATCH_PREFIX
+from core.job.scratch import scratch_prefix
 from core.job.storage import DeadlineSource
 from core.protocol import files, messages, pipeline, signing
 from core.protocol.files import ContractTreeInvalid
@@ -236,6 +237,8 @@ TAMPERED_FILE = "limits.json"
 LEFT_LONG_AGO_S = 2 * 60 * 60
 # The logger of the removal of leftover scratch directories (core/job/scratch.py).
 SCRATCH_LOGGER = "core.job.scratch"
+# The id of the kernel start of another host than the one the suite runs on.
+ANOTHER_HOSTS_BOOT_ID = "f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b"
 
 # A real deadline a test waits out, long enough for a loaded host to reach the request the test keeps.
 SHORT_MS = 500
@@ -1095,7 +1098,7 @@ def test_build_handler_when_its_handler_gets_a_granted_dispatch_should_run_it_wi
 def test_build_handler_when_a_killed_process_left_a_scratch_directory_should_remove_it_before_any_job(tmp_path):
     # Arrange: in the configured scratch root, a directory named as the job runner names an execution's,
     # with the source a killed execution had downloaded, last changed long ago and locked by nobody
-    leftover = tmp_path / (SCRATCH_PREFIX + "left-by-a-killed-process")
+    leftover = tmp_path / (scratch_prefix() + "left-by-a-killed-process")
     leftover.mkdir()
     (leftover / "source").write_bytes(b"the source a killed execution had downloaded")
     changed_at_s = time.time() - LEFT_LONG_AGO_S
@@ -1107,6 +1110,46 @@ def test_build_handler_when_a_killed_process_left_a_scratch_directory_should_rem
     # Assert: the process starts with an empty scratch root
     assert callable(handler)
     assert list(tmp_path.iterdir()) == []
+
+
+def _scratch_prefix_on_a_host_booted_as(boot_id: str, aside: Path) -> str:
+    """What the job runner names an execution's scratch directory with on a host whose kernel start has
+    the id `boot_id`: the scratch module's own answer while it reads that id from a file in `aside`.
+    Once this returns the module reads again the identity of the host the suite runs on."""
+    boot_id_file = aside / "boot_id_of_another_host"
+    boot_id_file.write_text(boot_id + "\n", encoding="ascii")
+    with pytest.MonkeyPatch.context() as on_that_host:
+        on_that_host.setattr(scratch_module, "BOOT_ID_PATH", boot_id_file)
+        return scratch_prefix()
+
+
+def test_build_handler_when_another_hosts_execution_works_in_the_scratch_root_should_leave_its_directory_and_files(
+    tmp_path,
+):
+    # Arrange: a scratch root shared between hosts. In it the directory of an execution that still runs
+    # on another host: named by that host, owned by this process's user, last changed long ago, as
+    # during a long encode, and locked in that host's kernel only, so this host sees no lock on it
+    scratch_root, aside = tmp_path / "shared-scratch", tmp_path / "aside"
+    scratch_root.mkdir()
+    aside.mkdir()
+    another_hosts_prefix = _scratch_prefix_on_a_host_booted_as(ANOTHER_HOSTS_BOOT_ID, aside)
+    live_elsewhere = scratch_root / (another_hosts_prefix + "live-on-another-host")
+    (live_elsewhere / "source").mkdir(parents=True)
+    (live_elsewhere / "source" / "source").write_bytes(b"the source a running execution downloaded")
+    (live_elsewhere / "output").mkdir()
+    (live_elsewhere / "output" / "segment_0000.ts").write_bytes(b"\x47 a segment it has encoded")
+    changed_at_s = time.time() - LEFT_LONG_AGO_S
+    os.utime(live_elsewhere, (changed_at_s, changed_at_s))
+
+    # Act: a worker of this host starts on that root
+    handler = build_handler(_whole_env(scratch_root))
+
+    # Assert: the start removed nothing of the other host's execution, and left nothing of its own
+    assert callable(handler)
+    assert another_hosts_prefix != scratch_prefix()
+    assert [child.name for child in scratch_root.iterdir()] == [live_elsewhere.name]
+    assert (live_elsewhere / "source" / "source").read_bytes() == b"the source a running execution downloaded"
+    assert (live_elsewhere / "output" / "segment_0000.ts").read_bytes() == b"\x47 a segment it has encoded"
 
 
 class _RaisingLogHandler(logging.Handler):

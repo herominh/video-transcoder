@@ -111,7 +111,7 @@ from core.thumbnail import ThumbnailResult, make_thumbnail
 from .config import JobSettings
 from .ffmpeg_version import installed_ffmpeg_version
 from .progress import ProgressReporter
-from .scratch import SCRATCH_PREFIX, hold_scratch_lock, release_scratch_lock
+from .scratch import hold_scratch_lock, release_scratch_lock, scratch_prefix
 from .storage import (
     DISK_FULL_ERRNOS,
     SCRATCH_FULL,
@@ -301,9 +301,10 @@ def _scratch_failure(error: OSError) -> Failure:
     resource_exhausted/scratch_create_failed.
 
     None is final, a FileNotFoundError and a PermissionError included. The process start refuses a
-    scratch root that does not exist or that the process may not write to and search
-    (core/job/config.py), so a directory that is missing or refused here became so after that start,
-    on this one worker: another start does not meet it, and a final failure would cost the video.
+    scratch root that does not exist, that the process may not write to and search, or in which a
+    directory cannot be locked (core/job/config.py), so what is missing or refused here became so
+    after that start, on this one worker: another worker's start does not meet it, and a final
+    failure would cost the video.
     The detail names the errno, never the error's own text, which names the path. Nothing is logged
     here: whoever caught the error writes its line once that `except` block has ended (_make_scratch).
     """
@@ -649,7 +650,7 @@ class _Execution:
         three inside it. An OSError on the way, a lock that is not free included, ends the execution
         typed (_scratch_failure), never as a bug, and what was made by then is removed with the rest."""
         try:
-            root = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=self._job_settings.scratch_root))
+            root = Path(tempfile.mkdtemp(prefix=scratch_prefix(), dir=self._job_settings.scratch_root))
             # Recorded before anything is made inside it, so the cleanup finds it whatever fails next.
             self._scratch_root = root
             self._scratch_lock = hold_scratch_lock(root)

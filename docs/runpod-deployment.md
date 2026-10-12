@@ -19,8 +19,10 @@ contract's `tests/contracts/transcode/v2/README.md`):
 1. **Start of the process.** Before any job is taken the worker checks the contract tree the image ships and reads its
    whole configuration. A tree or a configuration it cannot trust stops the process; the error names the file or the
    variable and the rule, never a value. It then removes what a killed process left in the scratch directory: every
-   directory there named `vh-job-*` that the worker's own user owns, that was not changed for a minute and that no
-   running job holds locked. Nothing else in the scratch directory is touched.
+   directory there that a worker of this host made (its name, `vh-job-*`, carries a tag made from the boot id of
+   the host's running kernel), that the worker's own user owns, whose own modification time is at least a minute
+   old and that no running job holds locked. Nothing else in the scratch directory is touched: not a directory
+   another host made, and not one this host made before its last reboot.
 2. **The job input** is `{vh_message, vh_signature}`: a `transcode.request` signed by the Hub. Nothing of it is trusted
    until the signature verifies under a Hub-to-worker key. A job the worker may not act on fails with the refusal's own
    words (step, layer, reason) and nothing of the input.
@@ -43,14 +45,15 @@ Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are 
   learn its own digest, and a result reports it. Set the endpoint's container image by that same digest
   (`<repository>@sha256:<digest>`, not a tag such as `:latest`) and change the two together: a tag can be moved to
   another image while every result goes on reporting the old digest;
-- `VH_SCRATCH_DIR` (optional): an existing directory for the jobs' scratch files, which the worker's process can
-  write to and search; its path holds printable ASCII only, without `:`, `%`, a double quote or a backslash; a usable
-  system temporary directory (`TMPDIR`) is required whatever the scratch directory is. The scratch directory (this one,
-  or the system's
-  temporary directory when the variable is not set) must be on a local file system on which a directory can be locked
-  with `flock`, and must not be shared between hosts: every job locks its own directory in it, and that lock tells a
-  running job's directory from one a killed process left behind only between processes of one host. Where a directory
-  cannot be locked, every job ends as the retryable `resource_exhausted/scratch_create_failed`;
+- `VH_SCRATCH_DIR` (optional): the absolute path of an existing directory for the jobs' scratch files, which the
+  worker's process can write to and search; it holds printable ASCII only, without `:`, `%`, a double quote or a
+  backslash; a usable system temporary directory (`TMPDIR`) is required whatever the scratch directory is. The
+  scratch directory (this one, or the system's temporary directory when the variable is not set) must be on a file
+  system on which a directory can be locked with `flock`: every job locks its own directory in it, and the worker
+  refuses to start where a directory cannot be locked. Keep it on the worker's own disk, not on a volume shared
+  between hosts: a lock is seen only on the host that holds it, so a worker never removes a directory another host
+  made, and what a killed worker of another host left there (or this host before a reboot) stays until someone
+  removes it by hand;
 - `FFMPEG_PATH` and `FFPROBE_PATH` (optional): the tools the stages run, when they are not `ffmpeg` and `ffprobe` on
   the `PATH` (the image links both into `/usr/local/bin`).
 

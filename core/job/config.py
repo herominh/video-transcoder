@@ -7,7 +7,9 @@
                       default the system's temporary directory. Either way this process may write to
                       and search it, and its path holds printable ASCII only and none of the
                       characters the stages refuse in a path (`:`, `%`, a line break, a double quote, a
-                      backslash).
+                      backslash). A directory in it can be locked, as every job locks its own: each
+                      start makes one there, tries its lock and removes it (core/job/scratch.py
+                      lock_refused_in()), and is refused where the system refuses that lock.
 
 Whatever the scratch directory is, the system must have a usable temporary directory (TMPDIR gives it
 one): the ffmpeg version check and the preflight make their working directories there. A start on a
@@ -28,6 +30,8 @@ from core.encode import KEY_PATH_FORBIDDEN
 from core.encode_command import UNSAFE_PATH_CHARACTERS
 from core.protocol import schema
 from core.protocol.settings import SettingsInvalid
+
+from .scratch import lock_refused_in
 
 IMAGE_DIGEST_VARIABLE = "VH_IMAGE_DIGEST"
 SCRATCH_DIR_VARIABLE = "VH_SCRATCH_DIR"
@@ -75,7 +79,8 @@ def _image_digest(env: Mapping[str, str]) -> str:
 
 def _scratch_root(env: Mapping[str, str], default: str) -> Path:
     """The directory jobs make their scratch directories in, `default` when the variable is not set,
-    held to what the stages accept of a path and to what making a directory in it takes."""
+    held to what the stages accept of a path and to what making a directory in it, and locking that
+    directory, takes."""
     text = env.get(SCRATCH_DIR_VARIABLE, default)
     if not isinstance(text, str):
         raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must be a string")
@@ -102,6 +107,11 @@ def _scratch_root(env: Mapping[str, str], default: str) -> Path:
     # every job would fail there, so the process is refused at its start.
     if not os.access(scratch_root, SCRATCH_DIR_ACCESS):
         raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must be writable and searchable by this process")
+    # A job locks its own directory as soon as it made it, and does not work in one it could not lock:
+    # where the system refuses that lock, every job would fail there too. A check that could not try
+    # the lock (no directory made) refuses nothing: a job meets that trouble as its own typed failure.
+    if lock_refused_in(scratch_root):
+        raise SettingsInvalid(SCRATCH_DIR_VARIABLE, "must be on a file system on which a directory can be locked")
     return scratch_root
 
 

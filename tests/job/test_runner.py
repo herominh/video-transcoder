@@ -46,7 +46,7 @@ from core.job import storage as storage_module
 from core.job.ffmpeg_version import forget_installed_ffmpeg_version, installed_ffmpeg_version
 from core.job.progress import ProgressReporter
 from core.job.runner import JobRunner
-from core.job.scratch import SCRATCH_PREFIX, remove_leftover_scratch
+from core.job.scratch import remove_leftover_scratch, scratch_prefix
 from core.package import CONTRACT_MAX_DURATION_MS, manifest_max_bytes, reserve_package
 from core.probe import PROBE_SOURCE_SLOW, PreflightResult
 from core.profile import GIB, PILOT_PROFILE, MediaProfile, profile_digest
@@ -766,6 +766,18 @@ def test_run_when_it_ends_should_leave_no_scratch_directory_behind(harness):
     used = harness.stages.encodes[0].output_root
     assert harness.scratch_root in used.parents
     assert harness.left_in_scratch == []
+
+
+def test_run_when_it_makes_its_scratch_directory_should_name_it_with_this_hosts_scratch_prefix(harness):
+    # Act
+    harness.run()
+
+    # Assert: a directory of its own directly in the scratch root, whose name begins as the removal of
+    # leftovers expects of this host's: killed in it, the execution leaves what a later start removes,
+    # and no worker of another host takes it for its own
+    used = harness.stages.encodes[0].output_root.parent
+    assert used.parent == harness.scratch_root
+    assert used.name.startswith(scratch_prefix()) and used.name != scratch_prefix()
 
 
 def test_handle_when_given_the_job_runner_should_return_its_result_as_the_job_output_and_post_the_same_bytes(
@@ -2090,7 +2102,7 @@ def test_run_when_another_process_removes_leftovers_during_an_encode_should_keep
     # the encode waits for only a while: a removal that waited for the execution's lock would otherwise
     # wait for an execution that waits for it
     long_ago_s = time.time() - TWO_HOURS_S
-    leftover = harness.scratch_root / (SCRATCH_PREFIX + "killed")
+    leftover = harness.scratch_root / (scratch_prefix() + "killed")
     (leftover / "source").mkdir(parents=True)
     os.utime(leftover, (long_ago_s, long_ago_s))
     removed: list[int] = []
