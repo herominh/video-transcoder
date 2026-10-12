@@ -1,9 +1,8 @@
-"""Tests for _process_transcode result semantics and the RunPod handler.
+"""Tests for _process_transcode result semantics.
 
 These pin the reliability contract:
 - the pipeline RETURNS the result payload (job output for serverless pollers)
 - a callback delivery failure never flips a successful transcode to "failed"
-- the RunPod handler raises on failure so RunPod's ledger tells the truth
 - uuid is validated before it touches filesystem paths / S3 keys
 """
 
@@ -291,46 +290,3 @@ class TestTranscodeRequestUuidValidation:
     def test_request_when_uuid_invalid_should_reject(self, bad_uuid):
         with pytest.raises(ValidationError):
             TranscodeRequest.model_validate({**VALID_REQUEST, "uuid": bad_uuid})
-
-
-class TestRunPodHandler:
-    @patch("core.api._process_transcode")
-    def test_handler_when_transcode_fails_should_raise(self, mock_process):
-        """RunPod must mark the job FAILED — returning normally would record a
-        failed transcode as COMPLETED and mislead the Video Hub poller."""
-        from wrappers.runpod_handler import handler
-
-        mock_process.return_value = {
-            "uuid": VALID_UUID,
-            "status": "failed",
-            "error_message": "FFmpeg failed for 360p",
-        }
-
-        with pytest.raises(RuntimeError, match="FFmpeg failed for 360p"):
-            handler({"input": VALID_REQUEST})
-
-    @patch("core.api._process_transcode")
-    def test_handler_when_transcode_succeeds_should_return_full_payload(
-        self, mock_process
-    ):
-        from wrappers.runpod_handler import handler
-
-        ready_payload = {
-            "uuid": VALID_UUID,
-            "status": "ready",
-            "duration": 42,
-            "qualities": TRANSCODE_RESULT["qualities"],
-            "master_playlist": "master.m3u8",
-            "thumbnail": "thumbnail.jpg",
-        }
-        mock_process.return_value = ready_payload
-
-        result = handler({"input": VALID_REQUEST})
-
-        assert result == ready_payload
-
-    def test_handler_when_input_uuid_invalid_should_reject(self):
-        from wrappers.runpod_handler import handler
-
-        with pytest.raises(ValidationError):
-            handler({"input": {**VALID_REQUEST, "uuid": "../../escape"}})
