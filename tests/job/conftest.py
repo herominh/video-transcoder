@@ -3,6 +3,8 @@
 ScriptedDeadline and ClockDeadline are deadlines a test decides, so that no sleep and no real clock does.
 settle_requests_first() takes the host's speed out of a test that has the job wait for a storage request.
 held_at_most_a_while() keeps a test that holds a scratch directory's lock from hanging the suite.
+The `failing_log` fixture gives the job's log a handler that fails on every line, as a standard error
+that cannot be written to makes the process's own handler fail.
 FakeS3 stands in for the S3 client: it serves ranged, conditional reads of objects it holds with the
 response shape core.source_reader.S3RangeSource checks, and records every PutObject in order. A claimed
 execution is built from the contract's own fixtures (the P01/P02 requests, the P24/P27 grants) through
@@ -14,10 +16,13 @@ and ctx-hub-storage.json.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
 import os
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -168,8 +173,11 @@ def settle_requests_first(patched: pytest.MonkeyPatch, arrival: threading.Event 
 # How long a test that holds a scratch directory's lock, as a live execution of another process would,
 # keeps it before it lets go by itself. The code under test never waits for a lock. Were it ever to, on
 # the test's own thread, it would wait for ever, and nothing times a test out: with this it gets on
-# after a few seconds, and the test fails on what it did with a lock it should never have got.
-LOCK_RELEASE_S = 5.0
+# after a while, and the test fails on what it did with a lock it should never have got. As long as a
+# storage stand-in holds a request (HANG_RELEASE_S): far longer than a loaded host keeps a test's own
+# thread between taking the lock and the code's try at it, so the lock is never let go under code that
+# does not wait.
+LOCK_RELEASE_S = 20.0
 
 
 def held_at_most_a_while(descriptor: int) -> Callable[[], None]:
@@ -193,6 +201,51 @@ def held_at_most_a_while(descriptor: int) -> Callable[[], None]:
             os.close(descriptor)
 
     return let_go
+
+
+# --- a log whose handler fails ----------------------------------------------------------------------
+
+# The logger every module of the job writes under, and the text of the error a log line fails on when it
+# cannot be written.
+JOB_LOGGER = "core.job"
+LOG_FAILURE_CANARY = "CANARY-quoted-by-a-failing-log"
+LOG_FAILURE_TEXT = f"no memory left for {LOG_FAILURE_CANARY}"
+
+
+class _FailingStream(io.TextIOBase):
+    """A standard error that fails every write."""
+
+    def write(self, text: str) -> int:
+        raise OSError(LOG_FAILURE_TEXT)
+
+
+@pytest.fixture
+def failing_log(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """While the test runs, every line the job's modules log also goes to a handler of the kind the
+    process's log has (a stream handler), whose stream fails every write.
+
+    Such a handler does not raise: Python's logging prints a report of its own to standard error
+    (raiseExceptions, set here to its default), with every error the failure is chained to. A line
+    written while an error is being handled chains its handler's failure to that error, so the report
+    then holds the error's own text."""
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    handler = logging.StreamHandler(_FailingStream())
+    job_logger = logging.getLogger(JOB_LOGGER)
+    job_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        job_logger.removeHandler(handler)
+        handler.close()
+
+
+def reported_log_failures(capsys: pytest.CaptureFixture[str], line_words: str) -> str:
+    """What Python's logging wrote to standard error about its handler's failures, once that is shown to
+    hold the report of a failure on the line that says `line_words` (a report quotes the line's message)."""
+    written = capsys.readouterr().err
+    assert LOG_FAILURE_CANARY in written, "logging reported no failure of its handler"
+    assert line_words in written, "the handler did not fail on the line the test is about"
+    return written
 
 
 # --- a fake S3 client ---------------------------------------------------------------------------

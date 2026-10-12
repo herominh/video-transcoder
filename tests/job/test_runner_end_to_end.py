@@ -385,12 +385,14 @@ def test_job_when_a_read_of_the_real_preflight_never_returns_should_fail_for_goo
     # which of the two is noticed first names the failure. The ffmpeg version is a stated one, so
     # that asking the installed ffmpeg takes none of the half second.
     never_answered = threading.Event()
+    read_began = threading.Event()
     threads_before = set(threading.enumerate())
     s3 = FakeS3()
     s3.hold(SOURCE_BUCKET, SOURCE_KEY, source_media, SOURCE_ETAG)
     answer = s3.get_object
 
     def get_object_that_hangs(**request: Any) -> Any:
+        read_began.set()
         never_answered.wait(HANG_RELEASE_S)
         return answer(**request)
 
@@ -413,6 +415,7 @@ def test_job_when_a_read_of_the_real_preflight_never_returns_should_fail_for_goo
             patched.setattr(profile_module, "SUPPORTED_PROFILES", (PROFILE,))
             sealed = runner.run(claimed, runtime_of(FakeTransport(then=DELIVERED, clock=clock), clock))
         took_s = time.monotonic() - started
+        a_read_was_in_flight = read_began.is_set()
     finally:
         never_answered.set()
         for thread in set(threading.enumerate()) - threads_before:
@@ -425,3 +428,8 @@ def test_job_when_a_read_of_the_real_preflight_never_returns_should_fail_for_goo
     assert took_s < HANG_RELEASE_S
     assert s3.put_calls == []
     assert list(scratch_root.iterdir()) == []
+    if not a_read_was_in_flight:
+        # Said only once everything above held, which it must with or without a read: how soon ffprobe
+        # comes to its first read is the host's speed, not the job's doing, so it is never asserted. But
+        # without a read in flight the run was not the case this test is about.
+        pytest.skip("this host did not bring ffprobe to its first read within the wall time: no read was in flight")

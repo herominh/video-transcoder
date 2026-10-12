@@ -30,6 +30,10 @@ logged, put in a message or written by this module (README 15.1, rules 4 and 5).
 from the grant as soon as the transcoding stage ends, however it ends, and in any case before run()
 returns: the finalizing and uploading stages run without it (rule 4). A bug is logged by its
 class and its stack only: an unexpected error's own text can quote anything, so it reaches no log line.
+Nor does a failing log put it on standard error: a line that tells of an error this module caught is
+written once the `except` block that caught it has ended. A log handler that fails on a line does not
+raise: Python's logging prints a report of its own, with every error that failure is chained to, which
+inside the block would be the caught error with its own text (a path, an endpoint, a bug's message).
 
 The execution holds an exclusive lock on its scratch directory from right after it made it until after
 it removed it (core/job/scratch.py), so that another process on the same scratch root, removing at its
@@ -277,6 +281,20 @@ def _shortage_name(error: Exception) -> str:
     return f"{name} ({_errno_name(error)})"
 
 
+def _close_error_class(client: Any) -> str | None:
+    """Close one storage client, if it has a close(): the class name of what that close raised, None
+    when it raised nothing or the client has no close().
+
+    The class name only: a client's error can quote its endpoint, and nothing else of it leaves here."""
+    try:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    except Exception as error:  # noqa: BLE001 - a client left open never changes the execution's result
+        return type(error).__name__
+    return None
+
+
 def _scratch_failure(error: OSError) -> Failure:
     """The typed failure of an execution whose scratch directory could not be set up: a full disk is
     the module's own retryable resource_exhausted/scratch_full, any other OSError the retryable
@@ -286,15 +304,12 @@ def _scratch_failure(error: OSError) -> Failure:
     scratch root that does not exist or that the process may not write to and search
     (core/job/config.py), so a directory that is missing or refused here became so after that start,
     on this one worker: another start does not meet it, and a final failure would cost the video.
-    The log line and the detail name the errno, never the error's own text, which names the path.
+    The detail names the errno, never the error's own text, which names the path. Nothing is logged
+    here: whoever caught the error writes its line once that `except` block has ended (_make_scratch).
     """
-    errno_name = _errno_name(error)
-    logger.warning(
-        "the execution's scratch directory could not be set up: %s errno=%s", type(error).__name__, errno_name
-    )
     if error.errno in DISK_FULL_ERRNOS:
         return SCRATCH_FULL
-    detail = make_detail(f"the execution's scratch directory could not be set up: {errno_name}")
+    detail = make_detail(f"the execution's scratch directory could not be set up: {_errno_name(error)}")
     return Failure("resource_exhausted", "scratch_create_failed", True, detail)
 
 
@@ -374,9 +389,13 @@ class _Execution:
         left_ms = int(max(left_s, LEAST_COUNTABLE_S) * MS_PER_SECOND)
         self._wall_time_spent = left_ms < 1
         # Kept for a deadline failure's detail, in whole seconds rounded down: the dispatch's limit, and
-        # what the start had spent of it by now (more than the limit when the claim overran it).
+        # what the start had spent of it by now (more than the limit when the claim overran it). None
+        # where the reading lay so far back that what was left had to be taken as the least that can be
+        # counted: the seconds would then count that bound (a number of some 300 digits), not the start.
         self._wall_time_limit_s = limit_ms // MS_PER_SECOND
-        self._spent_before_start_s = max(0, limit_ms - left_ms) // MS_PER_SECOND
+        self._spent_before_start_s: int | None = (
+            None if left_s <= LEAST_COUNTABLE_S else max(0, limit_ms - left_ms) // MS_PER_SECOND
+        )
         # With no time left the execution ends at its first step, and its deadline is one that has passed.
         self._deadline = Deadline(time.monotonic()) if self._wall_time_spent else Deadline.after_ms(left_ms)
         self._progress = ProgressReporter(claimed, runtime)
@@ -403,14 +422,21 @@ class _Execution:
 
     def _ending(self) -> SealedMessage:
         execution_id = self._grant.identity.execution_id
+        bug_report: str | None = None
         try:
             return self._completed(self._stored_generation())
         except WorkerFailure as ended:
             failure = ended.failure
         except Exception as error:  # noqa: BLE001 - a bug still ends the execution with a result
-            # No `exc_info`: a traceback ends with the error's own text. The class and the stack say where.
-            logger.error("execution %s ended on an unexpected %s", execution_id, _stack_report(error))
+            # Only what the bug's log line says is kept past this block: the class and the stack say
+            # where. No `exc_info`, and not the error: a traceback ends with the error's own text.
+            bug_report = _stack_report(error)
             failure = Failure("internal_error", "unexpected_error", True, make_detail(type(error).__name__))
+        if bug_report is not None:
+            # Logged here, after the `except` block has ended: a log handler that fails on this line
+            # has Python's logging print every error its failure is chained to, which inside the block
+            # would be the bug, with its own text.
+            logger.error("execution %s ended on an unexpected %s", execution_id, bug_report)
         failure = self._with_the_time_spent_before_start(failure)
         logger.warning(
             "execution %s failed at stage %s: %s/%s", execution_id, self._stage, failure.error_class, failure.code
@@ -426,9 +452,10 @@ class _Execution:
         took most of it. (Where a stage's own budget ran out with wall time left, the code names that
         budget, and the numbers only show that the wall time was not what ran out.) The failure's own
         detail is never cut: one that leaves no room for the numbers within what a detail may hold stays
-        as it is.
+        as it is. So does every failure of a start whose wall time, by the reading it was given, ended
+        too far back to be counted: there is no number of seconds to tell.
         """
-        if failure.error_class != DEADLINE_EXCEEDED_CLASS:
+        if failure.error_class != DEADLINE_EXCEEDED_CLASS or self._spent_before_start_s is None:
             return failure
         detail = SPENT_BEFORE_START_DETAIL.format(
             detail=failure.detail, spent_s=self._spent_before_start_s, limit_s=self._wall_time_limit_s
@@ -522,19 +549,22 @@ class _Execution:
             client = factory(access)
         except Exception as error:  # noqa: BLE001 - whatever the factory raises, the execution ends typed
             shortage = _is_passing_shortage(error)
-            # The class name only, and a shortage's errno by its symbolic name, here and in the result:
-            # such an error's own text can quote the endpoint.
+            # The class name only, and a shortage's errno by its symbolic name, in the log and in the
+            # result: such an error's own text can quote the endpoint. Nothing else of it is kept.
             named = _shortage_name(error) if shortage else type(error).__name__
-            detail = make_detail(f"the {side} storage client could not be made: {named}")
-            if shortage:
-                logger.warning("%s", detail)
-                failure = Failure("resource_exhausted", "storage_client_start_failed", True, detail)
-            else:
-                logger.error("%s", detail)
-                failure = Failure("configuration_error", "storage_client_unavailable", False, detail)
-            raise WorkerFailure(failure) from None
-        self._clients.append(client)
-        return client
+        else:
+            self._clients.append(client)
+            return client
+        # Logged and raised here, after the `except` block has ended: the factory's error is then
+        # neither what a failing log handler's report is chained to nor the failure's context.
+        detail = make_detail(f"the {side} storage client could not be made: {named}")
+        if shortage:
+            logger.warning("%s", detail)
+            failure = Failure("resource_exhausted", "storage_client_start_failed", True, detail)
+        else:
+            logger.error("%s", detail)
+            failure = Failure("configuration_error", "storage_client_unavailable", False, detail)
+        raise WorkerFailure(failure)
 
     def _source(self, client: Any) -> S3RangeSource:
         located = self._dispatch.source
@@ -631,17 +661,25 @@ class _Execution:
             for directory in (scratch.source_path.parent, scratch.output_root, scratch.work_dir):
                 directory.mkdir()
         except OSError as error:
-            raise WorkerFailure(_scratch_failure(error)) from None
-        return scratch
+            # Kept past this block: the failure, and the two names its log line tells. Not the error,
+            # whose own text names the path.
+            failure, error_class, errno_name = _scratch_failure(error), type(error).__name__, _errno_name(error)
+        else:
+            return scratch
+        # Logged and raised here, after the `except` block has ended (see _ending).
+        logger.warning("the execution's scratch directory could not be set up: %s errno=%s", error_class, errno_name)
+        raise WorkerFailure(failure)
 
     def _transcode(self, scratch: _Scratch, plan: _Plan, profile: MediaProfile) -> _Encoded:
         self._enter(STAGE_TRANSCODING)
-        source = EncodeSource.from_facts(scratch.source_path, plan.facts, profile)
-        allowance = plan.allowance
         renditions: list[RenditionOutput] = []
-        # One at a time, never in parallel: on the shared scratch disk a failed sibling's removal could
-        # free the space a rendition's free-disk check relies on. Each takes what the earlier ones left.
+        # From the stage's first step on: whatever fails once the stage has begun, before the first
+        # encode included, the key is dropped as the stage ends.
         try:
+            source = EncodeSource.from_facts(scratch.source_path, plan.facts, profile)
+            allowance = plan.allowance
+            # One at a time, never in parallel: on the shared scratch disk a failed sibling's removal could
+            # free the space a rendition's free-disk check relies on. Each takes what the earlier ones left.
             for planned in plan.renditions:
                 output = encode_rendition(
                     source,
@@ -657,7 +695,7 @@ class _Execution:
                 renditions.append(output)
                 self._progress.rendition_done()
         finally:
-            # Every encode and its own checks are done, or one failed: nothing needs the key again.
+            # Every encode and its own checks are done, or the stage failed: nothing needs the key again.
             self._grant.drop_media_key()
         return _Encoded(
             source=source,
@@ -879,21 +917,24 @@ class _Execution:
         if abandoned_requests() > 0:
             return
         for client in self._clients:
-            try:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    close()
-            except Exception as error:  # noqa: BLE001 - a client left open never changes the execution's result
-                # The class name only: a client's error can quote its endpoint.
-                logger.warning("a storage client could not be closed: %s", type(error).__name__)
+            error_class = _close_error_class(client)
+            if error_class is not None:
+                # The class name only: a client's error can quote its endpoint. Logged here, once the
+                # `except` block that caught that error has ended (see _ending).
+                logger.warning("a storage client could not be closed: %s", error_class)
 
     def _remove_scratch(self) -> None:
         if self._scratch_root is None:
             return
+        error_class: str | None = None
         try:
             shutil.rmtree(self._scratch_root)
         except Exception as error:  # noqa: BLE001 - a leftover directory never changes the execution's result
-            logger.warning("the execution's scratch directory could not be removed: %s", type(error).__name__)
+            # The class name only is kept past this block: the error's own text names the path.
+            error_class = type(error).__name__
+        if error_class is not None:
+            # Logged here, after the `except` block has ended (see _ending).
+            logger.warning("the execution's scratch directory could not be removed: %s", error_class)
         # Only now: until the directory is gone, its lock keeps another process's removal of leftovers
         # off it. A directory that could not be removed is from here on a leftover like any other.
         if self._scratch_lock is not None:

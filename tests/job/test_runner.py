@@ -86,6 +86,7 @@ from tests.job.conftest import (
     HANG_RELEASE_S,
     IMAGE_DIGEST,
     LOCK_RELEASE_S,
+    LOG_FAILURE_CANARY,
     MANIFEST_NAME,
     SETTINGS,
     FakeS3,
@@ -96,6 +97,7 @@ from tests.job.conftest import (
     held_at_most_a_while,
     hub_storage_context,
     job_settings,
+    reported_log_failures,
     runtime_of,
     settle_requests_first,
 )
@@ -562,6 +564,16 @@ def _is_locked(directory: Path) -> bool:
         return True
     os.close(descriptor)
     return False
+
+
+def _is_still_open_on(descriptor: int, opened_on: tuple[int, int]) -> bool:
+    """Whether `descriptor` is still open on the file or directory it was opened on, which is told by
+    its device and inode (`opened_on`): a number that was closed and given to another file is not."""
+    try:
+        status = os.fstat(descriptor)
+    except OSError:
+        return False
+    return (status.st_dev, status.st_ino) == opened_on
 
 
 def _error_of(result: Mapping[str, Any]) -> tuple[str, str, bool, str | None]:
@@ -1170,9 +1182,11 @@ def test_run_when_the_end_of_the_wall_time_reads_absurdly_far_back_should_fail_a
     # Act: result() returns once the worker's own validator sealed the result and the Hub's accepted it
     result = harness.result()
 
-    # Assert: spent, as with any reading in the past, and nothing was done
+    # Assert: spent, as with any reading in the past, and nothing was done. The detail is the failure's
+    # own and nothing more: a count of the seconds the start had spent would tell of the bound such a
+    # reading is held to (a number of some 300 digits), not of the start
     assert _error_of(result) == ("deadline_exceeded", "wall_time_spent_before_start", True, None)
-    assert result["error"]["detail"].startswith("the start's wall time was spent before the execution could begin")
+    assert result["error"]["detail"] == "the start's wall time was spent before the execution could begin"
     assert harness.access_profiles == [] and harness.s3.request_count == 0
     assert harness.left_in_scratch == []
 
@@ -2111,6 +2125,31 @@ def test_run_when_another_process_removes_leftovers_during_an_encode_should_keep
     assert MANIFEST_NAME in harness.uploaded
 
 
+def test_run_when_its_scratch_directory_was_removed_should_have_closed_the_descriptor_of_its_lock(
+    harness, monkeypatch
+):
+    # Arrange: note the descriptor the execution's lock lives on, and the directory it was opened on
+    held: list[tuple[int, tuple[int, int]]] = []
+    hold = runner_module.hold_scratch_lock
+
+    def hold_and_note(directory: Path) -> int:
+        descriptor = hold(directory)
+        opened_on = os.fstat(descriptor)
+        held.append((descriptor, (opened_on.st_dev, opened_on.st_ino)))
+        return descriptor
+
+    monkeypatch.setattr(runner_module, "hold_scratch_lock", hold_and_note)
+
+    # Act
+    result = harness.result()
+
+    # Assert: a warm worker runs job after job, so a descriptor left open with each would use them up
+    ((descriptor, directory),) = held
+    assert result["message_kind"] == COMPLETED_KIND
+    assert harness.left_in_scratch == []
+    assert not _is_still_open_on(descriptor, directory)
+
+
 def test_run_when_its_scratch_directory_cannot_be_removed_should_let_go_of_its_lock_all_the_same(
     harness, monkeypatch
 ):
@@ -2496,6 +2535,39 @@ def test_run_when_the_completed_result_would_fail_its_self_check_should_fail_at_
     assert [message["stage"] for message in harness.progress][-1] == "finalizing"
 
 
+def test_run_when_the_result_built_after_the_upload_fails_its_self_check_should_return_a_failed_result_at_uploading(
+    harness, monkeypatch
+):
+    # Arrange: the completed result passes its check before the upload, and the one built anew once the
+    # generation is stored does not. Nothing a dispatch or a grant can hold brings that about, so the
+    # runner's seal is stood in for: the second completed result it is handed is sealed as one of
+    # another generation than the execution's, which the worker's own validator refuses
+    seal = runner_module.seal_message
+    completed_results: list[str] = []
+
+    def seal_the_second_completed_result_as_another_generations(
+        message: Mapping[str, Any], *arguments: Any, **named_arguments: Any
+    ) -> SealedMessage:
+        if message["message_kind"] == COMPLETED_KIND:
+            completed_results.append(message["message_id"])
+            if len(completed_results) == 2:
+                message = {**message, "generation_id": OTHER_UUID}
+        return seal(message, *arguments, **named_arguments)
+
+    monkeypatch.setattr(runner_module, "seal_message", seal_the_second_completed_result_as_another_generations)
+
+    # Act: result() returns once the Hub's validator accepted the signed bytes
+    result = harness.result()
+
+    # Assert: the Hub still gets a signed result, a failed one that is final, of the stage the execution
+    # was in; the generation it must not take for completed is stored
+    assert len(completed_results) == 2
+    assert result["message_kind"] == FAILED_KIND
+    assert _error_of(result) == ("internal_error", "result_self_check_failed", False, "uploading")
+    assert "generation_execution_mismatch" in result["error"]["detail"]
+    assert MANIFEST_NAME in harness.uploaded
+
+
 def _completed_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
     """The log lines that say an execution completed."""
     return [record.getMessage() for record in caplog.records if " completed: " in record.getMessage()]
@@ -2613,6 +2685,25 @@ def test_run_when_it_fails_should_still_close_both_storage_clients(harness, monk
     assert (source.closes, output.closes) == (1, 1)
 
 
+def test_run_when_it_raises_should_still_close_both_storage_clients(harness, no_request_abandoned):
+    # Arrange: an execution id that aliases the video's id fails every self-check: one of them ends the
+    # job once both clients were made and the source was read, and the failed result's then makes
+    # run() raise
+    source, output = _give_closable_clients(harness)
+    dispatch_identity = harness.claimed.dispatch.identity
+    harness.regrant(
+        identity=ExecutionIdentity.of(dispatch_identity, execution_id=dispatch_identity.video_uuid, execution_fence=2)
+    )
+
+    # Act
+    with pytest.raises(SelfCheckFailed):
+        harness.run()
+
+    # Assert: closed once each, though no result came back
+    assert source.request_count > 0
+    assert (source.closes, output.closes) == (1, 1)
+
+
 def test_run_when_the_outputs_client_cannot_be_made_should_close_the_sources(harness, no_request_abandoned):
     # Arrange: the source's client is made first, then the output's factory refuses
     source, _ = _give_closable_clients(harness)
@@ -2627,19 +2718,21 @@ def test_run_when_the_outputs_client_cannot_be_made_should_close_the_sources(har
 
 
 def test_run_when_a_storage_client_has_no_close_should_leave_it_alone_and_close_the_other(
-    harness, no_request_abandoned
+    harness, caplog, no_request_abandoned
 ):
     # Arrange: the source's client is one that cannot be closed
+    caplog.set_level(logging.DEBUG)
     output = ClosableS3()
     harness.output_s3 = output
 
     # Act
     result = harness.result()
 
-    # Assert
+    # Assert: left alone is not a close that was tried and failed: no line says a client could not be closed
     assert result["message_kind"] == COMPLETED_KIND
     assert not hasattr(harness.s3, "close")
     assert output.closes == 1
+    assert [record.getMessage() for record in caplog.records if "could not be closed" in record.getMessage()] == []
 
 
 def test_run_when_closing_a_storage_client_fails_should_return_the_result_and_log_the_errors_class_only(
@@ -2687,6 +2780,115 @@ def test_run_when_the_process_has_abandoned_a_storage_request_should_leave_both_
     assert result["message_kind"] == COMPLETED_KIND
     assert storage_module.abandoned_requests() == 1
     assert (source.closes, output.closes) == (0, 0)
+
+
+# --- a log line whose handler fails -------------------------------------------------------------------
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while the error it tells of
+# is still being handled would put that error's own text into the report. `failing_log` makes every
+# line's handler fail; the result is what it is without it.
+
+
+def test_run_when_a_log_handler_fails_on_the_line_of_a_bug_should_keep_the_bugs_text_out_of_standard_error(
+    harness, monkeypatch, capsys, failing_log
+):
+    # Arrange: a stage fails on a bug that has a cause, each with a text of its own
+    monkeypatch.setattr(runner_module, "encode_rendition", a_stage_with_a_bug)
+
+    # Act
+    sealed = harness.run()
+
+    # Assert: logging did report its failure on the bug's line, with nothing of the bug's or its cause's text
+    written = reported_log_failures(capsys, "ended on an unexpected")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert [canary for canary in (CANARY, CAUSE_CANARY) if canary in written] == []
+    assert _error_of(result) == ("internal_error", "unexpected_error", True, "transcoding")
+    assert result["error"]["detail"] == "RuntimeError"
+
+
+@pytest.mark.parametrize("side", ["source", "output"])
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            ValueError(CLIENT_CANARY),
+            ("configuration_error", "storage_client_unavailable", False, None),
+            id="a-profile-no-client-can-be-made-of",
+        ),
+        pytest.param(
+            OSError(errno.EMFILE, "Too many open files", CLIENT_CANARY),
+            ("resource_exhausted", "storage_client_start_failed", True, None),
+            id="a-passing-shortage",
+        ),
+    ],
+)
+def test_run_when_a_log_handler_fails_on_the_line_of_a_client_that_cannot_be_made_should_keep_the_errors_text_out(
+    harness, capsys, failing_log, side, error, expected
+):
+    # Arrange: the factory of one side fails, in words that quote the endpoint
+    setattr(harness, f"{side}_client_error", error)
+
+    # Act
+    sealed = harness.run()
+
+    # Assert
+    written = reported_log_failures(capsys, f"the {side} storage client could not be made")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert CLIENT_CANARY not in written
+    assert _error_of(result) == expected
+
+
+def test_run_when_a_log_handler_fails_on_the_line_of_a_client_that_cannot_be_closed_should_keep_the_errors_text_out(
+    harness, capsys, failing_log, no_request_abandoned
+):
+    # Arrange: the close of the source's client fails, in words that quote the endpoint
+    source, output = _give_closable_clients(harness)
+    source.close_error = RuntimeError(CLIENT_CANARY)
+
+    # Act
+    sealed = harness.run()
+
+    # Assert
+    written = reported_log_failures(capsys, "a storage client could not be closed")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert CLIENT_CANARY not in written
+    assert result["message_kind"] == COMPLETED_KIND
+    assert (source.closes, output.closes) == (1, 1)
+
+
+def test_run_when_a_log_handler_fails_on_the_line_of_a_scratch_directory_left_behind_should_keep_its_path_out(
+    harness, monkeypatch, capsys, failing_log
+):
+    # Arrange: the removal of the execution's directory fails, in words that name a path
+    monkeypatch.setattr(runner_module.shutil, "rmtree", _raising(PermissionError(13, "denied", PATH_CANARY)))
+
+    # Act
+    sealed = harness.run()
+
+    # Assert
+    written = reported_log_failures(capsys, "scratch directory could not be removed")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert PATH_CANARY not in written
+    assert result["message_kind"] == COMPLETED_KIND
+
+
+@pytest.mark.parametrize("place", [THE_SCRATCH_ROOT, INSIDE_THE_SCRATCH_ROOT])
+def test_run_when_a_log_handler_fails_on_the_line_of_a_scratch_directory_not_set_up_should_keep_its_path_out(
+    harness, monkeypatch, capsys, failing_log, place
+):
+    # Arrange: the execution's directory, or one inside it, cannot be made, in words that name a path
+    full_disk = OSError(errno.ENOSPC, "No space left on device", PATH_CANARY)
+    _fail_the_making_of_the_scratch_directory(monkeypatch, place, full_disk)
+
+    # Act
+    sealed = harness.run()
+
+    # Assert
+    written = reported_log_failures(capsys, "scratch directory could not be set up")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert PATH_CANARY not in written
+    assert _error_of(result) == ("resource_exhausted", "scratch_full", True, "downloading")
+    assert harness.left_in_scratch == []
 
 
 @pytest.mark.parametrize(
@@ -2855,6 +3057,39 @@ def test_run_when_the_transcoding_stage_ends_on_a_failure_should_hold_no_media_k
     # Assert: held while the stage ran, and let go of as soon as it ended, before the failed result
     assert _error_of(result)[3] == "transcoding"
     assert [call.media_key for call in harness.stages.encodes] == [MEDIA_KEY]
+    assert MEDIA_KEY in held_at_each_draw
+    assert held_at_each_draw[-1] is None
+    assert harness.claimed.grant.media_key is None
+
+
+class _EncodeSourceThatCannotBeMade:
+    """Stands where the runner names EncodeSource: making one of a source's facts fails as a bug would."""
+
+    from_facts = staticmethod(a_stage_with_a_bug)
+
+
+def test_run_when_the_transcoding_stage_ends_before_its_first_encode_should_hold_no_media_key_when_the_result_is_built(
+    harness, monkeypatch
+):
+    # Arrange: the stage has begun and fails before any encode, where it makes of the source's facts
+    # what the encodes read; note what the grant holds each time an id is drawn (for every progress
+    # message, and at last for the result)
+    held_at_each_draw: list[bytes | None] = []
+    draw = harness.runtime.new_uuid
+
+    def draw_and_note() -> str:
+        held_at_each_draw.append(harness.claimed.grant.media_key)
+        return draw()
+
+    monkeypatch.setattr(runner_module, "EncodeSource", _EncodeSourceThatCannotBeMade)
+    harness.runtime = dataclasses.replace(harness.runtime, new_uuid=draw_and_note)
+
+    # Act
+    result = harness.result()
+
+    # Assert: however the stage ends, the key is let go of as it ends, before the failed result is built
+    assert _error_of(result) == ("internal_error", "unexpected_error", True, "transcoding")
+    assert harness.stages.encodes == []
     assert MEDIA_KEY in held_at_each_draw
     assert held_at_each_draw[-1] is None
     assert harness.claimed.grant.media_key is None

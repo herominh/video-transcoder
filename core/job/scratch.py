@@ -24,7 +24,10 @@ host's removal would find a live directory's lock free and remove the directory 
 LEFTOVER_MIN_AGE_S old.
 
 No log line of this module holds a path or an error's own text, which may name one: an error is named
-by its class.
+by its class. And the line that tells of an error is written once the `except` block that caught that
+error has ended: a log handler that fails on a line does not raise, Python's logging prints a report of
+its own with every error that failure is chained to, and inside the block that would be the caught
+error, with its own text.
 """
 
 from __future__ import annotations
@@ -82,10 +85,14 @@ def release_scratch_lock(descriptor: int) -> None:
     """
     if isinstance(descriptor, bool) or not isinstance(descriptor, int):
         raise TypeError("descriptor must be an int")
+    error_class: str | None = None
     try:
         os.close(descriptor)
     except OSError as error:
-        logger.warning("a scratch directory's lock could not be released: %s", type(error).__name__)
+        # Only the class name is kept past this block (see the module's last paragraph).
+        error_class = type(error).__name__
+    if error_class is not None:
+        logger.warning("a scratch directory's lock could not be released: %s", error_class)
 
 
 def remove_leftover_scratch(scratch_root: Path) -> int:
@@ -102,11 +109,15 @@ def remove_leftover_scratch(scratch_root: Path) -> int:
     class. One line tells how many were removed. No line holds a path.
     """
     removed = 0
+    error_class: str | None = None
     try:
         for directory in _prefixed_children(scratch_root):
             removed += int(_removed_as_a_leftover(directory))
     except Exception as error:  # noqa: BLE001 - leftovers that stay never keep a process from starting
-        logger.warning("the scratch root could not be searched for leftover directories: %s", type(error).__name__)
+        # Only the class name is kept past this block: the error's own text names the root.
+        error_class = type(error).__name__
+    if error_class is not None:
+        logger.warning("the scratch root could not be searched for leftover directories: %s", error_class)
     logger.info("removed %d leftover scratch directories", removed)
     return removed
 
@@ -125,10 +136,10 @@ def _removed_as_a_leftover(directory: Path) -> bool:
     try:
         return _removed_under_its_lock(directory)
     except Exception as error:  # noqa: BLE001 - one directory never keeps the others from being looked at
-        logger.warning(
-            "a leftover scratch directory could not be examined or removed: %s", type(error).__name__
-        )
-        return False
+        # Only the class name is kept past this block: the error's own text names the directory.
+        error_class = type(error).__name__
+    logger.warning("a leftover scratch directory could not be examined or removed: %s", error_class)
+    return False
 
 
 def _removed_under_its_lock(directory: Path) -> bool:
