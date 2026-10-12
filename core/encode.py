@@ -12,6 +12,16 @@ structure (whole MPEG-TS packets, decrypted first when encrypted), its video's p
 against its declared duration and the frames that span holds; then the whole rendition is decoded
 once, every error fatal, and must yield exactly the frames its segments carry. Every ending is a
 typed failure (`core/failure.py`), and a failed rendition's directory is removed.
+
+An error of the operating system is named by its class and its errno's symbolic name, never by its
+own text, which names a path. The line that tells of one is written, and the typed failure that
+replaces a caught error is raised, once the `except` block that caught it has ended, so the failure
+carries that error neither as its cause nor as its context. A log handler that fails on a line does
+not raise: Python's logging prints a report of its own, with every error that failure is chained to,
+which inside the block would be the caught error with its own text. A `with` handles the error its
+block raised while it leaves, so no error is raised through the one that holds the key, whose release
+may log: what the block ended on is kept, the `with` is left as after a block that ended well, and
+the error is raised behind it. A rendition's directory is removed behind its error in the same way.
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ import re
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
@@ -153,7 +163,9 @@ FRAME_COUNT_PATTERN = re.compile(r"0|[1-9][0-9]{0,17}")
 # EXTINF values were parsed from at most 20 characters of decimal text.
 MAX_DECIMAL_DIGITS = 20
 DECIMAL_BASE = 10
-KEY_PATH_FORBIDDEN = '"'
+# What the key line of the check playlist cannot carry of the key file's path: the path stands between
+# double quotes there, and inside them ffmpeg's HLS demuxer reads a backslash as an escape and drops it.
+KEY_PATH_FORBIDDEN = ('"', "\\")
 UNKNOWN_ERRNO_NAME = "unknown"
 EMPTY_CWD_PREFIX = "encode-cwd-"
 FILE_OPEN_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
@@ -185,6 +197,30 @@ def _failure(error_class: str, code: str, detail: str, *, retryable: bool = Fals
 def _errno_name(error: BaseException) -> str:
     # The errno's symbolic name only: an OSError's own message may carry a path.
     return errno.errorcode.get(getattr(error, "errno", None) or 0, UNKNOWN_ERRNO_NAME)
+
+
+@dataclass(frozen=True, slots=True)
+class _CaughtError:
+    """What is kept of an error of the operating system once the `except` block that caught it has
+    ended: its class's name, its errno's symbolic name, whether it says that a file is missing and
+    whether it says that the configured ffmpeg itself cannot run. The error itself is not kept: its
+    own text may name a path."""
+
+    class_name: str
+    errno_name: str
+    file_missing: bool
+    encoder_unusable: bool
+
+    @classmethod
+    def of(cls, error: OSError) -> _CaughtError:
+        return cls(
+            class_name=type(error).__name__,
+            errno_name=_errno_name(error),
+            file_missing=isinstance(error, FileNotFoundError),
+            encoder_unusable=(
+                isinstance(error, (FileNotFoundError, PermissionError)) or error.errno in ENCODER_UNUSABLE_ERRNOS
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,10 +350,13 @@ class _OutputMonitor:
         self.failure: Failure | None = None
 
     def __call__(self) -> bool:
+        caught: _CaughtError | None = None
         try:
             total_bytes, file_count = _measure_directory(self._directory)
         except OSError as error:
-            self.failure = _output_unreadable(error).failure
+            caught = _CaughtError.of(error)
+        if caught is not None:
+            self.failure = _output_unreadable(caught).failure
             return False
         if total_bytes > self._max_bytes:
             self.failure = _output_too_large(self._max_bytes).failure
@@ -347,11 +386,14 @@ def _measure_directory(directory: Path) -> tuple[int, int]:
     return total_bytes, entry_count
 
 
-def _output_unreadable(error: BaseException) -> WorkerFailure:
-    logger.warning("the rendition output could not be read: %s errno=%s", type(error).__name__, _errno_name(error))
+def _output_unreadable(caught: _CaughtError) -> WorkerFailure:
+    """The typed failure of an output the operating system would not let us read, and the one line
+    that tells of it. Called once the `except` block that caught the error has ended, with what was
+    kept of it (see the module's last paragraph)."""
+    logger.warning("the rendition output could not be read: %s errno=%s", caught.class_name, caught.errno_name)
     return _failure(
         "internal_error", "output_unreadable",
-        f"the rendition output could not be read: {_errno_name(error)}", retryable=True,
+        f"the rendition output could not be read: {caught.errno_name}", retryable=True,
     )
 
 
@@ -425,22 +467,25 @@ class _VerificationClock:
             self._budget.require_time_left()
 
 
-def _setup_failure(error: OSError) -> WorkerFailure:
-    logger.warning("the encode could not be set up: %s errno=%s", type(error).__name__, _errno_name(error))
+def _setup_failure(caught: _CaughtError) -> WorkerFailure:
+    """The typed failure of an encode that could not be set up, and the one line that tells of it.
+    Called once the `except` block that caught the error has ended, as the two start failures below
+    are, with what was kept of the error (see the module's last paragraph)."""
+    logger.warning("the encode could not be set up: %s errno=%s", caught.class_name, caught.errno_name)
     return _failure(
         "resource_exhausted", "encode_setup_failed",
-        f"the encode could not be set up: {_errno_name(error)}", retryable=True,
+        f"the encode could not be set up: {caught.errno_name}", retryable=True,
     )
 
 
-def _encoder_start_failure(error: OSError) -> WorkerFailure:
+def _encoder_start_failure(caught: _CaughtError) -> WorkerFailure:
     """A broken ffmpeg installation is permanent; any other start failure is worth a retry."""
-    logger.warning("ffmpeg could not be started: %s errno=%s", type(error).__name__, _errno_name(error))
-    if isinstance(error, (FileNotFoundError, PermissionError)) or error.errno in ENCODER_UNUSABLE_ERRNOS:
+    logger.warning("ffmpeg could not be started: %s errno=%s", caught.class_name, caught.errno_name)
+    if caught.encoder_unusable:
         return _failure("configuration_error", "ffmpeg_unavailable", "ffmpeg could not be started")
     return _failure(
         "resource_exhausted", "encoder_start_failed",
-        f"ffmpeg could not be started: {_errno_name(error)}", retryable=True,
+        f"ffmpeg could not be started: {caught.errno_name}", retryable=True,
     )
 
 
@@ -450,6 +495,25 @@ def _encoder_thread_failure() -> WorkerFailure:
         "resource_exhausted", "encoder_start_failed",
         f"ffmpeg could not be started: {UNKNOWN_ERRNO_NAME}", retryable=True,
     )
+
+
+def _ffmpeg_ending(run: Callable[[], BoundedResult]) -> BoundedResult | WorkerFailure:
+    """How the ffmpeg that `run` runs ended; or, of an ffmpeg that could not be started, the typed
+    failure of that.
+
+    The failure is handed back, not raised: its line is written here, before the caller leaves the
+    key and the working directory it holds, and the caller raises it once it has left them. Both
+    happen after the `except` block that caught the error has ended (see the module's last paragraph).
+    """
+    try:
+        return run()
+    except OSError as error:
+        # Also where ffmpeg's output could not be fully read; the group is dead by then.
+        caught: _CaughtError | None = _CaughtError.of(error)
+    except RuntimeError:
+        # A reader thread did not start: its line says so, and needs nothing of the error.
+        caught = None
+    return _encoder_thread_failure() if caught is None else _encoder_start_failure(caught)
 
 
 def _require_directory(name: str, directory: object) -> Path:
@@ -534,42 +598,63 @@ def _run_encoder(
     monitor: _OutputMonitor,
     deadline: Deadline,
 ) -> BoundedResult:
-    # The empty working directory and the key files live only while ffmpeg runs. The start-failure
-    # mappings inside raise WorkerFailure, which the setup except lets through.
+    # The empty working directory and the key files live only while ffmpeg runs. No error is raised
+    # through the `with` that holds them (see the module's last paragraph): what its block ended on
+    # is kept, an ffmpeg that could not be started included, and raised below.
+    setup_error: _CaughtError | None = None
+    block_error: BaseException | None = None
     try:
         with (
             tempfile.TemporaryDirectory(prefix=EMPTY_CWD_PREFIX, dir=work_dir, ignore_cleanup_errors=True) as empty_dir,
             _key_info(media_key, work_dir) as key_info,
         ):
-            argv = rendition_argv(
-                executable,
-                source,
-                plan,
-                profile,
-                output_dir=rendition_dir,
-                key_info_path=None if key_info is None else key_info.path,
-            )
             try:
-                result = run_bounded(
-                    argv,
-                    deadline=deadline,
-                    max_stdout_bytes=MAX_STDOUT_BYTES,
-                    max_stderr_bytes=profile.encode.max_stderr_bytes,
-                    env=FFMPEG_ENV,
-                    cwd=empty_dir,
-                    monitor=monitor,
-                    monitor_interval_ms=profile.encode.output_check_interval_ms,
-                    pass_fds=() if key_info is None else key_info.pass_fds,
-                    stderr_patterns=FRAME_REFUSAL_PATTERNS,
+                argv = rendition_argv(
+                    executable,
+                    source,
+                    plan,
+                    profile,
+                    output_dir=rendition_dir,
+                    key_info_path=None if key_info is None else key_info.path,
+                )
+                ending = _ffmpeg_ending(
+                    lambda: run_bounded(
+                        argv,
+                        deadline=deadline,
+                        max_stdout_bytes=MAX_STDOUT_BYTES,
+                        max_stderr_bytes=profile.encode.max_stderr_bytes,
+                        env=FFMPEG_ENV,
+                        cwd=empty_dir,
+                        monitor=monitor,
+                        monitor_interval_ms=profile.encode.output_check_interval_ms,
+                        pass_fds=() if key_info is None else key_info.pass_fds,
+                        stderr_patterns=FRAME_REFUSAL_PATTERNS,
+                    )
                 )
             except OSError as error:
-                # Also where ffmpeg's output could not be fully read; the group is dead by then.
-                raise _encoder_start_failure(error) from None
-            except RuntimeError:
-                raise _encoder_thread_failure() from None
+                setup_error = _CaughtError.of(error)
+            except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+                block_error = error
     except OSError as error:
-        raise _setup_failure(error) from None
-    return result
+        # Of the set-up or of the release, which stands whatever the block ended on.
+        setup_error = _CaughtError.of(error)
+    try:
+        if setup_error is not None:
+            raise _setup_failure(setup_error)
+        if block_error is not None:
+            raise block_error
+    finally:
+        # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+        # holds this frame, and this frame would hold the error.
+        del block_error
+    if isinstance(ending, WorkerFailure):
+        try:
+            raise ending
+        finally:
+            # Let go of where it is raised, as the error above: the failure's stack holds this frame,
+            # and this frame, which holds the media key, would hold the failure.
+            del ending
+    return ending
 
 
 def _scratch_full() -> WorkerFailure:
@@ -619,6 +704,7 @@ def _raise_for_ending(
 
 
 def _read_playlist(rendition_dir: Path, profile: MediaProfile, *, encrypted: bool) -> MediaPlaylist:
+    caught: _CaughtError | None = None
     try:
         return read_media_playlist(
             rendition_dir / PLAYLIST_NAME,
@@ -628,20 +714,28 @@ def _read_playlist(rendition_dir: Path, profile: MediaProfile, *, encrypted: boo
             max_segments=profile.encode.max_segments_per_rendition,
         )
     except PlaylistInvalid as invalid:
-        if invalid.code == TOO_MANY_SEGMENTS:
-            raise _too_many_segments(profile.encode.max_segments_per_rendition) from None
-        raise _output_invalid(f"the rendition's playlist is refused: {invalid.detail}") from None
+        # Its code and its detail, which is our own words, are all that is kept of the refusal.
+        refused_code, refused_detail = invalid.code, invalid.detail
     except OSError as error:
-        raise _output_unreadable(error) from None
+        caught = _CaughtError.of(error)
+    # Raised here, once the handler that caught the error has ended (see the module's last paragraph).
+    if caught is not None:
+        raise _output_unreadable(caught)
+    if refused_code == TOO_MANY_SEGMENTS:
+        raise _too_many_segments(profile.encode.max_segments_per_rendition)
+    raise _output_invalid(f"the rendition's playlist is refused: {refused_detail}")
 
 
 def _listed_sizes(rendition_dir: Path, names: Sequence[str]) -> dict[str, int]:
     """The size of every file, when the directory holds exactly `names`, each a regular file."""
+    caught: _CaughtError | None = None
     try:
         with os.scandir(rendition_dir) as entries:
             found = {entry.name: entry.stat(follow_symlinks=False) for entry in entries}
     except OSError as error:
-        raise _output_invalid_or_unreadable(error) from None
+        caught = _CaughtError.of(error)
+    if caught is not None:
+        raise _output_invalid_or_unreadable(caught)
     if set(found) != set(names):
         raise _output_invalid("the rendition directory does not hold exactly the files its playlist names")
     if not all(stat.S_ISREG(info.st_mode) for info in found.values()):
@@ -649,11 +743,11 @@ def _listed_sizes(rendition_dir: Path, names: Sequence[str]) -> dict[str, int]:
     return {name: found[name].st_size for name in names}
 
 
-def _output_invalid_or_unreadable(error: OSError) -> WorkerFailure:
+def _output_invalid_or_unreadable(caught: _CaughtError) -> WorkerFailure:
     # A file that vanished after the listing was not ffmpeg's finished output.
-    if isinstance(error, FileNotFoundError):
+    if caught.file_missing:
         return _output_invalid("a rendition file vanished while it was verified")
-    return _output_unreadable(error)
+    return _output_unreadable(caught)
 
 
 def _require_within_limits(sizes: dict[str, int], allowance: OutputAllowance) -> None:
@@ -824,23 +918,30 @@ def _digest(path: Path, expected_size: int, *, check: _SegmentCheck | None, cloc
     """The sha256 of the regular file at `path`, which must still hold `expected_size` bytes and,
     with `check`, pass it; one read pass, which the time budget bounds."""
     clock.check()
+    caught: _CaughtError | None = None
     try:
         descriptor = os.open(path, FILE_OPEN_FLAGS)
     except OSError as error:
-        raise _output_invalid_or_unreadable(error) from None
+        caught = _CaughtError.of(error)
+    if caught is not None:
+        raise _output_invalid_or_unreadable(caught)
     digest = hashlib.sha256()
     read_bytes = 0
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise _output_invalid("a rendition file is not a regular file")
-        while chunk := os.read(descriptor, HASH_CHUNK_BYTES):
-            digest.update(chunk)
-            if check is not None:
-                check.feed(chunk)
-            read_bytes += len(chunk)
-            clock.count(len(chunk))
-    except OSError as error:
-        raise _output_unreadable(error) from None
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise _output_invalid("a rendition file is not a regular file")
+            while chunk := os.read(descriptor, HASH_CHUNK_BYTES):
+                digest.update(chunk)
+                if check is not None:
+                    check.feed(chunk)
+                read_bytes += len(chunk)
+                clock.count(len(chunk))
+        except OSError as error:
+            caught = _CaughtError.of(error)
+        if caught is not None:
+            # Before the file is closed, as it always was, and once the handler has ended.
+            raise _output_unreadable(caught)
     finally:
         os.close(descriptor)
     if read_bytes != expected_size:
@@ -869,7 +970,7 @@ def _check_playlist(playlist: MediaPlaylist, rendition_dir: Path, key_path: Path
     the path the decoder reads it from; built from the parsed playlist, never from its text."""
     if key_path is not None:
         require_safe_path("key_path", key_path)
-        if KEY_PATH_FORBIDDEN in str(key_path):
+        if any(character in str(key_path) for character in KEY_PATH_FORBIDDEN):
             raise ValueError("key_path holds a character the key line cannot carry")
     lines = [
         "#EXTM3U",
@@ -921,9 +1022,12 @@ def _check_output_invalid() -> WorkerFailure:
 def _decoded_frames(progress: bytes) -> int:
     """The video frames decoded: the last `frame=` before `progress=end` in ffmpeg's progress output."""
     try:
-        text = progress.decode("ascii")
+        text: str | None = progress.decode("ascii")
     except UnicodeDecodeError:
-        raise _check_output_invalid() from None
+        text = None
+    if text is None:
+        # Raised here, once the handler that caught the error has ended: the error quotes the output.
+        raise _check_output_invalid()
     frames: int | None = None
     for line in text.splitlines():
         if line.startswith(PROGRESS_FRAME_PREFIX):
@@ -965,36 +1069,58 @@ def _self_decode(
 ) -> None:
     """Decode the whole rendition once, every error fatal, and require exactly `expected_frames`
     video frames. The check playlist and the key live in a private directory only while it runs."""
-    # The start-failure mappings inside raise WorkerFailure, which the setup except lets through.
+    # No error is raised through the `with` that holds the key (see the module's last paragraph):
+    # what its block ended on is kept, an ffmpeg that could not be started included, and raised below.
+    setup_error: _CaughtError | None = None
+    block_error: BaseException | None = None
     try:
         with (
             tempfile.TemporaryDirectory(prefix=CHECK_DIR_PREFIX, dir=work_dir, ignore_cleanup_errors=True) as directory,
             _key_info(media_key, Path(directory)) as key_info,
         ):
-            check_dir = Path(directory)
-            empty_cwd = check_dir / CHECK_CWD_NAME
-            empty_cwd.mkdir()
-            check_playlist = check_dir / CHECK_PLAYLIST_NAME
-            key_path = None if key_info is None else key_info.key_path
-            check_playlist.write_text(_check_playlist(playlist, rendition_dir, key_path), encoding="ascii")
             try:
-                result = run_bounded(
-                    _check_argv(executable, check_playlist, encrypted=media_key is not None),
-                    deadline=budget.deadline,
-                    max_stdout_bytes=CHECK_MAX_STDOUT_BYTES,
-                    max_stderr_bytes=profile.encode.max_stderr_bytes,
-                    env=FFMPEG_ENV,
-                    cwd=str(empty_cwd),
-                    pass_fds=() if key_info is None else key_info.pass_fds,
+                check_dir = Path(directory)
+                empty_cwd = check_dir / CHECK_CWD_NAME
+                empty_cwd.mkdir()
+                check_playlist = check_dir / CHECK_PLAYLIST_NAME
+                key_path = None if key_info is None else key_info.key_path
+                check_playlist.write_text(_check_playlist(playlist, rendition_dir, key_path), encoding="ascii")
+                ending = _ffmpeg_ending(
+                    lambda: run_bounded(
+                        _check_argv(executable, check_playlist, encrypted=media_key is not None),
+                        deadline=budget.deadline,
+                        max_stdout_bytes=CHECK_MAX_STDOUT_BYTES,
+                        max_stderr_bytes=profile.encode.max_stderr_bytes,
+                        env=FFMPEG_ENV,
+                        cwd=str(empty_cwd),
+                        pass_fds=() if key_info is None else key_info.pass_fds,
+                    )
                 )
             except OSError as error:
-                raise _encoder_start_failure(error) from None
-            except RuntimeError:
-                raise _encoder_thread_failure() from None
+                setup_error = _CaughtError.of(error)
+            except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+                block_error = error
     except OSError as error:
-        raise _setup_failure(error) from None
-    _raise_for_check_ending(result, budget)
-    if _decoded_frames(result.stdout) != expected_frames:
+        # Of the set-up or of the release, which stands whatever the block ended on.
+        setup_error = _CaughtError.of(error)
+    try:
+        if setup_error is not None:
+            raise _setup_failure(setup_error)
+        if block_error is not None:
+            raise block_error
+    finally:
+        # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+        # holds this frame, and this frame would hold the error.
+        del block_error
+    if isinstance(ending, WorkerFailure):
+        try:
+            raise ending
+        finally:
+            # Let go of where it is raised, as the error above: the failure's stack holds this frame,
+            # and this frame, which holds the media key, would hold the failure.
+            del ending
+    _raise_for_check_ending(ending, budget)
+    if _decoded_frames(ending.stdout) != expected_frames:
         raise _output_invalid(NOT_DECODING_CLEANLY)
 
 
@@ -1083,12 +1209,16 @@ def _remove_rendition(rendition_dir: Path) -> None:
 
     (No rmtree error callback: the worker image runs Python 3.10, which lacks `onexc`.)
     """
+    errno_name: str | None = None
     try:
         shutil.rmtree(rendition_dir)
     except FileNotFoundError:
         return
     except OSError as error:
-        logger.warning("a failed rendition's directory could not be removed: errno=%s", _errno_name(error))
+        # Only the errno's name is kept past this block: the error's own text names the path.
+        errno_name = _errno_name(error)
+    if errno_name is not None:
+        logger.warning("a failed rendition's directory could not be removed: errno=%s", errno_name)
 
 
 def encode_rendition(
@@ -1120,10 +1250,13 @@ def encode_rendition(
     executable = _resolve_ffmpeg(ffmpeg_path)
 
     rendition_dir = output_root / plan.name
+    setup_error: _CaughtError | None = None
     try:
         rendition_dir.mkdir()
     except OSError as error:
-        raise _setup_failure(error) from None
+        setup_error = _CaughtError.of(error)
+    if setup_error is not None:
+        raise _setup_failure(setup_error)
     # A rendition that fails for any reason leaves nothing behind, not even a partial directory.
     try:
         monitor = _OutputMonitor(rendition_dir, allowance, profile)
@@ -1158,9 +1291,19 @@ def encode_rendition(
             )
         except WorkerFailure as failure:
             # Running out of time is not something the output shows; every other refusal may be.
-            if failure.failure.error_class == DEADLINE_EXCEEDED:
+            if failure.failure.error_class == DEADLINE_EXCEEDED or not _disk_full(rendition_dir):
                 raise
-            raise _scratch_full_or(failure, rendition_dir) from None
-    except BaseException:
+        # A full scratch disk explains the refusal. Raised here, once the handler that caught the
+        # refusal has ended, so that it carries the refusal neither as its cause nor as its context.
+        raise _scratch_full()
+    except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+        rendition_error = error
+    # Behind the `except` block, not inside it: a line the removal logs is then not written while the
+    # rendition's error is still being handled (see the module's last paragraph).
+    try:
         _remove_rendition(rendition_dir)
-        raise
+        raise rendition_error
+    finally:
+        # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+        # holds this frame, and this frame would hold the error.
+        del rendition_error

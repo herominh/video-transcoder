@@ -2,19 +2,21 @@
 
 accept_dispatch() returns the request as a typed, immutable value, or raises DispatchRefused naming the
 step (carrier, signature, validation) and the verdict's layer and reason: never the content of what it
-refused. The bootstrap token of an accepted dispatch stays out of its repr. The fixtures carry no
-signature: each test signs the exact bytes it puts in the carrier.
+refused. A job input that is no object of text members is refused at the carrier before the carrier
+schema reads it, however deep it is nested. The bootstrap token of an accepted dispatch stays out of its
+repr. The fixtures carry no signature: each test signs the exact bytes it puts in the carrier.
 """
 
 import dataclasses
 import json
+import sys
 import traceback
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 import pytest
 
-from core.protocol import files, gate, pipeline, signing
+from core.protocol import files, gate, pipeline, schema, signing
 from core.protocol.dispatch import AcceptedDispatch, DispatchRefused, accept_dispatch
 from core.protocol.reasons import Layer, ReasonCode
 from tests.contract.v2_support import (
@@ -64,6 +66,10 @@ EXPIRY_POINTER = "/claim/expires_at"
 # A piece of the fixtures' object key, replaced to put one other character in the message text.
 OBJECT_KEY_PIECE = "source-0001"
 STEP_KEY_ID = "key_id"
+# The typed values an accepted dispatch holds, by the name of their field.
+TYPED_PARTS = ["identity", "source", "output", "profile", "encryption", "limits"]
+# How many times deeper than the interpreter's recursion limit a job input of these tests is nested.
+RECURSION_LIMITS_DEEP = 4
 
 
 def _accept(job_input: object, now: datetime = FIXTURE_NOW) -> AcceptedDispatch:
@@ -167,6 +173,37 @@ def test_accepted_dispatch_when_shown_with_repr_should_not_show_the_bootstrap_to
     assert dispatch.identity.dispatch_id in shown
 
 
+@pytest.mark.parametrize("part", [None, *TYPED_PARTS], ids=["the-dispatch-itself", *TYPED_PARTS])
+def test_accepted_dispatch_when_a_field_of_it_is_assigned_should_raise_frozen_instance_error(part):
+    # Arrange
+    dispatch = _accept(_carrier())
+    value = dispatch if part is None else getattr(dispatch, part)
+    names = [field.name for field in dataclasses.fields(value)]
+
+    # Act / Assert: every field, even when it is given the value it already holds
+    for name in names:
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            setattr(value, name, getattr(value, name))
+    assert names != []
+
+
+def test_accepted_dispatch_when_accepted_should_hold_nothing_that_can_be_changed_in_place():
+    # Arrange
+    dispatch = _accept(_carrier())
+
+    # Act
+    values = {field.name: getattr(dispatch, field.name) for field in dataclasses.fields(dispatch)}
+    typed = {name for name, value in values.items() if dataclasses.is_dataclass(value)}
+
+    # Assert: the frozen values of the test above, and besides them only text, a moment and a tuple of
+    # text; a value that hashes holds no list and no dict at any level
+    assert typed == set(TYPED_PARTS)
+    assert {type(value) for name, value in values.items() if name not in typed} == {str, datetime, tuple}
+    assert isinstance(dispatch.renditions, tuple)
+    assert {type(rendition) for rendition in dispatch.renditions} == {str}
+    assert hash(dispatch) == hash(_accept(_carrier()))
+
+
 # --- the carrier --------------------------------------------------------------------------------
 
 
@@ -210,6 +247,80 @@ def test_accept_dispatch_when_the_job_input_is_not_the_carrier_should_refuse_at_
     job_input: Callable[[], object]
 ):
     # Act
+    refusal = _refusal(job_input())
+
+    # Assert
+    assert refusal.step == STEP_CARRIER
+    assert refusal.verdict is None
+
+
+def _nested(wrap: Callable[[object], object]) -> object:
+    """A value nested several times deeper than the interpreter recurses, each level `wrap()` of the one
+    inside it: built by a loop, so that building it needs no depth."""
+    value: object = _carrier()[MESSAGE_MEMBER]
+    for _ in range(RECURSION_LIMITS_DEEP * sys.getrecursionlimit()):
+        value = wrap(value)
+    return value
+
+
+def _lists_in_lists() -> object:
+    return _nested(lambda inner: [inner])
+
+
+def _objects_in_objects() -> object:
+    return _nested(lambda inner: {MESSAGE_MEMBER: inner})
+
+
+NOT_AN_OBJECT_OF_TEXT: list[Any] = [
+    pytest.param(lambda: None, id="none"),
+    pytest.param(lambda: 7, id="a-number"),
+    pytest.param(lambda: _carrier()[MESSAGE_MEMBER], id="the-message-text-alone"),
+    pytest.param(lambda: [_carrier()[MESSAGE_MEMBER], _signature()], id="a-list"),
+    pytest.param(lambda: _carrier(vh_message=7), id="the-message-as-a-number"),
+    pytest.param(lambda: _carrier(vh_message=None), id="the-message-null"),
+    pytest.param(lambda: _carrier(vh_message=[_carrier()[MESSAGE_MEMBER]]), id="the-message-in-a-list"),
+    pytest.param(lambda: _carrier(vh_message=json.loads(_request())), id="the-message-as-an-object"),
+    pytest.param(lambda: _carrier(vh_message=_request()), id="the-message-as-bytes"),
+    pytest.param(lambda: _carrier(vh_signature=None), id="the-signature-null"),
+    pytest.param(lambda: {**_carrier(), 7: "seven"}, id="a-member-name-that-is-no-text"),
+    pytest.param(_objects_in_objects, id="objects-in-objects-deeper-than-the-recursion-limit"),
+]
+
+
+@pytest.mark.parametrize("job_input", NOT_AN_OBJECT_OF_TEXT)
+def test_accept_dispatch_when_the_job_input_is_no_object_of_text_members_should_refuse_it_before_the_schema_reads_it(
+    monkeypatch, job_input: Callable[[], object]
+):
+    # Arrange: schemas that fail the test the moment one is asked for: the error of the carrier schema
+    # renders the value it refuses, which a value nested deep enough does not survive.
+    value = job_input()
+
+    def reached(*args: object, **kwargs: object) -> None:
+        raise AssertionError("the carrier schema was handed what is no object of text members")
+
+    monkeypatch.setattr(schema, "validator_for", reached)
+
+    # Act
+    refusal = _refusal(value)
+
+    # Assert
+    assert refusal.step == STEP_CARRIER
+    assert refusal.verdict is None
+
+
+NESTED_DEEPER_THAN_THE_RECURSION_LIMIT: list[Any] = [
+    pytest.param(_lists_in_lists, id="a-list-in-a-list-and-so-on"),
+    pytest.param(lambda: _carrier(vh_message=_lists_in_lists()), id="the-message-as-lists-in-lists"),
+    pytest.param(lambda: _carrier(vh_message=_objects_in_objects()), id="the-message-as-objects-in-objects"),
+    pytest.param(lambda: _carrier(vh_signature=_lists_in_lists()), id="the-signature-as-lists-in-lists"),
+]
+
+
+@pytest.mark.parametrize("job_input", NESTED_DEEPER_THAN_THE_RECURSION_LIMIT)
+def test_accept_dispatch_when_the_job_input_is_nested_deeper_than_the_recursion_limit_should_refuse_at_the_carrier(
+    job_input: Callable[[], object]
+):
+    # Act: the real carrier schema is in place; a RecursionError here would be the worker's fault, not a refusal
     refusal = _refusal(job_input())
 
     # Assert

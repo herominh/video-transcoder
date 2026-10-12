@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import dataclasses
+import errno
 import hashlib
 import json
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,7 +19,7 @@ from typing import Any
 import pytest
 
 import core.thumbnail
-from core.bounded_process import Deadline
+from core.bounded_process import BoundedResult, Deadline
 from core.encode import ArtifactFile
 from core.encode_command import EncodeSource, input_arguments
 from core.failure import Diagnostic, WorkerFailure
@@ -34,6 +37,7 @@ from tests.encode.conftest import (
     probe_facts,
     require_media_tools,
 )
+from tests.failing_log import reported_log_failures
 from tests.preflight.conftest import FFMPEG_TIMEOUT_S
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the thumbnail runs under POSIX process groups")
@@ -70,6 +74,20 @@ CARRIES_METADATA = "the thumbnail carries metadata"
 # A profile whose decoder limit (10,000 + 63 x 200 + 63 x 63 = 26,569) is below 320x240.
 SMALL_PIXEL_CAP_EDGE = 100
 THUMBNAIL_UNAVAILABLE = "thumbnail_unavailable"
+# What the text of an error holds that must never reach the worker's output: the path an operating
+# system's error names, the path a removal that failed names, and what a bug choked on.
+PATH_CANARY = "/CANARY/path/of/a/thumbnail"
+REMOVAL_CANARY = "/CANARY/path/of/a/thumbnail/not/removed"
+BUG_CANARY = "CANARYtextOfABugUnderTheThumbnail0123"
+# How a stand-in for ffmpeg ended: by itself and well, or stopped by the thumbnail's output monitor.
+EXITED_CLEANLY = BoundedResult(
+    returncode=0, stdout=b"", stderr_tail=b"", timed_out=False, stdout_overflow=False, stderr_truncated=False
+)
+STOPPED_BY_ITS_MONITOR = BoundedResult(
+    returncode=None, stdout=b"", stderr_tail=b"", timed_out=False, stdout_overflow=False, stderr_truncated=False,
+    stopped_by_monitor=True,
+)
+NOT_A_JPEG = b"not a jpeg"
 
 
 @dataclass(frozen=True, slots=True)
@@ -974,3 +992,197 @@ def test_make_thumbnail_when_it_runs_ffmpeg_should_read_the_source_as_a_renditio
     assert argv[start: start + len(expected_input)] == expected_input
     assert argv.count("-i") == 1
     assert argv.index("-ss") > argv.index("-i")
+
+
+# --- a log line whose handler fails ------------------------------------------------------------------
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes every line's
+# handler fail; what the thumbnail ends with is what it ends with without it. No ffmpeg runs here: a
+# stand-in for run_bounded ends as the test says, having written what the test says.
+
+
+def _encoder_stand_in(
+    monkeypatch: pytest.MonkeyPatch, run: Callable[[Path, Callable[[], bool]], BoundedResult]
+) -> None:
+    """Put `run` where the thumbnail starts ffmpeg: it is handed the thumbnail's path and the output
+    monitor, and returns how ffmpeg ended, or raises what starting it raised."""
+
+    def run_bounded(argv: list[str], **limits: Any) -> BoundedResult:
+        return run(Path(argv[-1]), limits["monitor"])
+
+    monkeypatch.setattr(core.thumbnail, "run_bounded", run_bounded)
+
+
+def _an_encoder_that_wrote(data: bytes) -> Callable[[Path, Callable[[], bool]], BoundedResult]:
+    def run(target: Path, monitor: Callable[[], bool]) -> BoundedResult:
+        target.write_bytes(data)
+        return EXITED_CLEANLY
+
+    return run
+
+
+def _an_encoder_that_wrote_and_then_raised(error: BaseException) -> Callable[[Path, Callable[[], bool]], BoundedResult]:
+    def run(target: Path, monitor: Callable[[], bool]) -> BoundedResult:
+        target.write_bytes(NOT_A_JPEG)
+        raise error
+
+    return run
+
+
+def _thumbnail_os(monkeypatch: pytest.MonkeyPatch, **overrides: Any) -> None:
+    """Replace what core.thumbnail sees of `os`, leaving the real module alone for everything else."""
+    view = SimpleNamespace(**{name: getattr(os, name) for name in dir(os) if not name.startswith("__")})
+    for name, replacement in overrides.items():
+        setattr(view, name, replacement)
+    monkeypatch.setattr(core.thumbnail, "os", view)
+
+
+def _failing_naming(name: str, path_text: str, error_number: int, *, times: int | None = None) -> Callable[..., Any]:
+    """A stand-in for the operating system's call `name` that fails on an error whose own text names
+    `path_text`: every time, or the first `times` times, after which it is the real call."""
+    calls: list[tuple[Any, ...]] = []
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        calls.append(args)
+        if times is not None and len(calls) > times:
+            return getattr(os, name)(*args, **kwargs)
+        raise OSError(error_number, os.strerror(error_number), path_text)
+
+    return call
+
+
+def test_make_thumbnail_when_a_log_handler_fails_on_the_line_of_a_monitor_that_cannot_look_should_keep_the_path_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: the monitor's one look at the thumbnail fails, on an error whose own text names its path
+    job = _claimed_job(tmp_path)
+    _thumbnail_os(monkeypatch, lstat=_failing_naming("lstat", PATH_CANARY, errno.EIO, times=1))
+    _encoder_stand_in(monkeypatch, lambda target, monitor: EXITED_CLEANLY if monitor() else STOPPED_BY_ITS_MONITOR)
+
+    # Act
+    result = job.run(ffmpeg_path=sys.executable)
+
+    # Assert: logging did report its failure on that line, with nothing of the path the error named
+    written = reported_log_failures(capsys, "the thumbnail could not be read")
+    assert PATH_CANARY not in written
+    _assert_unavailable(result, "the thumbnail could not be read", job)
+
+
+@pytest.mark.parametrize("failing_call", ["lstat", "open", "read"])
+def test_make_thumbnail_when_a_log_handler_fails_on_the_line_of_an_unreadable_thumbnail_should_keep_the_path_out(
+    failing_call: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: ffmpeg wrote a file and exited well; the file then cannot be examined, opened or read,
+    # on an error whose own text names its path
+    job = _claimed_job(tmp_path)
+    _thumbnail_os(monkeypatch, **{failing_call: _failing_naming(failing_call, PATH_CANARY, errno.EIO, times=1)})
+    _encoder_stand_in(monkeypatch, _an_encoder_that_wrote(NOT_A_JPEG))
+
+    # Act
+    result = job.run(ffmpeg_path=sys.executable)
+
+    # Assert
+    written = reported_log_failures(capsys, "the thumbnail could not be read")
+    assert PATH_CANARY not in written
+    _assert_unavailable(result, "the thumbnail could not be read", job)
+
+
+@pytest.mark.parametrize(
+    ("start_error", "line_words"),
+    [
+        pytest.param(
+            OSError(errno.EAGAIN, "Resource temporarily unavailable", PATH_CANARY),
+            "the thumbnail encoder could not be started: %s errno=%s",
+            id="no-process-could-be-started",
+        ),
+        pytest.param(
+            RuntimeError(BUG_CANARY), "a reader thread did not start", id="a-reader-thread-did-not-start"
+        ),
+    ],
+)
+def test_make_thumbnail_when_a_log_handler_fails_on_the_line_of_an_encoder_not_started_should_keep_the_errors_text_out(
+    start_error: Exception,
+    line_words: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange
+    job = _claimed_job(tmp_path)
+
+    def not_started(target: Path, monitor: Callable[[], bool]) -> BoundedResult:
+        raise start_error
+
+    _encoder_stand_in(monkeypatch, not_started)
+
+    # Act
+    result = job.run(ffmpeg_path=sys.executable)
+
+    # Assert
+    written = reported_log_failures(capsys, line_words)
+    assert [canary for canary in (PATH_CANARY, BUG_CANARY) if canary in written] == []
+    _assert_unavailable(result, "the thumbnail encoder could not be started", job)
+
+
+def test_make_thumbnail_when_a_log_handler_fails_on_the_line_of_a_failed_thumbnail_not_removed_should_keep_its_path_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: what ffmpeg wrote is no thumbnail, and then it cannot be removed
+    job = _claimed_job(tmp_path)
+    _thumbnail_os(monkeypatch, unlink=_failing_naming("unlink", REMOVAL_CANARY, errno.EACCES))
+    _encoder_stand_in(monkeypatch, _an_encoder_that_wrote(NOT_A_JPEG))
+
+    # Act
+    result = job.run(ffmpeg_path=sys.executable)
+
+    # Assert: the diagnostic is what it is without the failing log, and the file is where it was left
+    written = reported_log_failures(capsys, "a failed thumbnail could not be removed")
+    assert REMOVAL_CANARY not in written
+    assert result == ThumbnailResult(
+        artifact=None, diagnostic=Diagnostic(code=THUMBNAIL_UNAVAILABLE, detail=NOT_THE_PLANNED_JPEG)
+    )
+    assert [path.name for path in job.output_root.iterdir()] == ["thumbnail.jpg"]
+
+
+def test_make_thumbnail_when_a_log_handler_fails_while_a_thumbnail_is_removed_behind_a_bug_should_keep_its_text_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: the attempt ends on a bug, in words that quote what it choked on, and then what it left
+    # cannot be removed
+    job = _claimed_job(tmp_path)
+    bug = ValueError(BUG_CANARY)
+    _thumbnail_os(monkeypatch, unlink=_failing_naming("unlink", REMOVAL_CANARY, errno.EACCES))
+    _encoder_stand_in(monkeypatch, _an_encoder_that_wrote_and_then_raised(bug))
+
+    # Act
+    with pytest.raises(ValueError) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert: nothing of the bug, which is the error that is raised, as it is, nor of the removal's error
+    written = reported_log_failures(capsys, "a failed thumbnail could not be removed")
+    assert [canary for canary in (BUG_CANARY, REMOVAL_CANARY) if canary in written] == []
+    assert raised.value is bug
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(3)], ids=["a-keyboard-interrupt", "an-exit"])
+def test_make_thumbnail_when_the_attempt_is_interrupted_should_remove_the_thumbnail_and_raise_the_interrupt_as_it_is(
+    interrupt: BaseException, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Arrange
+    job = _claimed_job(tmp_path)
+    _encoder_stand_in(monkeypatch, _an_encoder_that_wrote_and_then_raised(interrupt))
+
+    # Act
+    with pytest.raises(type(interrupt)) as raised:
+        job.run(ffmpeg_path=sys.executable)
+
+    # Assert
+    assert raised.value is interrupt
+    assert list(job.output_root.iterdir()) == []
+    assert list(job.work_dir.iterdir()) == []

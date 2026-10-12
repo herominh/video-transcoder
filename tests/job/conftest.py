@@ -1,6 +1,10 @@
 """Shared helpers of the job tests. Nothing here touches a network, a real bucket or a paid service.
 
 ScriptedDeadline and ClockDeadline are deadlines a test decides, so that no sleep and no real clock does.
+settle_requests_first() takes the host's speed out of a test that has the job wait for a storage request.
+held_at_most_a_while() keeps a test that holds a scratch directory's lock from hanging the suite.
+The `failing_log` fixture gives the job's log a handler that fails on every line, as a standard error
+that cannot be written to makes the process's own handler fail.
 FakeS3 stands in for the S3 client: it serves ranged, conditional reads of objects it holds with the
 response shape core.source_reader.S3RangeSource checks, and records every PutObject in order. A claimed
 execution is built from the contract's own fixtures (the P01/P02 requests, the P24/P27 grants) through
@@ -12,16 +16,23 @@ and ctx-hub-storage.json.
 
 from __future__ import annotations
 
+import io
 import json
+import logging
+import os
+import threading
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import pytest
 from botocore.exceptions import ClientError
 
 from core.bounded_process import Deadline
+from core.job import storage
 from core.job.config import JobSettings
 from core.protocol import files, pipeline, signing
 from core.protocol.claim import Grant, claim_execution
@@ -62,6 +73,9 @@ HTTP_PRECONDITION_FAILED = 412
 HTTP_RANGE_NOT_SATISFIABLE = 416
 DELIVERED = HttpAnswer(HTTP_OK, b"", None)
 CLOCK_SKEW_S = 300
+# How long a storage stand-in that never answers holds a request before it lets it go by itself, so that
+# a regression fails a test instead of hanging the suite; far longer than any deadline a test sets.
+HANG_RELEASE_S = 20.0
 PROGRESS_KIND = "transcode.progress"
 COMPLETED_KIND = "transcode.result.completed"
 FAILED_KIND = "transcode.result.failed"
@@ -79,22 +93,37 @@ _NEVER_S = 1.0e12
 
 class ScriptedDeadline(Deadline):
     """A Deadline whose expired() answers from a script, not from a clock: each call takes the next answer,
-    and the last one repeats. `asked` counts the calls. It is a Deadline to every isinstance check."""
+    and the last one repeats. `asked` counts the calls. It is a Deadline to every isinstance check.
+
+    remaining_s() goes by the script as well, and takes no answer of it: no time is left once expired()
+    has said that the deadline passed (before the first call: when the first answer says so), and until
+    then more time than any wait lasts. So what decides whether a wait is made, or a request started,
+    agrees with what expired() last said."""
 
     def __init__(self, *answers: bool) -> None:
         if not answers:
             raise ValueError("a scripted deadline needs at least one answer")
         super().__init__(_NEVER_S)
         object.__setattr__(self, "_answers", list(answers))
+        object.__setattr__(self, "_passed", answers[0])
         object.__setattr__(self, "asked", 0)
 
     def expired(self) -> bool:
         object.__setattr__(self, "asked", self.asked + 1)
-        return self._answers.pop(0) if len(self._answers) > 1 else self._answers[0]
+        object.__setattr__(self, "_passed", self._answers.pop(0) if len(self._answers) > 1 else self._answers[0])
+        return self._passed
+
+    def remaining_s(self) -> float:
+        return 0.0 if self._passed else _NEVER_S
 
 
 class ClockDeadline(Deadline):
-    """A Deadline on the test's own clock: it has passed once `seconds` have gone by on `clock.monotonic()`."""
+    """A Deadline on the test's own clock: it has passed once `seconds` have gone by on `clock.monotonic()`,
+    and remaining_s() is what is left of them on that clock.
+
+    The job waits for a storage request's thread no longer than its deadline leaves, in real seconds
+    (storage._within). A test that puts storage requests under this deadline has them settle first
+    (settle_requests_first), so that what is left on its clock bounds no real wait."""
 
     def __init__(self, clock: FakeClock, seconds: float) -> None:
         super().__init__(_NEVER_S)
@@ -103,6 +132,121 @@ class ClockDeadline(Deadline):
 
     def expired(self) -> bool:
         return self._clock.monotonic() >= self._passes_at_s
+
+    def remaining_s(self) -> float:
+        return max(0.0, self._passes_at_s - self._clock.monotonic())
+
+
+# --- storage requests that settle before the job waits for them ------------------------------------
+
+# How long a request may take to end, or to get to where a test keeps it: far longer than any takes, so
+# that a regression fails a test instead of hanging it. And how often the thread that waits looks again.
+SETTLES_WITHIN_S = 10.0
+SETTLE_TICK_S = 0.005
+
+
+def settle_requests_first(patched: pytest.MonkeyPatch, arrival: threading.Event | None = None) -> None:
+    """Make whoever starts a storage request's thread get on only once that request has ended or, where
+    a test names one, `arrival` is set (a request is where the test keeps it).
+
+    The job waits for a request's thread no longer than its deadline or its ceiling leaves, in real
+    seconds (storage._within). Under this it begins to wait when the request needs no more time to get
+    somewhere, so nothing a test's deadline leaves is a time a loaded host could use up first: neither
+    the tens of milliseconds of a deadline or a ceiling that is to pass under a kept request, nor what
+    is left on a test's own clock (ClockDeadline)."""
+    start = threading.Thread.start
+
+    def start_and_see_the_request_settle(thread: threading.Thread) -> None:
+        start(thread)
+        if thread.name != storage.REQUEST_THREAD_NAME:
+            return
+        give_up_at_s = time.monotonic() + SETTLES_WITHIN_S
+        while thread.is_alive() and not (arrival is not None and arrival.is_set()):
+            assert time.monotonic() < give_up_at_s, "a storage request neither ended nor got to where the test keeps it"
+            thread.join(SETTLE_TICK_S)
+
+    patched.setattr(threading.Thread, "start", start_and_see_the_request_settle)
+
+
+# --- a lock a test holds, which no code under test may wait for --------------------------------------
+
+# How long a test that holds a scratch directory's lock, as a live execution of another process would,
+# keeps it before it lets go by itself. The code under test never waits for a lock. Were it ever to, on
+# the test's own thread, it would wait for ever, and nothing times a test out: with this it gets on
+# after a while, and the test fails on what it did with a lock it should never have got. As long as a
+# storage stand-in holds a request (HANG_RELEASE_S): far longer than a loaded host keeps a test's own
+# thread between taking the lock and the code's try at it, so the lock is never let go under code that
+# does not wait.
+LOCK_RELEASE_S = 20.0
+
+
+def held_at_most_a_while(descriptor: int) -> Callable[[], None]:
+    """Close `descriptor`, on which a test holds a lock, by itself after LOCK_RELEASE_S, and return the
+    function that closes it at once if that has not happened. Either way it is closed exactly once."""
+    closed_by_itself: list[bool] = []
+
+    def close_by_itself() -> None:
+        os.close(descriptor)
+        closed_by_itself.append(True)
+
+    timer = threading.Timer(LOCK_RELEASE_S, close_by_itself)
+    timer.daemon = True
+    timer.start()
+
+    def let_go() -> None:
+        # Once the timer's thread has ended it has closed the descriptor, or it never will.
+        timer.cancel()
+        timer.join()
+        if not closed_by_itself:
+            os.close(descriptor)
+
+    return let_go
+
+
+# --- a log whose handler fails ----------------------------------------------------------------------
+
+# The logger every module of the job writes under, and the text of the error a log line fails on when it
+# cannot be written.
+JOB_LOGGER = "core.job"
+LOG_FAILURE_CANARY = "CANARY-quoted-by-a-failing-log"
+LOG_FAILURE_TEXT = f"no memory left for {LOG_FAILURE_CANARY}"
+
+
+class _FailingStream(io.TextIOBase):
+    """A standard error that fails every write."""
+
+    def write(self, text: str) -> int:
+        raise OSError(LOG_FAILURE_TEXT)
+
+
+@pytest.fixture
+def failing_log(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """While the test runs, every line the job's modules log at WARNING or above (the level their
+    logger has unless the test sets another) also goes to a handler of the kind the process's log has
+    (a stream handler), whose stream fails every write.
+
+    Such a handler does not raise: Python's logging prints a report of its own to standard error
+    (raiseExceptions, set here to its default), with every error the failure is chained to. A line
+    written while an error is being handled chains its handler's failure to that error, so the report
+    then holds the error's own text."""
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    handler = logging.StreamHandler(_FailingStream())
+    job_logger = logging.getLogger(JOB_LOGGER)
+    job_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        job_logger.removeHandler(handler)
+        handler.close()
+
+
+def reported_log_failures(capsys: pytest.CaptureFixture[str], line_words: str) -> str:
+    """What Python's logging wrote to standard error about its handler's failures, once that is shown to
+    hold the report of a failure on the line that says `line_words` (a report quotes the line's message)."""
+    written = capsys.readouterr().err
+    assert LOG_FAILURE_CANARY in written, "logging reported no failure of its handler"
+    assert line_words in written, "the handler did not fail on the line the test is about"
+    return written
 
 
 # --- a fake S3 client ---------------------------------------------------------------------------

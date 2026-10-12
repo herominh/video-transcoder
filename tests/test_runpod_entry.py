@@ -10,15 +10,24 @@ the refusal's words or the bug's class, and nothing of the job input, of a secre
 text.
 
 build_handler() is the real wiring: it refuses a contract tree or a configuration it cannot trust before
-it returns a handler. configure_logging() sets up the process's log when the file is run: the worker's
-own loggers at INFO, and nothing from the HTTP library under the storage clients, whose warnings name
-the storage's host and a request's whole URL. Importing the module loads neither the SDK nor a v1
-module, needs no configuration and configures no logging.
+it returns a handler, and removes the scratch directories a killed process left in the scratch root, a
+removal that cannot stop a start even when a log line of its own raises.
+configure_logging() sets up the process's log when the file is run: the worker's own loggers at INFO,
+and nothing from the HTTP library under the storage clients, whose warnings name the storage's host and
+a request's whole URL. Importing the module loads neither the SDK nor a v1 module, needs no
+configuration and configures no logging.
+
+main() is what the file does when it is run as the program. It is driven here with a starter of the
+test's own in the place of the SDK's, and the file itself is run in a process of its own with a stand-in
+for the SDK first on that process's module path: neither needs the SDK, and both behave the same where
+it is installed. A configuration that is not whole stops main() before the loop is started.
 
 The count of abandoned storage requests belongs to the process, and a test session abandons some long
 before these tests run. So every test here gives the wrapper a count of its own, which starts at zero
-and which the test grows (the `abandoned` fixture replaces the name the wrapper reads). One test lets
-the wrapper read the real count and abandons a real read: a request that "never returns" is one a test
+and which the test grows (the `abandoned` fixture replaces the name the wrapper reads). Two tests are
+the exception (the `the_real_count` fixture): nothing of the wrapper is replaced in them, so it reads
+the process's real count through what it imported itself, and that count is zero for the length of the
+test and put back afterwards. Each abandons a real request: one that "never returns" is one a test
 double keeps until the test lets it go (_Hold, as tests/job/test_storage.py has it), and the deadline
 it is abandoned at is a real, short one.
 
@@ -30,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import os
@@ -38,8 +48,9 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 import traceback
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -47,8 +58,10 @@ import pytest
 
 from core.bounded_process import Deadline
 from core.failure import Failure, WorkerFailure
+from core.job import scratch as scratch_module
 from core.job import storage
 from core.job.runner import JobRunner
+from core.job.scratch import scratch_prefix
 from core.job.storage import DeadlineSource
 from core.protocol import files, messages, pipeline, signing
 from core.protocol.files import ContractTreeInvalid
@@ -106,6 +119,13 @@ STAND_IN_FAILURE = Failure(
     code="stand_in_job",
     retryable=False,
     detail="The stand-in job of the test did no work.",
+)
+# The failure the storage raises for a request a test has it give up at the deadline.
+REQUEST_GIVEN_UP = Failure(
+    error_class="deadline_exceeded",
+    code="request_deadline_exceeded",
+    retryable=False,
+    detail="The request of the test ran out of time.",
 )
 
 # The entry point's own logger, and the line format it configures: a test formats each record with it,
@@ -210,7 +230,15 @@ SCRATCH_DIR_VARIABLE = "VH_SCRATCH_DIR"
 IMAGE_DIGEST = "sha256:" + "5e" * 32
 # A value an operator mistyped into the configuration: a refusal names the variable, never this.
 CONFIG_CANARY = "CANARY-typed-into-the-configuration"
+# A required variable a test leaves out of a configuration that is otherwise whole.
+MISSING_VARIABLE = "VH_CLAIM_URL"
 TAMPERED_FILE = "limits.json"
+# How long ago a killed process's scratch directory was last changed: far longer than the least age of a leftover.
+LEFT_LONG_AGO_S = 2 * 60 * 60
+# The logger of the removal of leftover scratch directories (core/job/scratch.py).
+SCRATCH_LOGGER = "core.job.scratch"
+# The id of the kernel start of another host than the one the suite runs on.
+ANOTHER_HOSTS_BOOT_ID = "f1e2d3c4-b5a6-4978-8a9b-0c1d2e3f4a5b"
 
 # A real deadline a test waits out, long enough for a loaded host to reach the request the test keeps.
 SHORT_MS = 500
@@ -230,6 +258,40 @@ NEVER_IMPORTED = (
 )
 IMPORT_TIMEOUT_S = 120.0
 SDK_RUN_TIMEOUT_S = 60.0
+
+# The SDK's module, and the member of the configuration its serverless loop is started with that holds the handler.
+SDK_MODULE = "runpod"
+HANDLER_MEMBER = "handler"
+# The line of the worker's own that a test writes at each of two moments of a program start.
+WHILE_THE_HANDLER_IS_BUILT = "the handler is being built"
+WHEN_THE_LOOP_IS_STARTED = "the serverless loop was started"
+# A logger the HTTP library writes its warnings about a request on.
+HTTP_LIBRARY_REQUEST_LOGGER = "urllib3.connection"
+PROGRAM_TIMEOUT_S = 120.0
+# A stand-in for the SDK in a process of its own: a package of the SDK's name, first on that process's module
+# path. Its import does to the logging what the import of SDK 1.10.1 does: logging.basicConfig hangs an INFO
+# handler, in the SDK's format, on a root logger that has none (runpod/serverless/utils/rp_upload.py), and the
+# HTTP library's parent logger gets the level WARNING (runpod/__init__.py). Its `serverless.start` starts no
+# loop: it writes a warning of the HTTP library that names a storage request and a line of the worker's own,
+# and prints what it was started with.
+STAND_IN_SDK = f"""\
+import json
+import logging
+import types
+
+logging.basicConfig(level=logging.INFO, format="the SDK's own format: %(message)s", handlers=[logging.StreamHandler()])
+logging.getLogger({HTTP_LIBRARY_LOGGER!r}).setLevel(logging.WARNING)
+
+
+def _start(config):
+    http_library = logging.getLogger({HTTP_LIBRARY_REQUEST_LOGGER!r})
+    http_library.warning("Failed to parse headers (url=%s)", {STORAGE_URL_CANARY!r})
+    logging.getLogger("core.job.storage").info({WHEN_THE_LOOP_IS_STARTED!r})
+    print(json.dumps({{"members": sorted(config), "handler_is_callable": callable(config.get({HANDLER_MEMBER!r}))}}))
+
+
+serverless = types.SimpleNamespace(start=_start)
+"""
 
 
 # --- the test's side of one start -----------------------------------------------------------------
@@ -381,6 +443,10 @@ def _abandoning_a_storage_read(hold: _Hold) -> Callable[[], None]:
     return work
 
 
+# The fixture a test asks for to have the wrapper read the process's real count of abandoned requests.
+REAL_COUNT_FIXTURE = "the_real_count"
+
+
 class _AbandonedCount:
     """Stands where the wrapper reads core.job.storage.abandoned_requests: the count of a process of the
     test's own, which starts at zero and grows when the test says a request was abandoned."""
@@ -396,18 +462,33 @@ class _AbandonedCount:
 
 
 @pytest.fixture(autouse=True)
-def abandoned(monkeypatch: pytest.MonkeyPatch) -> _AbandonedCount:
-    """Every test begins in a process that never abandoned a storage request, whatever the session did."""
+def abandoned(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> _AbandonedCount:
+    """Every test begins in a process that never abandoned a storage request, whatever the session did:
+    the wrapper reads a count of the test's own. A test that asks for the real count is the exception:
+    nothing of the wrapper is replaced there, so that it reads the count through what it imported itself."""
     count = _AbandonedCount()
-    monkeypatch.setattr(runpod_handler, "abandoned_requests", count)
+    if REAL_COUNT_FIXTURE not in request.fixturenames:
+        monkeypatch.setattr(runpod_handler, "abandoned_requests", count)
     return count
 
 
 @pytest.fixture
-def the_real_count(abandoned: _AbandonedCount, monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
-    """The wrapper reads the process's real count again, the one core.job.storage keeps; it is returned."""
-    monkeypatch.setattr(runpod_handler, "abandoned_requests", storage.abandoned_requests)
-    return storage.abandoned_requests
+def the_real_count() -> Iterator[Callable[[], int]]:
+    """The process's real count, the one core.job.storage keeps, read by a wrapper nothing was replaced
+    in (the `abandoned` fixture leaves the wrapper alone in a test that asks for this one); its reader
+    is returned.
+
+    The count is zero when the test begins, whatever the session abandoned before. It never falls by
+    itself, so when the test ends it is put back to what it was, whatever the test did: the count
+    belongs to the process, and the tests that follow read it too."""
+    with storage._abandoned_requests_lock:
+        counted_by_the_session = storage._abandoned_requests
+        storage._abandoned_requests = 0
+    try:
+        yield storage.abandoned_requests
+    finally:
+        with storage._abandoned_requests_lock:
+            storage._abandoned_requests = counted_by_the_session
 
 
 # --- the job's output -----------------------------------------------------------------------------
@@ -667,6 +748,78 @@ def test_handler_when_the_log_line_of_a_bug_fails_too_should_still_raise_its_own
     assert _shown((BUG_CANARY, LOG_FAILURE_CANARY, *SECRETS), recorded) == []
 
 
+class _FailingStream(io.TextIOBase):
+    """A standard error that fails every write."""
+
+    def write(self, text: str) -> int:
+        raise OSError(LOG_FAILURE_TEXT)
+
+
+class _FailingFormatter(logging.Formatter):
+    """A formatter that cannot build its line."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        raise MemoryError(LOG_FAILURE_TEXT)
+
+
+def _handler_that_cannot_write_its_line() -> logging.Handler:
+    return logging.StreamHandler(_FailingStream())
+
+
+def _handler_that_cannot_build_its_line() -> logging.Handler:
+    handler = logging.StreamHandler(io.StringIO())
+    handler.setFormatter(_FailingFormatter())
+    return handler
+
+
+@contextlib.contextmanager
+def _entry_log_through(handler: logging.Handler) -> Iterator[None]:
+    """Inside, the entry point's logger hands its records to `handler` as well."""
+    entry_logger = logging.getLogger(ENTRY_LOGGER)
+    entry_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        entry_logger.removeHandler(handler)
+        handler.close()
+
+
+@pytest.mark.parametrize(
+    "failing_handler",
+    [
+        pytest.param(_handler_that_cannot_write_its_line, id="the-stream-fails-the-write"),
+        pytest.param(_handler_that_cannot_build_its_line, id="the-line-cannot-be-formatted"),
+    ],
+)
+def test_handler_when_a_log_handler_fails_on_the_line_of_a_bug_should_keep_the_bugs_text_out_of_standard_error(
+    monkeypatch, capsys, failing_handler
+):
+    # Arrange: a handler of the kind the process's log has (a stream handler) fails on every line. Such
+    # a handler does not raise: Python's logging prints a report of its own to standard error
+    # (raiseExceptions, its default), with every error the failure is chained to. The start fails on a
+    # bug that has a cause
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    clock = FakeClock()
+    handler = job_handler(
+        _runtime(_transport(clock, _granted()), clock), _StandInJob(_fail_because_of_another_error)
+    )
+
+    # Act
+    with _entry_log_through(failing_handler()), pytest.raises(WorkerFault) as raised:
+        handler(_dispatch_job())
+    written = capsys.readouterr().err
+
+    # Assert: logging did report the handler's failure, and the report holds nothing of the bug's own
+    # text or of its cause's; the error that leaves is the wrapper's own, alone
+    recorded = "".join(traceback.format_exception(raised.value))
+    assert LOG_FAILURE_CANARY in written
+    assert _shown((BUG_CANARY, CHAINED_CANARY, *SECRETS), written) == []
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert str(raised.value) == "the worker failed on an unexpected LookupError"
+    assert _shown(CHAIN_MARKERS, recorded) == []
+    assert _shown((BUG_CANARY, CHAINED_CANARY, LOG_FAILURE_CANARY, *SECRETS), recorded) == []
+
+
 @pytest.mark.parametrize("stop", [KeyboardInterrupt(), SystemExit(3)], ids=["an-interrupt", "the-interpreters-exit"])
 def test_handler_when_the_process_is_being_stopped_should_let_that_pass_unchanged(stop):
     # Arrange: what stops a process is no Exception, and no bug of the start
@@ -845,6 +998,34 @@ def test_handler_when_a_storage_read_is_really_abandoned_during_a_start_should_c
     assert _shown(SECRETS, json.dumps(output), *_log_lines(caplog)) == []
 
 
+def test_handler_when_the_storage_itself_abandons_a_request_should_read_its_count_and_ask_for_a_fresh_worker(
+    hold, the_real_count
+):
+    # Arrange: nothing of the wrapper is replaced, and the process has abandoned no request, so a start
+    # returns exactly its carrier. Then, while no job runs, the storage gives up a request that never
+    # returns, at a real, short deadline
+    output_before, sealed_before = _start()
+    with pytest.raises(WorkerFailure):
+        storage._within(Deadline.after_ms(SHORT_MS), hold.keep, expired=REQUEST_GIVEN_UP)
+
+    # Act: the next start of the process, whose own job abandons nothing
+    output, sealed = _start()
+
+    # Assert: the request was under way and the storage counted it, once; the wrapper read that count,
+    # so the output of the next start asks
+    assert hold.entered.wait(PROMPT_S)
+    assert the_real_count() == 1
+    assert output_before == {
+        "vh_message": sealed_before.body.decode("ascii"),
+        "vh_signature": sealed_before.signature,
+    }
+    assert output == {
+        "vh_message": sealed.body.decode("ascii"),
+        "vh_signature": sealed.signature,
+        "refresh_worker": True,
+    }
+
+
 # --- the process's handler ------------------------------------------------------------------------
 
 
@@ -912,6 +1093,108 @@ def test_build_handler_when_its_handler_gets_a_granted_dispatch_should_run_it_wi
     assert handed_runtime is runtime
     assert [type(runner) for runner in runners] == [JobRunner]
     assert output == {"vh_message": sealed.body.decode("ascii"), "vh_signature": sealed.signature}
+
+
+def test_build_handler_when_a_killed_process_left_a_scratch_directory_should_remove_it_before_any_job(tmp_path):
+    # Arrange: in the configured scratch root, a directory named as the job runner names an execution's,
+    # with the source a killed execution had downloaded, last changed long ago and locked by nobody
+    leftover = tmp_path / (scratch_prefix() + "left-by-a-killed-process")
+    leftover.mkdir()
+    (leftover / "source").write_bytes(b"the source a killed execution had downloaded")
+    changed_at_s = time.time() - LEFT_LONG_AGO_S
+    os.utime(leftover, (changed_at_s, changed_at_s))
+
+    # Act
+    handler = build_handler(_whole_env(tmp_path))
+
+    # Assert: the process starts with an empty scratch root
+    assert callable(handler)
+    assert list(tmp_path.iterdir()) == []
+
+
+def _scratch_prefix_on_a_host_booted_as(boot_id: str, aside: Path) -> str:
+    """What the job runner names an execution's scratch directory with on a host whose kernel start has
+    the id `boot_id`: the scratch module's own answer while it reads that id from a file in `aside`.
+    Once this returns the module reads again the identity of the host the suite runs on."""
+    boot_id_file = aside / "boot_id_of_another_host"
+    boot_id_file.write_text(boot_id + "\n", encoding="ascii")
+    with pytest.MonkeyPatch.context() as on_that_host:
+        on_that_host.setattr(scratch_module, "BOOT_ID_PATH", boot_id_file)
+        return scratch_prefix()
+
+
+def test_build_handler_when_another_hosts_execution_works_in_the_scratch_root_should_leave_its_directory_and_files(
+    tmp_path,
+):
+    # Arrange: a scratch root shared between hosts. In it the directory of an execution that still runs
+    # on another host: named by that host, owned by this process's user, last changed long ago, as
+    # during a long encode, and locked in that host's kernel only, so this host sees no lock on it
+    scratch_root, aside = tmp_path / "shared-scratch", tmp_path / "aside"
+    scratch_root.mkdir()
+    aside.mkdir()
+    another_hosts_prefix = _scratch_prefix_on_a_host_booted_as(ANOTHER_HOSTS_BOOT_ID, aside)
+    live_elsewhere = scratch_root / (another_hosts_prefix + "live-on-another-host")
+    (live_elsewhere / "source").mkdir(parents=True)
+    (live_elsewhere / "source" / "source").write_bytes(b"the source a running execution downloaded")
+    (live_elsewhere / "output").mkdir()
+    (live_elsewhere / "output" / "segment_0000.ts").write_bytes(b"\x47 a segment it has encoded")
+    changed_at_s = time.time() - LEFT_LONG_AGO_S
+    os.utime(live_elsewhere, (changed_at_s, changed_at_s))
+
+    # Act: a worker of this host starts on that root
+    handler = build_handler(_whole_env(scratch_root))
+
+    # Assert: the start removed nothing of the other host's execution, and left nothing of its own
+    assert callable(handler)
+    assert another_hosts_prefix != scratch_prefix()
+    assert [child.name for child in scratch_root.iterdir()] == [live_elsewhere.name]
+    assert (live_elsewhere / "source" / "source").read_bytes() == b"the source a running execution downloaded"
+    assert (live_elsewhere / "output" / "segment_0000.ts").read_bytes() == b"\x47 a segment it has encoded"
+
+
+class _RaisingLogHandler(logging.Handler):
+    """A log handler whose `emit` raises: unlike a stream that fails, its error comes out of the log
+    call itself. It counts the lines it was handed."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.lines += 1
+        raise MemoryError(LOG_FAILURE_TEXT)
+
+
+@contextlib.contextmanager
+def _scratch_log_through(handler: logging.Handler) -> Iterator[None]:
+    """Inside, the logger of the leftover removal hands its records to `handler` as well."""
+    scratch_logger = logging.getLogger(SCRATCH_LOGGER)
+    scratch_logger.addHandler(handler)
+    try:
+        yield
+    finally:
+        scratch_logger.removeHandler(handler)
+        handler.close()
+
+
+def test_build_handler_when_a_log_line_of_the_leftover_removal_raises_should_still_return_a_handler(
+    tmp_path, caplog
+):
+    # Arrange: the log is written at INFO and above, as the process's is, and the removal's logger
+    # hands its lines to a handler whose emit raises: every line the removal writes, the count it
+    # always ends with included, raises out of the removal
+    caplog.set_level(logging.INFO)
+    raising = _RaisingLogHandler()
+
+    # Act
+    with _scratch_log_through(raising):
+        handler = build_handler(_whole_env(tmp_path))
+
+    # Assert: the removal did meet the failing log, and the start goes on all the same. Nothing is
+    # logged about it: the log is what failed
+    assert raising.lines >= 1
+    assert callable(handler)
+    assert [record for record in caplog.records if record.name == ENTRY_LOGGER] == []
 
 
 @pytest.mark.parametrize(
@@ -1183,6 +1466,149 @@ def test_entry_point_when_imported_by_a_fresh_interpreter_should_load_no_sdk_or_
     # WARNING), and the HTTP library's logger still hands its records on
     assert imported.returncode == 0, imported.stderr
     assert imported.stdout.splitlines() == ["[]", "[]", "30", "True"]
+
+
+# --- the entry point run as the program -----------------------------------------------------------
+
+
+class _Starter:
+    """Stands where the SDK's serverless loop is started: it keeps the configuration it is started with,
+    does `when_started` and returns, taking no job."""
+
+    def __init__(self, when_started: Callable[[], None] = lambda: None) -> None:
+        self.configurations: list[dict[str, Any]] = []
+        self._when_started = when_started
+
+    def __call__(self, configuration: dict[str, Any]) -> None:
+        self.configurations.append(configuration)
+        self._when_started()
+
+
+class _EnvironmentReadOnce(Mapping[str, str]):
+    """An environment that does `when_first_read` the first time anything is read from it: the moment the
+    handler begins to be built from it."""
+
+    def __init__(self, variables: Mapping[str, str], when_first_read: Callable[[], None]) -> None:
+        self._variables = dict(variables)
+        self._when_first_read = when_first_read
+        self._was_read = False
+
+    def __getitem__(self, name: str) -> str:
+        self._note_the_read()
+        return self._variables[name]
+
+    def __iter__(self) -> Iterator[str]:
+        self._note_the_read()
+        return iter(self._variables)
+
+    def __len__(self) -> int:
+        return len(self._variables)
+
+    def _note_the_read(self) -> None:
+        if not self._was_read:
+            self._was_read = True
+            self._when_first_read()
+
+
+def _write_a_line_of_each(words: str) -> None:
+    """Log a warning of the HTTP library that names a storage request, and `words` as a line of the
+    worker's own: a log that is set up shows the second, in the process's format, and nothing of the first."""
+    logging.getLogger(HTTP_LIBRARY_REQUEST_LOGGER).warning("Failed to parse headers (url=%s)", STORAGE_URL_CANARY)
+    logging.getLogger(ENTRY_LOGGER).info(words)
+
+
+def test_main_when_given_a_starter_should_set_up_the_log_before_the_handler_is_built_and_before_the_starter_is_called(
+    tmp_path, monkeypatch, capsys
+):
+    # Arrange: the environment writes its two lines when the handler begins to be built from it, and the
+    # starter writes its own when it is called. The SDK cannot be imported here, installed or not
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    env = _EnvironmentReadOnce(_whole_env(tmp_path), lambda: _write_a_line_of_each(WHILE_THE_HANDLER_IS_BUILT))
+    starter = _Starter(lambda: _write_a_line_of_each(WHEN_THE_LOOP_IS_STARTED))
+
+    # Act: in a process whose logging nobody configured, as the image's is when it runs the file
+    with _logging_nobody_configured():
+        runpod_handler.main(starter, env)
+        written = capsys.readouterr().err
+
+    # Assert: each moment met a log that was set up: its line of the worker's own is there, in the
+    # process's format, and nothing of the HTTP library's line is
+    assert f" INFO {ENTRY_LOGGER}: {WHILE_THE_HANDLER_IS_BUILT}\n" in written
+    assert f" INFO {ENTRY_LOGGER}: {WHEN_THE_LOOP_IS_STARTED}\n" in written
+    assert [canary for canary in STORAGE_CANARIES if canary in written] == []
+
+
+def test_main_when_given_a_starter_and_an_environment_should_start_the_loop_once_with_the_handler_of_that_environment(
+    tmp_path, monkeypatch
+):
+    # Arrange: a whole configuration in the mapping given and none in the process's own environment. The
+    # SDK cannot be imported here, installed or not: the starter given is the one that is used
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    for name in [name for name in os.environ if name.startswith("VH_")]:
+        monkeypatch.delenv(name)
+    starter = _Starter()
+
+    # Act
+    with _logging_nobody_configured():
+        runpod_handler.main(starter, _whole_env(tmp_path))
+
+    # Assert: one start, with the one member the SDK reads the handler from; and that handler is the real
+    # one of the configuration given: it refuses a dispatch no configured key signed, in the refusal's words
+    (configuration,) = starter.configurations
+    assert sorted(configuration) == [HANDLER_MEMBER]
+    with pytest.raises(JobRefused) as raised:
+        configuration[HANDLER_MEMBER](_job(signed_carrier(REQUEST_WITH_CANARY, UNCONFIGURED_KEY)))
+    assert str(raised.value) == "the dispatch is refused at signature"
+
+
+def test_main_when_the_configuration_is_not_whole_should_raise_settings_invalid_and_never_call_the_starter(
+    tmp_path, monkeypatch
+):
+    # Arrange: a configuration that lacks one required variable. The SDK cannot be imported here,
+    # installed or not: the starter given is the only one there is to call
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    env = _changed(_whole_env(tmp_path), {MISSING_VARIABLE: None})
+    starter = _Starter()
+
+    # Act
+    with _logging_nobody_configured(), pytest.raises(SettingsInvalid) as raised:
+        runpod_handler.main(starter, env)
+
+    # Assert: the refusal of the configuration leaves main() as it is, and no loop was started that
+    # could take a job
+    assert raised.value.variable == MISSING_VARIABLE
+    assert starter.configurations == []
+
+
+def test_entry_point_when_run_as_the_program_should_set_up_the_log_then_import_the_sdk_and_start_it_with_a_handler(
+    tmp_path,
+):
+    # Arrange: a process of its own, so that nothing of this one's logging or modules is touched. Its
+    # environment holds a whole configuration, and a stand-in for the SDK comes first on its module path,
+    # so that the SDK is not needed and, where it is installed, not the one that is imported
+    sdk_path, scratch_dir = tmp_path / "sdk", tmp_path / "scratch"
+    (sdk_path / SDK_MODULE).mkdir(parents=True)
+    (sdk_path / SDK_MODULE / "__init__.py").write_text(STAND_IN_SDK, encoding="utf-8")
+    scratch_dir.mkdir()
+    env = {name: value for name, value in os.environ.items() if not name.startswith("VH_")}
+    env.update(_whole_env(scratch_dir))
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(sdk_path), os.environ.get("PYTHONPATH"))))
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+    # Act: the file is run as the image runs it
+    started = subprocess.run(
+        [sys.executable, str(REPOSITORY_ROOT / "wrappers" / "runpod_handler.py")],
+        cwd=REPOSITORY_ROOT, env=env, capture_output=True, text=True, timeout=PROGRAM_TIMEOUT_S, check=False,
+    )
+
+    # Assert: the SDK's loop was started, with a handler built from the process's environment. The log
+    # was set up before the SDK was imported: the worker's line is in the process's format, not in the
+    # one the SDK's import would have given a root logger without a handler, and the log holds nothing
+    # of the HTTP library's line
+    assert started.returncode == 0, started.stderr
+    assert started.stdout.splitlines() == ['{"members": ["handler"], "handler_is_callable": true}']
+    assert f" INFO core.job.storage: {WHEN_THE_LOOP_IS_STARTED}\n" in started.stderr
+    assert [canary for canary in STORAGE_CANARIES if canary in started.stderr] == []
 
 
 # --- through the SDK's own run_job ------------------------------------------------------------------

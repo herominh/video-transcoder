@@ -18,14 +18,38 @@ The stages, in order (the `stage` of a progress message and of a failed result; 
                   cannot be planned or does not fit fails before it is downloaded
     downloading   the whole source into the scratch directory
     transcoding   the planned renditions, one at a time, within their output allowance
-    finalizing    the thumbnail, the master playlist, the manifest, and the manifest's self-check
-    uploading     the files the manifest lists, then the manifest
+    finalizing    the thumbnail, the master playlist, the manifest, the manifest's self-check, and
+                  the self-check of the completed result, built once for it and dropped: a result the
+                  worker's own validator would refuse is found before anything is uploaded
+    uploading     the files the manifest lists, then the manifest; the result is built anew after it
 
 Everything the execution writes locally lives in one scratch directory of its own, removed whatever
 the ending. The media key of the grant goes to the encode and nowhere else, and the storage credentials
 to the two client factories (one for the source, one for the output) and nowhere else: neither is
-logged, put in a message or written by this module (README 15.1, rules 4 and 5). A bug is logged by its
+logged, put in a message or written by this module (README 15.1, rules 4 and 5). The key is dropped
+from the grant as soon as the transcoding stage ends, however it ends, and in any case before run()
+returns: the finalizing and uploading stages run without it (rule 4). A bug is logged by its
 class and its stack only: an unexpected error's own text can quote anything, so it reaches no log line.
+Nor does a failing log put it on standard error: a line that tells of an error this module caught is
+written once the `except` block that caught it has ended. A log handler that fails on a line does not
+raise: Python's logging prints a report of its own, with every error that failure is chained to, which
+inside the block would be the caught error with its own text (a path, an endpoint, a bug's message).
+
+The execution holds an exclusive lock on its scratch directory from right after it made it until after
+it removed it (core/job/scratch.py), so that another process on the same scratch root, removing at its
+start what a killed process left behind, passes over it. An OSError while the directory is made or
+locked ends the execution typed, never as a bug and never for good: a full disk is the retryable
+resource_exhausted / scratch_full, any other the retryable resource_exhausted / scratch_create_failed,
+a directory that is missing or may not be written included (the process start refuses a scratch root
+it cannot use, core/job/config.py, so what fails here is this one worker's trouble after its start).
+The storage clients the execution made are closed before run() returns, best effort, unless the process
+has abandoned a storage request, which may still be using one (core/job/storage.py abandoned_requests()).
+
+A result says how much of the source was read: the larger of what the preflight read and what the
+download wrote, never their sum, because the download reads again what the preflight read. A failed
+result says so only once the preflight read the source, and not when the failure is that the object
+was no longer the recorded one (source_integrity_mismatch / source_changed): it claims no observation
+of an object that is not the one the Hub recorded.
 
 A stage that runs out of time ends the execution for good (`deadline_exceeded` is not retryable there: a
 limit that is too small must not become a paid retry loop). One exception lives in the preflight: when
@@ -33,7 +57,8 @@ its own time budget ran out while the storage was the slow party, it fails retry
 (core/probe.py, source_unavailable / probe_source_slow). So that the Hub and an operator can tell a
 limit that is too small from a start whose claim took most of the time, the detail of a failed
 `deadline_exceeded` result ends with how much of the start's wall time was gone before the execution began, in
-whole seconds: the failure's own detail first, never cut, so one that leaves no room goes without.
+whole seconds: the failure's own detail first, never cut, so one that leaves no room goes without, and
+so does an execution whose reading of the time left lay too far back to be counted.
 """
 
 from __future__ import annotations
@@ -41,6 +66,7 @@ from __future__ import annotations
 import errno
 import logging
 import shutil
+import sys
 import tempfile
 import time
 import traceback
@@ -86,7 +112,17 @@ from core.thumbnail import ThumbnailResult, make_thumbnail
 from .config import JobSettings
 from .ffmpeg_version import installed_ffmpeg_version
 from .progress import ProgressReporter
-from .storage import DeadlineSource, download_source, storage_client, upload_client, upload_generation
+from .scratch import hold_scratch_lock, release_scratch_lock, scratch_prefix
+from .storage import (
+    DISK_FULL_ERRNOS,
+    SCRATCH_FULL,
+    DeadlineSource,
+    abandoned_requests,
+    download_source,
+    storage_client,
+    upload_client,
+    upload_generation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +133,6 @@ STAGE_TRANSCODING = "transcoding"
 STAGE_FINALIZING = "finalizing"
 STAGE_UPLOADING = "uploading"
 
-SCRATCH_PREFIX = "vh-job-"
 SOURCE_DIR_NAME = "source"
 # A fixed name without an extension: nothing of the source's own name or type reaches the scratch disk.
 SOURCE_FILE_NAME = "source"
@@ -113,7 +148,12 @@ MAX_CHAINED_ERRORS = 8
 # The class of the failures whose detail says what the start had spent before the execution began, and
 # what that detail is made of: the failure's own, then the two numbers in whole seconds.
 DEADLINE_EXCEEDED_CLASS = "deadline_exceeded"
+# The least number of seconds that can still be counted in milliseconds as a float: what is left of a
+# start's wall time is never taken as less (an absurd reading far in the past).
+LEAST_COUNTABLE_S = -sys.float_info.max / MS_PER_SECOND
 SPENT_BEFORE_START_DETAIL = "{detail}; the start had spent {spent_s} s of its {limit_s} s before the execution began"
+# The class and the code of the failure that the source was no longer the recorded object (core/source_reader.py).
+SOURCE_CHANGED = ("source_integrity_mismatch", "source_changed")
 
 UNSUPPORTED_PROFILE = Failure(
     "configuration_error", "unsupported_profile", False,
@@ -228,13 +268,51 @@ def _is_passing_shortage(error: Exception) -> bool:
     return isinstance(error, OSError) and not isinstance(error, (FileNotFoundError, PermissionError))
 
 
+def _errno_name(error: OSError) -> str:
+    # The errno's symbolic name only: an OSError's own message may carry a path.
+    return errno.errorcode.get(error.errno or 0, UNKNOWN_ERRNO_NAME)
+
+
 def _shortage_name(error: Exception) -> str:
     """A shortage by its class and, for an OSError, its errno's symbolic name: never the error's own
     message or file name, which may carry a path."""
     name = type(error).__name__
     if not isinstance(error, OSError):
         return name
-    return f"{name} ({errno.errorcode.get(error.errno or 0, UNKNOWN_ERRNO_NAME)})"
+    return f"{name} ({_errno_name(error)})"
+
+
+def _close_error_class(client: Any) -> str | None:
+    """Close one storage client, if it has a close(): the class name of what that close raised, None
+    when it raised nothing or the client has no close().
+
+    The class name only: a client's error can quote its endpoint, and nothing else of it leaves here."""
+    try:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+    except Exception as error:  # noqa: BLE001 - a client left open never changes the execution's result
+        return type(error).__name__
+    return None
+
+
+def _scratch_failure(error: OSError) -> Failure:
+    """The typed failure of an execution whose scratch directory could not be set up: a full disk is
+    the module's own retryable resource_exhausted/scratch_full, any other OSError the retryable
+    resource_exhausted/scratch_create_failed.
+
+    None is final, a FileNotFoundError and a PermissionError included. The process start refuses a
+    scratch root that does not exist, that the process may not write to and search, or in which a
+    directory cannot be locked (core/job/config.py), so what is missing or refused here became so
+    after that start, on this one worker: another worker's start does not meet it, and a final
+    failure would cost the video.
+    The detail names the errno, never the error's own text, which names the path. Nothing is logged
+    here: whoever caught the error writes its line once that `except` block has ended (_make_scratch).
+    """
+    if error.errno in DISK_FULL_ERRNOS:
+        return SCRATCH_FULL
+    detail = make_detail(f"the execution's scratch directory could not be set up: {_errno_name(error)}")
+    return Failure("resource_exhausted", "scratch_create_failed", True, detail)
 
 
 class JobRunner:
@@ -304,14 +382,22 @@ class _Execution:
         self._ffmpeg_version = ffmpeg_version
         # A reading of the runtime's clock is only ever compared with another reading of it: what is left
         # of the start's wall time is taken as a duration, and the Deadline (on time.monotonic) is built
-        # once, from that duration.
-        left_ms = int((claimed.wall_time_ends_at - runtime.monotonic()) * MS_PER_SECOND)
+        # once, from that duration. What is left is never taken as more than the dispatch's limit (it can
+        # never truly be more), nor as less than can still be counted in milliseconds: an absurd reading
+        # then gives an execution with at most its limit, or none, and never a number too large to
+        # convert (OverflowError).
+        limit_ms = claimed.dispatch.limits.max_wall_time_ms
+        left_s = min(claimed.wall_time_ends_at - runtime.monotonic(), limit_ms / MS_PER_SECOND)
+        left_ms = int(max(left_s, LEAST_COUNTABLE_S) * MS_PER_SECOND)
         self._wall_time_spent = left_ms < 1
         # Kept for a deadline failure's detail, in whole seconds rounded down: the dispatch's limit, and
-        # what the start had spent of it by now (more than the limit when the claim overran it).
-        limit_ms = claimed.dispatch.limits.max_wall_time_ms
+        # what the start had spent of it by now (more than the limit when the claim overran it). None
+        # where the reading lay so far back that what was left had to be taken as the least that can be
+        # counted: the seconds would then count that bound (a number of some 300 digits), not the start.
         self._wall_time_limit_s = limit_ms // MS_PER_SECOND
-        self._spent_before_start_s = max(0, limit_ms - left_ms) // MS_PER_SECOND
+        self._spent_before_start_s: int | None = (
+            None if left_s <= LEAST_COUNTABLE_S else max(0, limit_ms - left_ms) // MS_PER_SECOND
+        )
         # With no time left the execution ends at its first step, and its deadline is one that has passed.
         self._deadline = Deadline(time.monotonic()) if self._wall_time_spent else Deadline.after_ms(left_ms)
         self._progress = ProgressReporter(claimed, runtime)
@@ -321,24 +407,38 @@ class _Execution:
         self._etag_observed = False
         self._encoder: Encoder | None = None
         self._refusal_diagnostics: tuple[Diagnostic, ...] = ()
+        # The storage clients this execution made, closed when it ends.
+        self._clients: list[Any] = []
         self._scratch_root: Path | None = None
+        # The descriptor the lock on the scratch directory lives on, while the execution holds it.
+        self._scratch_lock: int | None = None
 
     def run(self) -> SealedMessage:
         try:
             return self._ending()
         finally:
+            # An execution that never came to its transcoding stage held the key until here.
+            self._grant.drop_media_key()
+            self._close_clients()
             self._remove_scratch()
 
     def _ending(self) -> SealedMessage:
         execution_id = self._grant.identity.execution_id
+        bug_report: str | None = None
         try:
             return self._completed(self._stored_generation())
         except WorkerFailure as ended:
             failure = ended.failure
         except Exception as error:  # noqa: BLE001 - a bug still ends the execution with a result
-            # No `exc_info`: a traceback ends with the error's own text. The class and the stack say where.
-            logger.error("execution %s ended on an unexpected %s", execution_id, _stack_report(error))
+            # Only what the bug's log line says is kept past this block: the class and the stack say
+            # where. No `exc_info`, and not the error: a traceback ends with the error's own text.
+            bug_report = _stack_report(error)
             failure = Failure("internal_error", "unexpected_error", True, make_detail(type(error).__name__))
+        if bug_report is not None:
+            # Logged here, after the `except` block has ended: a log handler that fails on this line
+            # has Python's logging print every error its failure is chained to, which inside the block
+            # would be the bug, with its own text.
+            logger.error("execution %s ended on an unexpected %s", execution_id, bug_report)
         failure = self._with_the_time_spent_before_start(failure)
         logger.warning(
             "execution %s failed at stage %s: %s/%s", execution_id, self._stage, failure.error_class, failure.code
@@ -354,9 +454,10 @@ class _Execution:
         took most of it. (Where a stage's own budget ran out with wall time left, the code names that
         budget, and the numbers only show that the wall time was not what ran out.) The failure's own
         detail is never cut: one that leaves no room for the numbers within what a detail may hold stays
-        as it is.
+        as it is. So does every failure of a start whose wall time, by the reading it was given, ended
+        too far back to be counted: there is no number of seconds to tell.
         """
-        if failure.error_class != DEADLINE_EXCEEDED_CLASS:
+        if failure.error_class != DEADLINE_EXCEEDED_CLASS or self._spent_before_start_s is None:
             return failure
         detail = SPENT_BEFORE_START_DETAIL.format(
             detail=failure.detail, spent_s=self._spent_before_start_s, limit_s=self._wall_time_limit_s
@@ -447,20 +548,25 @@ class _Execution:
         unreadable file included, and is configuration_error/storage_client_unavailable, not retryable.
         """
         try:
-            return factory(access)
+            client = factory(access)
         except Exception as error:  # noqa: BLE001 - whatever the factory raises, the execution ends typed
             shortage = _is_passing_shortage(error)
-            # The class name only, and a shortage's errno by its symbolic name, here and in the result:
-            # such an error's own text can quote the endpoint.
+            # The class name only, and a shortage's errno by its symbolic name, in the log and in the
+            # result: such an error's own text can quote the endpoint. Nothing else of it is kept.
             named = _shortage_name(error) if shortage else type(error).__name__
-            detail = make_detail(f"the {side} storage client could not be made: {named}")
-            if shortage:
-                logger.warning("%s", detail)
-                failure = Failure("resource_exhausted", "storage_client_start_failed", True, detail)
-            else:
-                logger.error("%s", detail)
-                failure = Failure("configuration_error", "storage_client_unavailable", False, detail)
-            raise WorkerFailure(failure) from None
+        else:
+            self._clients.append(client)
+            return client
+        # Logged and raised here, after the `except` block has ended: the factory's error is then
+        # neither what a failing log handler's report is chained to nor the failure's context.
+        detail = make_detail(f"the {side} storage client could not be made: {named}")
+        if shortage:
+            logger.warning("%s", detail)
+            failure = Failure("resource_exhausted", "storage_client_start_failed", True, detail)
+        else:
+            logger.error("%s", detail)
+            failure = Failure("configuration_error", "storage_client_unavailable", False, detail)
+        raise WorkerFailure(failure)
 
     def _source(self, client: Any) -> S3RangeSource:
         located = self._dispatch.source
@@ -526,7 +632,9 @@ class _Execution:
         probed_bytes = self._bytes_read
 
         def downloaded(total_bytes: int) -> None:
-            self._bytes_read = probed_bytes + total_bytes
+            # The download reads again what the preflight read, so their sum would count those bytes
+            # twice: the larger of the two never does.
+            self._bytes_read = max(probed_bytes, total_bytes)
             self._progress.downloaded(total_bytes, source.size_bytes)
 
         download_source(
@@ -539,39 +647,58 @@ class _Execution:
         return scratch
 
     def _make_scratch(self) -> _Scratch:
-        root = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=self._job_settings.scratch_root))
-        # Recorded before anything is made inside it, so the cleanup finds it whatever fails next.
-        self._scratch_root = root
-        scratch = _Scratch(
-            source_path=root / SOURCE_DIR_NAME / SOURCE_FILE_NAME,
-            output_root=root / OUTPUT_DIR_NAME,
-            work_dir=root / WORK_DIR_NAME,
-        )
-        for directory in (scratch.source_path.parent, scratch.output_root, scratch.work_dir):
-            directory.mkdir()
-        return scratch
+        """The execution's own directory, locked as soon as it is made (core/job/scratch.py), and the
+        three inside it. An OSError on the way, a lock that is not free included, ends the execution
+        typed (_scratch_failure), never as a bug, and what was made by then is removed with the rest."""
+        try:
+            root = Path(tempfile.mkdtemp(prefix=scratch_prefix(), dir=self._job_settings.scratch_root))
+            # Recorded before anything is made inside it, so the cleanup finds it whatever fails next.
+            self._scratch_root = root
+            self._scratch_lock = hold_scratch_lock(root)
+            scratch = _Scratch(
+                source_path=root / SOURCE_DIR_NAME / SOURCE_FILE_NAME,
+                output_root=root / OUTPUT_DIR_NAME,
+                work_dir=root / WORK_DIR_NAME,
+            )
+            for directory in (scratch.source_path.parent, scratch.output_root, scratch.work_dir):
+                directory.mkdir()
+        except OSError as error:
+            # Kept past this block: the failure, and the two names its log line tells. Not the error,
+            # whose own text names the path.
+            failure, error_class, errno_name = _scratch_failure(error), type(error).__name__, _errno_name(error)
+        else:
+            return scratch
+        # Logged and raised here, after the `except` block has ended (see _ending).
+        logger.warning("the execution's scratch directory could not be set up: %s errno=%s", error_class, errno_name)
+        raise WorkerFailure(failure)
 
     def _transcode(self, scratch: _Scratch, plan: _Plan, profile: MediaProfile) -> _Encoded:
         self._enter(STAGE_TRANSCODING)
-        source = EncodeSource.from_facts(scratch.source_path, plan.facts, profile)
-        allowance = plan.allowance
         renditions: list[RenditionOutput] = []
-        # One at a time, never in parallel: on the shared scratch disk a failed sibling's removal could
-        # free the space a rendition's free-disk check relies on. Each takes what the earlier ones left.
-        for planned in plan.renditions:
-            output = encode_rendition(
-                source,
-                planned,
-                profile=profile,
-                output_root=scratch.output_root,
-                work_dir=scratch.work_dir,
-                media_key=self._grant.media_key,
-                allowance=allowance,
-                deadline=self._deadline,
-            )
-            allowance = allowance.after(output)
-            renditions.append(output)
-            self._progress.rendition_done()
+        # From the stage's first step on: whatever fails once the stage has begun, before the first
+        # encode included, the key is dropped as the stage ends.
+        try:
+            source = EncodeSource.from_facts(scratch.source_path, plan.facts, profile)
+            allowance = plan.allowance
+            # One at a time, never in parallel: on the shared scratch disk a failed sibling's removal could
+            # free the space a rendition's free-disk check relies on. Each takes what the earlier ones left.
+            for planned in plan.renditions:
+                output = encode_rendition(
+                    source,
+                    planned,
+                    profile=profile,
+                    output_root=scratch.output_root,
+                    work_dir=scratch.work_dir,
+                    media_key=self._grant.media_key,
+                    allowance=allowance,
+                    deadline=self._deadline,
+                )
+                allowance = allowance.after(output)
+                renditions.append(output)
+                self._progress.rendition_done()
+        finally:
+            # Every encode and its own checks are done, or the stage failed: nothing needs the key again.
+            self._grant.drop_media_key()
         return _Encoded(
             source=source,
             largest_plan=plan.renditions[0],
@@ -615,9 +742,11 @@ class _Execution:
             max_bytes=encoded.manifest_max_bytes,
         )
         self._require_valid_manifest(scratch.output_root / manifest.path)
-        return _Generation(
+        generation = _Generation(
             manifest=manifest, master=master, thumbnail=thumbnail, renditions=encoded.renditions, encoder=encoder
         )
+        self._require_valid_result(generation)
+        return generation
 
     def _require_valid_manifest(self, manifest_path: Path) -> None:
         """The manifest's self-check: the worker's own validator must accept the file before anything is uploaded."""
@@ -655,6 +784,14 @@ class _Execution:
             )
         )
 
+    def _require_valid_result(self, generation: _Generation) -> None:
+        """The completed result's self-check, before anything is uploaded: the result is built and sealed
+        once with what is known now, and dropped (it is not sent, and nothing says the execution
+        completed). One the worker's own validator refuses ends the execution here, in the finalizing
+        stage, with nothing stored. The result that is returned is built anew once the generation is
+        stored, with its own message id and send time (_completed)."""
+        self._sealed_completed(generation)
+
     def _upload(self, client: Any, scratch: _Scratch, generation: _Generation) -> None:
         self._enter(STAGE_UPLOADING)
         manifest = generation.manifest
@@ -684,7 +821,27 @@ class _Execution:
         bytes_read = min(self._bytes_read, located.size_bytes)
         return SourceRead(source_id=located.source_id, bytes_read=bytes_read, etag_observed=located.etag)
 
+    def _source_observed(self, failure: Failure) -> SourceRead | None:
+        """What a failed result says was read of the source: nothing before the preflight read it, and
+        nothing when the failure is that the object was no longer the recorded one. The recorded ETag is
+        then not the one observed, and the result claims no observation."""
+        if not self._etag_observed or (failure.error_class, failure.code) == SOURCE_CHANGED:
+            return None
+        return self._source_read()
+
     def _completed(self, generation: _Generation) -> SealedMessage:
+        """The completed result of a generation that is stored, and the one line that says so."""
+        sealed = self._sealed_completed(generation)
+        manifest = generation.manifest
+        logger.info(
+            "execution %s completed: %d artifacts, %d bytes",
+            self._grant.identity.execution_id, manifest.artifact_count, manifest.total_bytes,
+        )
+        return sealed
+
+    def _sealed_completed(self, generation: _Generation) -> SealedMessage:
+        """A completed result of `generation`, built now (a new message id, the send time of this
+        moment) and sealed; one the worker's own validator refuses is a typed failure."""
         dispatch, grant, settings = self._dispatch, self._grant, self._runtime.settings
         manifest = generation.manifest
         now = self._runtime.clock()
@@ -720,17 +877,12 @@ class _Execution:
             profile=dispatch.profile,
         )
         try:
-            sealed = seal_message(message, context, settings=settings)
+            return seal_message(message, context, settings=settings)
         except SelfCheckFailed as refused:
             # Its text is the outbox's own: the kind, the layer and the reason, nothing of the message.
             raise WorkerFailure(
                 Failure("internal_error", "result_self_check_failed", False, make_detail(str(refused)))
             ) from None
-        logger.info(
-            "execution %s completed: %d artifacts, %d bytes",
-            grant.identity.execution_id, manifest.artifact_count, manifest.total_bytes,
-        )
-        return sealed
 
     def _failed(self, failure: Failure) -> SealedMessage:
         dispatch, grant, settings = self._dispatch, self._grant, self._runtime.settings
@@ -743,7 +895,7 @@ class _Execution:
             identity=grant.identity,
             failure=failure,
             stage=self._stage,
-            source=self._source_read() if self._etag_observed else None,
+            source=self._source_observed(failure),
             encoder=self._encoder,
             diagnostics=self._refusal_diagnostics,
         )
@@ -756,10 +908,37 @@ class _Execution:
         )
         return seal_message(message, context, settings=settings)
 
+    def _close_clients(self) -> None:
+        """Close the storage clients this execution made, best effort: one without a close() is left
+        alone, and a close that fails is logged by its class name and changes nothing.
+
+        None is closed once the process has abandoned a storage request (core/job/storage.py
+        abandoned_requests()): such a request may still be using a client, and the process is on its
+        way out (the entry point then asks for a fresh worker).
+        """
+        if abandoned_requests() > 0:
+            return
+        for client in self._clients:
+            error_class = _close_error_class(client)
+            if error_class is not None:
+                # The class name only: a client's error can quote its endpoint. Logged here, once the
+                # `except` block that caught that error has ended (see _ending).
+                logger.warning("a storage client could not be closed: %s", error_class)
+
     def _remove_scratch(self) -> None:
         if self._scratch_root is None:
             return
+        error_class: str | None = None
         try:
             shutil.rmtree(self._scratch_root)
         except Exception as error:  # noqa: BLE001 - a leftover directory never changes the execution's result
-            logger.warning("the execution's scratch directory could not be removed: %s", type(error).__name__)
+            # The class name only is kept past this block: the error's own text names the path.
+            error_class = type(error).__name__
+        if error_class is not None:
+            # Logged here, after the `except` block has ended (see _ending).
+            logger.warning("the execution's scratch directory could not be removed: %s", error_class)
+        # Only now: until the directory is gone, its lock keeps another process's removal of leftovers
+        # off it. A directory that could not be removed is from here on a leftover like any other.
+        if self._scratch_lock is not None:
+            release_scratch_lock(self._scratch_lock)
+            self._scratch_lock = None
