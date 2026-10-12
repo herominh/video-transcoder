@@ -63,6 +63,7 @@ from tests.job.conftest import (
     PutCall,
     ScriptedDeadline,
     client_error,
+    reported_log_failures,
     settle_requests_first,
 )
 
@@ -276,6 +277,27 @@ class _PassedOnceAsked(Deadline):
         return self._asked.is_set()
 
 
+class _PassedJustAfterARequestEnded(Deadline):
+    """A Deadline that has plenty of time left until the thread of a storage request has asked it how
+    much, and none from then on. A request's own thread asks once, to note as the request ends whether
+    time was left. So this deadline passes just after a request ended in time, before the thread that
+    waited for it comes to look."""
+
+    def __init__(self) -> None:
+        super().__init__(time.monotonic() + GENEROUS_MS / 1000)
+        object.__setattr__(self, "_passed", threading.Event())
+
+    def remaining_s(self) -> float:
+        if self._passed.is_set():
+            return 0.0
+        if threading.current_thread().name == storage.REQUEST_THREAD_NAME:
+            self._passed.set()
+        return GENEROUS_MS / 1000
+
+    def expired(self) -> bool:
+        return self._passed.is_set()
+
+
 class _Waits:
     """Stands where a transfer is handed `sleep`: it records every wait it is asked for, in order, and
     takes no time."""
@@ -403,6 +425,47 @@ def test_holds_open_when_this_process_has_the_file_open_should_see_its_descripto
     # Assert: a test that finds no file held open could have found one, on this platform
     assert seen_while_open
     assert not seen_once_closed
+
+
+def test_settle_requests_first_when_a_request_outlasts_what_the_deadline_leaves_should_end_it_before_the_job_waits(
+    monkeypatch,
+):
+    # Arrange: a request that takes a moment, under a deadline that leaves a thousandth of that moment
+    # whenever it is asked. Left to itself the job would stop waiting long before the request ends
+    settle_requests_first(monkeypatch)
+    expired = Failure("deadline_exceeded", "request_deadline_exceeded", False, "the test's request ran out of time")
+
+    def after_a_moment() -> str:
+        threading.Event().wait(A_MOMENT_S)
+        return "answered"
+
+    # Act
+    returned = storage._within(_TimeLeft(A_MOMENT_S / 1000), after_a_moment, expired=expired)
+
+    # Assert: the job came to wait only once its request had ended, so the shortest wait was enough. A
+    # test that relies on this would otherwise depend on which thread the host runs first
+    assert returned == "answered"
+
+
+def test_settle_requests_first_when_a_request_is_kept_should_let_its_starter_get_on_once_it_arrived(
+    hold, monkeypatch
+):
+    # Arrange: a request, on a thread named as a storage request's, that is kept only after a moment
+    settle_requests_first(monkeypatch, hold.entered)
+
+    def kept_after_a_moment() -> None:
+        threading.Event().wait(A_MOMENT_S)
+        hold.keep()
+
+    request = threading.Thread(target=kept_after_a_moment, name=storage.REQUEST_THREAD_NAME, daemon=True)
+
+    # Act
+    request.start()
+    arrived_when_its_starter_got_on = hold.entered.is_set()
+
+    # Assert: not before the request was where the test keeps it, and without waiting for it to end
+    assert arrived_when_its_starter_got_on
+    assert request.is_alive()
 
 
 def test_scripted_deadline_when_its_script_says_the_deadline_passed_should_have_no_time_left_from_then_on():
@@ -970,7 +1033,7 @@ def test_download_when_no_thread_can_be_started_for_a_read_should_fail_retryably
         "resource_exhausted", "storage_request_start_failed", True
     )
     assert str(tmp_path) not in str(raised.value)
-    assert raised.value.__cause__ is None and raised.value.__suppress_context__
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
     assert fake_s3.get_calls == []
     assert not destination.exists()
 
@@ -1167,6 +1230,21 @@ def test_deadline_source_when_a_read_ends_after_the_deadline_passed_should_drop_
         "deadline_exceeded", "source_read_deadline_exceeded", False
     )
     assert raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+def test_deadline_source_when_the_deadline_passes_just_after_a_read_ended_in_time_should_still_give_its_bytes():
+    # Arrange: a read that ends with time left, and a deadline that has passed by the time the thread
+    # that waited for the read comes to look at how it ended
+    deadline = _PassedJustAfterARequestEnded()
+    source = DeadlineSource(_StubSource(len(OBJECT), lambda start, length: OBJECT[start : start + length]), deadline)
+
+    # Act
+    data = source.read(0, CHUNK_BYTES)
+
+    # Assert: a request is judged by what was noted as it ended, not by when its waiter came to look: an
+    # object stored in time is stored, however late the job's own thread is run again
+    assert data == OBJECT[:CHUNK_BYTES]
+    assert deadline.expired()
 
 
 def test_deadline_source_when_the_deadline_is_farther_off_than_a_wait_can_last_should_still_read():
@@ -1427,6 +1505,194 @@ def test_download_when_the_copy_failed_and_closing_the_file_fails_too_should_rai
     assert len(failed_closes) == 1
     assert str(tmp_path) not in caplog.text
     assert not destination.exists()
+
+
+# The three places where a write of the source file can fail.
+THE_FILE_CANNOT_BE_CREATED = "the-file-cannot-be-created"
+A_WRITE_FAILS = "a-write-fails"
+THE_CLOSE_FAILS_AFTER_THE_WHOLE_COPY = "the-close-fails-after-the-whole-copy"
+WRITE_FAILURE_SITES = [THE_FILE_CANNOT_BE_CREATED, A_WRITE_FAILS, THE_CLOSE_FAILS_AFTER_THE_WHOLE_COPY]
+
+
+def _download_whose_write_fails(site: str, tmp_path: Path, fake_s3: FakeS3) -> WorkerFailure:
+    """Run a download whose source file cannot be written at `site`, each time on an error of the
+    operating system whose own text names the destination, and return what the download raised."""
+    destination = tmp_path / "source"
+    if site == THE_FILE_CANNOT_BE_CREATED:
+        # No stand-in fails here: the directory the file is to be made in does not exist.
+        destination = tmp_path / "a-directory-that-is-gone" / "source"
+
+    def failing_write(descriptor: int, data: bytes) -> int:
+        raise OSError(errno.EIO, f"cannot write {destination}")
+
+    with pytest.MonkeyPatch.context() as patched:
+        if site == A_WRITE_FAILS:
+            patched.setattr(os, "write", failing_write)
+        if site == THE_CLOSE_FAILS_AFTER_THE_WHOLE_COPY:
+            _fail_the_close_of(patched, destination, errno.EIO)
+        with pytest.raises(WorkerFailure) as raised:
+            download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
+    return raised.value
+
+
+@pytest.mark.parametrize("site", WRITE_FAILURE_SITES)
+def test_download_when_the_source_file_cannot_be_written_should_raise_a_failure_carrying_nothing_of_the_systems_error(
+    tmp_path, fake_s3, small_chunks, site
+):
+    # Act
+    raised = _download_whose_write_fails(site, tmp_path, fake_s3)
+
+    # Assert: the typed failure alone. The operating system's error, whose text names a local path, is
+    # neither its cause nor its context
+    failure = raised.failure
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "output_write_failed", "source_write_failed", True
+    )
+    assert str(tmp_path) not in str(raised)
+    assert raised.__cause__ is None and raised.__context__ is None
+
+
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes every line's
+# handler fail; how the transfer ends is how it ends without it.
+
+
+@pytest.mark.parametrize("site", WRITE_FAILURE_SITES)
+def test_download_when_a_log_handler_fails_on_the_line_of_a_failed_write_should_keep_the_path_out_of_standard_error(
+    tmp_path, fake_s3, small_chunks, capsys, failing_log, site
+):
+    # Act
+    raised = _download_whose_write_fails(site, tmp_path, fake_s3)
+
+    # Assert: logging did report its failure on that line, with nothing of the path the error named
+    written = reported_log_failures(capsys, "the source file could not be written")
+    assert str(tmp_path) not in written
+    assert raised.failure.code == "source_write_failed"
+
+
+def _a_bug_of_the_source_at_the_second_chunk(start: int, length: int) -> bytes:
+    """The answers of a source whose first chunk arrives and whose second fails on a bug, in words that
+    quote what it choked on."""
+    if start > 0:
+        raise RuntimeError(ERROR_TEXT_CANARY)
+    return bytes(length)
+
+
+def test_download_when_a_log_handler_fails_on_the_line_of_a_partial_file_not_closed_should_keep_the_copys_error_out(
+    tmp_path, small_chunks, capsys, failing_log
+):
+    # Arrange: the copy fails on a bug of the source, and then the close of the partial file fails too
+    source = _StubSource(3 * CHUNK_BYTES, _a_bug_of_the_source_at_the_second_chunk)
+    destination = tmp_path / "source"
+
+    # Act
+    with pytest.MonkeyPatch.context() as patched:
+        failed_closes = _fail_the_close_of(patched, destination, errno.EIO)
+        with pytest.raises(RuntimeError) as raised:
+            download_source(source, destination=destination, deadline=_deadline(), sleep=_Waits())
+
+    # Assert: nothing of the copy's error, which is the one that is raised, nor of the path
+    written = reported_log_failures(capsys, "a partial source file could not be closed")
+    assert [told for told in (SECRET_CANARY, ENDPOINT_CANARY, str(tmp_path)) if told in written] == []
+    assert str(raised.value) == ERROR_TEXT_CANARY
+    assert len(failed_closes) == 1
+    assert not destination.exists()
+
+
+def _fail_the_removal_of(patched: pytest.MonkeyPatch, path: Path) -> None:
+    """Make os.unlink fail for `path`, on an error whose own text names it; every other removal is the real one."""
+    real_unlink = os.unlink
+
+    def unlink(removed: Any, *arguments: Any, **named_arguments: Any) -> None:
+        if Path(removed) == path:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        real_unlink(removed, *arguments, **named_arguments)
+
+    patched.setattr(os, "unlink", unlink)
+
+
+def test_download_when_a_log_handler_fails_on_the_line_of_a_partial_file_not_removed_should_keep_every_errors_text_out(
+    tmp_path, small_chunks, capsys, failing_log
+):
+    # Arrange: the copy fails on a bug of the source, and then the partial file cannot be removed
+    source = _StubSource(3 * CHUNK_BYTES, _a_bug_of_the_source_at_the_second_chunk)
+    destination = tmp_path / "source"
+
+    # Act
+    with pytest.MonkeyPatch.context() as patched:
+        _fail_the_removal_of(patched, destination)
+        with pytest.raises(RuntimeError) as raised:
+            download_source(source, destination=destination, deadline=_deadline(), sleep=_Waits())
+
+    # Assert: nothing of the copy's error, which is the one that is raised, nor of the path the removal's named
+    written = reported_log_failures(capsys, "a partial source file could not be removed")
+    assert [told for told in (SECRET_CANARY, ENDPOINT_CANARY, str(tmp_path)) if told in written] == []
+    assert str(raised.value) == ERROR_TEXT_CANARY
+
+
+def test_download_when_a_log_handler_fails_on_the_line_of_a_file_left_after_a_failed_close_should_keep_its_path_out(
+    tmp_path, fake_s3, small_chunks, capsys, failing_log
+):
+    # Arrange: the close fails after the whole copy, and then the file cannot be removed
+    destination = tmp_path / "source"
+
+    # Act
+    with pytest.MonkeyPatch.context() as patched:
+        _fail_the_close_of(patched, destination, errno.EIO)
+        _fail_the_removal_of(patched, destination)
+        with pytest.raises(WorkerFailure) as raised:
+            download_source(_source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits())
+
+    # Assert
+    written = reported_log_failures(capsys, "a partial source file could not be removed")
+    assert str(tmp_path) not in written
+    assert raised.value.failure.code == "source_write_failed"
+
+
+def test_download_when_a_log_handler_fails_on_the_line_of_a_read_that_is_tried_again_should_keep_the_errors_text_out(
+    tmp_path, small_chunks, capsys, failing_log
+):
+    # Arrange: the first read fails in a way that can pass, with the error behind it as its cause, whose
+    # text quotes the endpoint; every later read arrives
+    def failing_once(start: int, length: int) -> bytes:
+        if len(source.reads) == 1:
+            passing = Failure("source_unavailable", "short_read", True, "the storage ended the body early")
+            raise WorkerFailure(passing) from ConnectionError(ERROR_TEXT_CANARY)
+        return OBJECT[start : start + length]
+
+    source = _StubSource(len(OBJECT), failing_once)
+    destination = tmp_path / "source"
+
+    # Act
+    written_bytes = download_source(source, destination=destination, deadline=_deadline(), sleep=_Waits())
+
+    # Assert
+    written = reported_log_failures(capsys, "a read of the source failed and is tried again")
+    assert [told for told in (SECRET_CANARY, ENDPOINT_CANARY) if told in written] == []
+    assert written_bytes == len(OBJECT)
+    assert destination.read_bytes() == OBJECT
+
+
+def test_download_when_a_log_handler_fails_on_the_line_of_a_progress_callback_that_failed_should_keep_its_text_out(
+    tmp_path, fake_s3, small_chunks, capsys, failing_log
+):
+    # Arrange: a callback that fails on a bug, in words that quote what it choked on
+    destination = tmp_path / "source"
+
+    def broken_callback(total_bytes: int) -> None:
+        raise RuntimeError(ERROR_TEXT_CANARY)
+
+    # Act
+    written_bytes = download_source(
+        _source(fake_s3), destination=destination, deadline=_deadline(), sleep=_Waits(), on_bytes=broken_callback
+    )
+
+    # Assert
+    written = reported_log_failures(capsys, "progress callback failed")
+    assert [told for told in (SECRET_CANARY, ENDPOINT_CANARY) if told in written] == []
+    assert written_bytes == len(OBJECT)
+    assert destination.read_bytes() == OBJECT
 
 
 def test_download_when_progress_is_asked_for_should_report_the_running_total_after_each_chunk(
@@ -1792,9 +2058,26 @@ def _fewer_artifacts_of_the_same_total_size(generation: _Generation) -> list[Art
     return [*generation.artifacts[:-2], artifact_of(joined_path, joined)]
 
 
+def _more_artifacts_of_the_same_total_size(generation: _Generation) -> list[ArtifactFile]:
+    """The last segment gives its place to two on disk that are together as long as it, each recorded as
+    it was written."""
+    whole = _Generation.FILES["360p/segment_0001.ts"]
+    halves = {"360p/segment_0008.ts": whole[: len(whole) // 2], "360p/segment_0009.ts": whole[len(whole) // 2 :]}
+    for path, half in halves.items():
+        (generation.output_root / path).write_bytes(half)
+    return [*generation.artifacts[:-1], *(artifact_of(path, half) for path, half in halves.items())]
+
+
 def _as_many_artifacts_of_another_total_size(generation: _Generation) -> list[ArtifactFile]:
     """The last segment gives its place to another one on disk, a byte longer and recorded as it was written."""
     other_path, other_segment = "360p/segment_0009.ts", _Generation.FILES["360p/segment_0001.ts"] + b"\x00"
+    (generation.output_root / other_path).write_bytes(other_segment)
+    return [*generation.artifacts[:-1], artifact_of(other_path, other_segment)]
+
+
+def _as_many_artifacts_of_a_smaller_total_size(generation: _Generation) -> list[ArtifactFile]:
+    """The last segment gives its place to another one on disk, a byte shorter and recorded as it was written."""
+    other_path, other_segment = "360p/segment_0009.ts", _Generation.FILES["360p/segment_0001.ts"][:-1]
     (generation.output_root / other_path).write_bytes(other_segment)
     return [*generation.artifacts[:-1], artifact_of(other_path, other_segment)]
 
@@ -1805,7 +2088,9 @@ def _as_many_artifacts_of_another_total_size(generation: _Generation) -> list[Ar
         pytest.param(_one_artifact_fewer, id="one-artifact-fewer"),
         pytest.param(_one_artifact_more, id="one-artifact-more"),
         pytest.param(_fewer_artifacts_of_the_same_total_size, id="fewer-of-the-same-total-size"),
+        pytest.param(_more_artifacts_of_the_same_total_size, id="more-of-the-same-total-size"),
         pytest.param(_as_many_artifacts_of_another_total_size, id="as-many-of-another-total-size"),
+        pytest.param(_as_many_artifacts_of_a_smaller_total_size, id="as-many-of-a-smaller-total-size"),
     ],
 )
 def test_upload_when_the_artifacts_are_not_what_the_manifest_records_should_refuse_them_before_any_request(
@@ -1921,6 +2206,28 @@ def test_upload_when_the_bucket_is_no_contract_bucket_should_refuse_it_before_an
     assert bucket not in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    "bucket",
+    [
+        pytest.param("a1b", id="three-characters"),
+        pytest.param("q" * 63, id="sixty-three-characters"),
+        pytest.param("0videos-2026-10-9", id="digits-first-inside-and-last"),
+    ],
+)
+def test_upload_when_the_bucket_is_a_contract_bucket_at_a_bound_of_its_shape_should_put_every_object_in_it(
+    generation, bucket
+):
+    # Arrange: a name the contract allows, as short or as long as it may be, or with digits where they may stand
+    client = FakeS3()
+
+    # Act
+    generation.upload(client, bucket=bucket)
+
+    # Assert
+    assert len(client.stored) == len(_Generation.FILES) + 1
+    assert {call.bucket for call in client.stored} == {bucket}
+
+
 def test_upload_when_the_client_is_no_s3_client_should_raise_type_error(generation):
     # Act and Assert
     with pytest.raises(TypeError):
@@ -1974,8 +2281,10 @@ def test_upload_when_a_fifo_stands_where_a_file_was_should_refuse_it_at_once_and
         thread.join(PROMPT_S)
         os.close(other_end)
 
-    # Assert: refused as a file that changed, as any other file that is no longer a regular one, with
-    # nothing put after the first object
+    # Assert: a FIFO did stand where the file was, and it was refused as a file that changed, as any
+    # other file that is no longer a regular one, with nothing put after the first object; the refused
+    # FIFO is not left open
+    assert stat.S_ISFIFO(os.lstat(thumbnail).st_mode)
     assert not waited_for_a_writer
     assert [type(ending) for ending in endings] == [WorkerFailure]
     failure = endings[0].failure
@@ -1984,6 +2293,89 @@ def test_upload_when_a_fifo_stands_where_a_file_was_should_refuse_it_at_once_and
     )
     assert "thumbnail.jpg" in failure.detail
     assert [call.key for call in client.put_calls] == [f"{PREFIX}/master.m3u8"]
+    assert not _holds_open(thumbnail)
+
+
+def test_upload_when_a_link_stands_where_a_file_was_should_refuse_it_and_send_nothing_of_what_it_points_to(
+    tmp_path, generation
+):
+    # Arrange: once the first object is stored, the second file gives its place to a link to a file of
+    # the same bytes outside the output root
+    thumbnail = generation.output_root / "thumbnail.jpg"
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(_Generation.FILES["thumbnail.jpg"])
+
+    def put_a_link_in_its_place(total_bytes: int) -> None:
+        if not thumbnail.is_symlink():
+            thumbnail.unlink()
+            thumbnail.symlink_to(outside)
+
+    client = FakeS3()
+
+    # Act
+    failure = _failure_of(lambda: generation.upload(client, on_bytes=put_a_link_in_its_place))
+
+    # Assert: the link was not followed, though what it points to has the recorded size and bytes: a
+    # file is opened through no link, also when the link came after the upload was planned
+    assert thumbnail.is_symlink()
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "internal_error", "artifact_changed_before_upload", True
+    )
+    assert failure.detail.startswith("thumbnail.jpg changed before its upload: it could not be opened: ")
+    assert str(tmp_path) not in failure.detail
+    assert [call.key for call in client.put_calls] == [f"{PREFIX}/master.m3u8"]
+
+
+def test_upload_when_a_file_is_gone_when_it_is_opened_should_raise_a_failure_carrying_nothing_of_the_systems_error(
+    generation,
+):
+    # Arrange: once the first object is stored, the second file is removed
+    thumbnail = generation.output_root / "thumbnail.jpg"
+    client = FakeS3()
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        generation.upload(client, on_bytes=lambda total_bytes: thumbnail.unlink(missing_ok=True))
+
+    # Assert: the typed failure alone. The operating system's error, whose text names the file's whole
+    # path, is neither its cause nor its context
+    failure = raised.value.failure
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "internal_error", "artifact_changed_before_upload", True
+    )
+    assert failure.detail == "thumbnail.jpg changed before its upload: it could not be opened: ENOENT"
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+
+
+def test_upload_when_an_opened_file_cannot_be_measured_should_raise_a_failure_carrying_nothing_of_the_systems_error(
+    generation, monkeypatch
+):
+    # Arrange: the first file opens, and asking the operating system for its size fails, in words that
+    # name a path
+    first_file = generation.output_root / "master.m3u8"
+    wanted = os.stat(first_file)
+    measure = os.fstat
+
+    def fail_to_measure_the_first_file(descriptor: int) -> os.stat_result:
+        status = measure(descriptor)
+        if (status.st_dev, status.st_ino) == (wanted.st_dev, wanted.st_ino):
+            raise OSError(errno.EIO, f"cannot measure {PATH_CANARY}")
+        return status
+
+    client = FakeS3()
+
+    # Act
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "fstat", fail_to_measure_the_first_file)
+        with pytest.raises(WorkerFailure) as raised:
+            generation.upload(client)
+
+    # Assert
+    failure = raised.value.failure
+    assert failure.detail == "master.m3u8 changed before its upload: it could not be measured: EIO"
+    assert client.put_calls == []
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert not _holds_open(first_file)
 
 
 def test_upload_when_the_manifest_changed_size_on_disk_should_fail_without_putting_it(generation):
@@ -2647,6 +3039,7 @@ def test_upload_when_a_put_is_refused_for_good_should_not_send_it_again_and_fail
 @pytest.mark.parametrize(
     ("code", "named"),
     [
+        pytest.param("", "ClientError", id="empty"),
         pytest.param("Access Denied", "ClientError", id="a-space"),
         pytest.param("AccessDenied\n", "ClientError", id="a-trailing-line-break"),
         pytest.param("Access_Denied", "ClientError", id="an-underscore"),
@@ -3373,17 +3766,19 @@ def test_upload_when_a_file_is_closed_under_a_read_of_an_abandoned_put_should_sh
 
 class _FileThatFailsUnderARead:
     """Stands for an opened artifact on a disk that fails: its reads give the file's bytes until the
-    read numbered `failing_read` (the first is 1), which raises `error`, as every read after it does."""
+    read numbered `failing_read` (the first is 1), which raises `error`, as every read after it does.
+    With `only_that_read`, every read after it gives the file's bytes again."""
 
-    def __init__(self, opened: Any, error: OSError, failing_read: int) -> None:
+    def __init__(self, opened: Any, error: OSError, failing_read: int, only_that_read: bool) -> None:
         self._opened = opened
         self._error = error
         self._failing_read = failing_read
+        self._only_that_read = only_that_read
         self._reads = 0
 
     def read(self, amount: int = -1) -> bytes:
         self._reads += 1
-        if self._reads >= self._failing_read:
+        if self._reads == self._failing_read or (self._reads > self._failing_read and not self._only_that_read):
             raise self._error
         return self._opened.read(amount)
 
@@ -3391,12 +3786,14 @@ class _FileThatFailsUnderARead:
         return getattr(self._opened, name)
 
 
-def _fail_the_reads_of_every_file(monkeypatch: pytest.MonkeyPatch, error: OSError, failing_read: int = 1) -> None:
+def _fail_the_reads_of_every_file(
+    monkeypatch: pytest.MonkeyPatch, error: OSError, failing_read: int = 1, *, only_that_read: bool = False
+) -> None:
     """Make the upload open each file of the generation as one whose reads fail (_FileThatFailsUnderARead)."""
     open_the_artifact = storage._opened_artifact
 
     def open_a_file_that_fails_under_a_read(upload: Any) -> _FileThatFailsUnderARead:
-        return _FileThatFailsUnderARead(open_the_artifact(upload), error, failing_read)
+        return _FileThatFailsUnderARead(open_the_artifact(upload), error, failing_read, only_that_read)
 
     monkeypatch.setattr(storage, "_opened_artifact", open_a_file_that_fails_under_a_read)
 
@@ -3482,6 +3879,32 @@ def test_upload_when_a_read_of_a_file_fails_while_a_client_sends_it_should_fail_
     assert generation.waits.asked == []
     assert caplog.records == []
     assert raised.value.__cause__ is None and raised.value.__context__ is None
+    # What the body handed the client, which may log or keep what it is handed: an error in our own
+    # words, and nothing of the operating system's own, whose text names a path
+    (handed,) = client.wrapped
+    assert not isinstance(handed, OSError)
+    assert PATH_CANARY not in str(handed)
+    assert handed.__cause__ is None and handed.__context__ is None
+
+
+def test_upload_when_a_read_of_a_file_failed_should_refuse_every_later_read_of_it_though_the_file_would_read_again(
+    generation, monkeypatch
+):
+    # Arrange: the first read of each file fails and every later one would give its bytes; the client
+    # takes no refusal: it rewinds the body, asks it for a piece once more and answers 200
+    _fail_the_reads_of_every_file(monkeypatch, OSError(errno.EIO, f"cannot read {PATH_CANARY}"), only_that_read=True)
+    client = _StubbornS3()
+
+    # Act
+    failure = _failure_of(lambda: generation.upload(client))
+
+    # Assert: a body whose file failed once gives no more of that file, in our own words again: what a
+    # client read of it afterwards could otherwise go out as the object
+    assert failure.detail == "master.m3u8 changed before its upload: it could not be read: EIO"
+    (asked_again,) = client.after_a_refusal
+    assert isinstance(asked_again, Exception) and not isinstance(asked_again, OSError)
+    assert PATH_CANARY not in str(asked_again)
+    assert [call.key for call in client.put_calls] == [f"{PREFIX}/master.m3u8"]
 
 
 def test_upload_when_the_client_raises_an_os_error_of_its_own_should_not_take_it_for_an_error_of_the_file(generation):

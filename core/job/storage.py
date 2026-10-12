@@ -62,10 +62,14 @@ wait.
 No log line and no failure detail holds an endpoint, a URL, a credential or the storage client's own
 error text: a storage error is named by its class and, for an answer of the storage, its error code
 where that has the shape of one (ERROR_CODE_PATTERN; any other value counts as no code at all), and of
-a `Retry-After` header nothing is kept but its number of seconds. A typed failure this module raises
-in place of a storage client's error carries nothing of that error, neither as its cause nor as its
-context. An error of the operating system is named by its errno's symbolic name, never by its own
-text, which may name a path.
+a `Retry-After` header nothing is kept but its number of seconds. An error of the operating system is
+named by its errno's symbolic name, never by its own text, which may name a path. A typed failure this
+module raises in place of another error (the storage client's, the operating system's, the
+interpreter's for a thread that could not be started) carries nothing of that error, neither as its
+cause nor as its context: it is raised once the handler that caught the error has ended. The line that
+tells of an error is written after that `except` block too. A log handler that fails on a line does not
+raise: Python's logging prints a report of its own, with every error that failure is chained to, which
+inside the block would be the caught error with its own text.
 """
 
 from __future__ import annotations
@@ -270,10 +274,14 @@ def _notify(on_bytes: Callable[[int], None] | None, total_bytes: int) -> None:
     """Tell the caller how far the transfer is; whatever its callback raises never fails the transfer."""
     if on_bytes is None:
         return
+    error_class: str | None = None
     try:
         on_bytes(total_bytes)
     except Exception as error:  # noqa: BLE001 - progress is the caller's convenience, never the transfer's outcome
-        logger.warning("a transfer's progress callback failed: %s", type(error).__name__)
+        # Only the class name is kept past this block: what a callback raises can say anything.
+        error_class = type(error).__name__
+    if error_class is not None:
+        logger.warning("a transfer's progress callback failed: %s", error_class)
 
 
 def _require_transfer_arguments(deadline: object, sleep: object, on_bytes: object) -> None:
@@ -436,9 +444,13 @@ def _within(
     thread = threading.Thread(target=request.run, name=REQUEST_THREAD_NAME, daemon=True)
     try:
         thread.start()
+        started = True
     except RuntimeError:
-        # `from None`: the interpreter's own text says nothing the typed failure does not.
-        raise WorkerFailure(STORAGE_REQUEST_START_FAILED) from None
+        # The interpreter's own text says nothing the typed failure does not.
+        started = False
+    if not started:
+        # Raised once the handler has ended: the interpreter's error is neither cause nor context.
+        raise WorkerFailure(STORAGE_REQUEST_START_FAILED)
     # The ceiling counts only where it is the nearer bound. A wait that was for the deadline ends as the
     # deadline failure, even should a clock's grain then show a sliver of time left.
     wait_s = remaining_s
@@ -533,22 +545,27 @@ def download_source(
     """
     size_bytes = _validated_download(source, destination)
     _require_transfer_arguments(deadline, sleep, on_bytes)
-    try:
-        descriptor = os.open(destination, SOURCE_FILE_FLAGS, SOURCE_FILE_MODE)
-    except OSError as error:
-        # Nothing of ours to remove: the file was not created, or it was not created by this call.
-        raise _source_write_failure(error) from None
+    descriptor = _created_source_file(destination)
+    copy_error: BaseException | None = None
     try:
         written = _copy_source(source, size_bytes, descriptor, deadline, sleep, on_bytes)
-    except BaseException:
+    except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+        copy_error = error
+    if copy_error is not None:
+        # Behind the `except` block, not inside it: a line either step logs is then not written while
+        # the copy's error is still being handled (see the module's last paragraph).
         _close_behind_a_failure(descriptor)
         _remove_partial(destination)
-        raise
-    try:
-        os.close(descriptor)
-    except OSError as error:
+        try:
+            raise copy_error
+        finally:
+            # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+            # holds this frame, and this frame would hold the error.
+            del copy_error
+    failed_close = _failed_close_of(descriptor)
+    if failed_close is not None:
         _remove_partial(destination)
-        raise _source_write_failure(error) from None
+        raise _source_write_failure(failed_close)
     return written
 
 
@@ -585,10 +602,9 @@ def _copy_source(
                     f"the source gave {len(data)} bytes where {length} were read",
                 )
             )
-        try:
-            _write_all(descriptor, data)
-        except OSError as error:
-            raise _source_write_failure(error) from None
+        failed_write = _failed_write_of(descriptor, data)
+        if failed_write is not None:
+            raise _source_write_failure(failed_write)
         written += length
         _notify(on_bytes, written)
     return written
@@ -620,10 +636,12 @@ def _read_chunk(
             wait_s = _next_wait_s(nominal_waits_s, deadline) if failed.failure.retryable else None
             if wait_s is None:
                 raise
-            logger.warning(
-                "a read of the source failed and is tried again after %.3f s: %s/%s",
-                wait_s, failed.failure.error_class, failed.failure.code,
-            )
+            # Only the typed failure is kept past this block, not the error that carried it.
+            failure = failed.failure
+        logger.warning(
+            "a read of the source failed and is tried again after %.3f s: %s/%s",
+            wait_s, failure.error_class, failure.code,
+        )
         sleep(wait_s)
 
 
@@ -637,14 +655,64 @@ def _write_all(descriptor: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
-def _source_write_failure(error: OSError) -> WorkerFailure:
-    logger.warning("the source file could not be written: %s errno=%s", type(error).__name__, _errno_name(error))
-    if error.errno in DISK_FULL_ERRNOS:
+@dataclass(frozen=True)
+class _FailedWrite:
+    """What is kept of an error of the operating system that failed a write of the source file, once
+    the `except` block that caught it has ended: its class's name, its errno's symbolic name and whether
+    it says that the disk is full. The error itself is not kept: its own text may name a path."""
+
+    error_class: str
+    errno_name: str
+    disk_full: bool
+
+    @classmethod
+    def of(cls, error: OSError) -> _FailedWrite:
+        return cls(type(error).__name__, _errno_name(error), error.errno in DISK_FULL_ERRNOS)
+
+
+def _created_source_file(destination: Path) -> int:
+    """The descriptor of the new, empty source file. A file that cannot be created is a failed write:
+    nothing of ours is then to be removed (the file was not created, or it was not created by this call)."""
+    try:
+        return os.open(destination, SOURCE_FILE_FLAGS, SOURCE_FILE_MODE)
+    except OSError as error:
+        failed = _FailedWrite.of(error)
+    raise _source_write_failure(failed)
+
+
+def _failed_write_of(descriptor: int, data: bytes) -> _FailedWrite | None:
+    """Write a chunk to the source file: None once every byte of it is written, and what is kept of
+    the operating system's error when the write fails."""
+    try:
+        _write_all(descriptor, data)
+    except OSError as error:
+        return _FailedWrite.of(error)
+    return None
+
+
+def _failed_close_of(descriptor: int) -> _FailedWrite | None:
+    """Close the source file a whole copy was written to: None when that worked, and what is kept of
+    the operating system's error when it did not (the close is the file's last write)."""
+    try:
+        os.close(descriptor)
+    except OSError as error:
+        return _FailedWrite.of(error)
+    return None
+
+
+def _source_write_failure(failed: _FailedWrite) -> WorkerFailure:
+    """The typed failure of a write of the source file that failed, and the one line that tells of it.
+
+    Called once the `except` block that caught the operating system's error has ended, with what was
+    kept of that error: the error is then neither what a failing log handler's report is chained to
+    nor the failure's cause or context."""
+    logger.warning("the source file could not be written: %s errno=%s", failed.error_class, failed.errno_name)
+    if failed.disk_full:
         return WorkerFailure(SCRATCH_FULL)
     return WorkerFailure(
         Failure(
             "output_write_failed", "source_write_failed", True,
-            f"the source file could not be written: {_errno_name(error)}",
+            f"the source file could not be written: {failed.errno_name}",
         )
     )
 
@@ -652,20 +720,27 @@ def _source_write_failure(error: OSError) -> WorkerFailure:
 def _close_behind_a_failure(descriptor: int) -> None:
     """Close the source file a copy failed on. What the copy failed with stands, so a close that fails
     too is logged, by its errno's name, and raises nothing."""
+    errno_name: str | None = None
     try:
         os.close(descriptor)
     except OSError as error:
-        logger.warning("a partial source file could not be closed: errno=%s", _errno_name(error))
+        errno_name = _errno_name(error)
+    if errno_name is not None:
+        logger.warning("a partial source file could not be closed: errno=%s", errno_name)
 
 
 def _remove_partial(path: Path) -> None:
     """Best effort: the job's scratch cleanup removes whatever is left. Paths are never logged."""
+    errno_name: str | None = None
     try:
         os.unlink(path)
     except FileNotFoundError:
         return
     except OSError as error:
-        logger.warning("a partial source file could not be removed: errno=%s", _errno_name(error))
+        # Only the errno's name is kept past this block: the error's own text names the path.
+        errno_name = _errno_name(error)
+    if errno_name is not None:
+        logger.warning("a partial source file could not be removed: errno=%s", errno_name)
 
 
 # --- the generation ------------------------------------------------------------------------------
@@ -1121,20 +1196,32 @@ def _opened_artifact(upload: _Upload) -> BinaryIO:
 
     The open never waits: whatever stands at the path by now is opened at once and then judged, so a
     FIFO there is refused as any other file that is no longer a regular one. (Reading a regular file
-    is the same with or without the flag.)"""
+    is the same with or without the flag.) A file that is refused is not left open, and its failure
+    is raised once the handler that caught the operating system's error has ended: that error, whose
+    text names the file's whole path, is neither the failure's cause nor its context."""
+    changed: str | None
     try:
         body = open(upload.local_path, "rb", opener=_open_without_following_or_waiting)
     except OSError as error:
-        raise _artifact_changed(upload, f"it could not be opened: {_errno_name(error)}") from None
+        changed = f"it could not be opened: {_errno_name(error)}"
+    else:
+        changed = _difference_from_the_record(body, upload)
+        if changed is None:
+            return body
+        body.close()
+    raise _artifact_changed(upload, changed)
+
+
+def _difference_from_the_record(body: BinaryIO, upload: _Upload) -> str | None:
+    """What tells the opened file from the regular file of the recorded size, in our own words; None
+    when nothing does."""
     try:
         status = os.fstat(body.fileno())
     except OSError as error:
-        body.close()
-        raise _artifact_changed(upload, f"it could not be measured: {_errno_name(error)}") from None
+        return f"it could not be measured: {_errno_name(error)}"
     if not stat.S_ISREG(status.st_mode) or status.st_size != upload.size_bytes:
-        body.close()
-        raise _artifact_changed(upload, f"it is no longer the file of {upload.size_bytes} bytes the manifest records")
-    return body
+        return f"it is no longer the file of {upload.size_bytes} bytes the manifest records"
+    return None
 
 
 def _artifact_changed(upload: _Upload, what: str) -> WorkerFailure:
