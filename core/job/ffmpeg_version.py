@@ -23,7 +23,9 @@ core/probe.py), by one question: would the next attempt, on a healthy host, succ
                                                       depends on the image alone: every start meets it again.
     resource_exhausted / ffmpeg_version_start_failed  Yes, retryable. Any other error while starting it (a
                                                       failed fork, no temporary directory, no descriptor
-                                                      left): a passing shortage of the worker's own.
+                                                      left): a passing shortage of the worker's own. Where
+                                                      the empty working directory could not be made, the
+                                                      detail and the log line say that, not a failed start.
     internal_error / ffmpeg_version_run_failed        Yes, retryable. The run passed the check's own limit
                                                       while the execution still had time, or ended on a
                                                       signal: an overloaded or dying host, not the tool.
@@ -35,6 +37,14 @@ core/probe.py), by one question: would the next attempt, on a healthy host, succ
                                                       the runner's wall_time_spent_before_start).
 
 Each failure is logged once, by the name of its ending, and none is kept: the next job asks again.
+
+A failure that stands in place of an error this module caught (the operating system's for a start or a
+working directory, the interpreter's for a thread that could not be started) is built, logged and
+raised once the handler that caught the error has ended, so it carries nothing of that error, neither as
+its cause nor as its context, and its line is not written while the error is being handled. A log
+handler that fails on a line does not raise: Python's logging prints a report of its own, with every
+error that failure is chained to, which inside the block would be the caught error with its own text
+(the binary's path, the directory's).
 """
 
 from __future__ import annotations
@@ -66,6 +76,7 @@ UNKNOWN_ERRNO_NAME = "unknown"
 # The endings that give no version, as a log line names them.
 ENDING_NOT_INSTALLED = "not_installed"
 ENDING_NOT_STARTABLE = "not_startable"
+ENDING_NO_WORKING_DIRECTORY = "no_working_directory"
 ENDING_START_FAILED = "start_failed"
 ENDING_TIMED_OUT = "timed_out"
 ENDING_DEADLINE_EXCEEDED = "deadline_exceeded"
@@ -76,7 +87,10 @@ ENDING_NO_VERSION_LINE = "no_version_line"
 
 
 def _failed(ending: str, failure: Failure) -> WorkerFailure:
-    """The failure of one ending, logged once by the ending's name; its detail is our own words."""
+    """The failure of one ending, logged once by the ending's name; its detail is our own words.
+
+    Never called inside an `except` block: where an ending replaces a caught error, the handler keeps
+    what the ending needs of it and ends first (_run_version, _run_in)."""
     logger.warning("the ffmpeg version could not be determined (%s): %s", ending, failure.detail)
     return WorkerFailure(failure)
 
@@ -85,9 +99,18 @@ def _unavailable(ending: str, detail: str) -> WorkerFailure:
     return _failed(ending, Failure("configuration_error", "ffmpeg_unavailable", False, detail))
 
 
+def _shortage(ending: str, detail: str) -> WorkerFailure:
+    return _failed(ending, Failure("resource_exhausted", "ffmpeg_version_start_failed", True, detail))
+
+
 def _start_failed(errno_name: str) -> WorkerFailure:
-    detail = f"ffmpeg could not be started to state its version: {errno_name}"
-    return _failed(ENDING_START_FAILED, Failure("resource_exhausted", "ffmpeg_version_start_failed", True, detail))
+    return _shortage(ENDING_START_FAILED, f"ffmpeg could not be started to state its version: {errno_name}")
+
+
+def _no_working_directory(errno_name: str) -> WorkerFailure:
+    """Typed as a failed start is, and told apart from one by its ending's name and its words."""
+    detail = f"the empty working directory ffmpeg states its version in could not be made: {errno_name}"
+    return _shortage(ENDING_NO_WORKING_DIRECTORY, detail)
 
 
 def _run_failed(ending: str, detail: str) -> WorkerFailure:
@@ -148,8 +171,11 @@ def _run_version(executable: str, deadline: Deadline) -> BoundedResult:
     except OSError as error:
         # The directory could not be made. Always a passing shortage, FileNotFoundError included: mkdtemp
         # reports exhausted descriptors as "No usable temporary directory found". (What _run_in raises
-        # is a WorkerFailure, which this lets through.)
-        raise _start_failed(_errno_name(error)) from None
+        # is a WorkerFailure, which this lets through.) Only the errno's name is kept past this block:
+        # the error's own text names the directory.
+        errno_name = _errno_name(error)
+    # Logged and raised here, after the `except` block has ended (see the module's last paragraph).
+    raise _no_working_directory(errno_name)
 
 
 def _run_in(executable: str, empty_dir: str, deadline: Deadline) -> BoundedResult:
@@ -165,12 +191,19 @@ def _run_in(executable: str, empty_dir: str, deadline: Deadline) -> BoundedResul
         )
     except OSError as error:
         # Also where its output could not be fully read (run_bounded raises after killing the group).
-        if isinstance(error, (FileNotFoundError, PermissionError)) or error.errno in ENCODER_UNUSABLE_ERRNOS:
-            raise _unavailable(ENDING_NOT_STARTABLE, "ffmpeg could not be started") from None
-        raise _start_failed(_errno_name(error)) from None
+        # Kept past this block: whether no start will ever work, and the errno's name. Not the error,
+        # whose own text names the binary's path.
+        never_startable = (
+            isinstance(error, (FileNotFoundError, PermissionError)) or error.errno in ENCODER_UNUSABLE_ERRNOS
+        )
+        errno_name = _errno_name(error)
     except RuntimeError:
         # A reader thread could not start; run_bounded has already killed the group.
-        raise _start_failed(UNKNOWN_ERRNO_NAME) from None
+        never_startable, errno_name = False, UNKNOWN_ERRNO_NAME
+    # Logged and raised here, after the `except` block has ended (see the module's last paragraph).
+    if never_startable:
+        raise _unavailable(ENDING_NOT_STARTABLE, "ffmpeg could not be started")
+    raise _start_failed(errno_name)
 
 
 def _stated_version(result: BoundedResult, deadline: Deadline) -> str:

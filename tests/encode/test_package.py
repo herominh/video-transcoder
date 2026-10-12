@@ -36,6 +36,7 @@ from core.protocol.context import TrustedContext
 from core.protocol.pipeline import validate
 from core.thumbnail import ThumbnailResult
 from tests.encode.conftest import fast_profile
+from tests.failing_log import reported_log_failures
 
 ORG_UUID = "11111111-1111-7111-8111-111111111111"
 VIDEO_UUID = "22222222-2222-7222-8222-222222222222"
@@ -96,6 +97,10 @@ THUMBNAIL_UNAVAILABLE = "thumbnail_unavailable"
 JOB_BYTES = 10 * GIB
 JOB_ARTIFACTS = 500
 FILE_MODE_BITS = 0o777
+# What the text of an operating system's error holds that must never reach the worker's output: the
+# path a write that failed names, and the path a removal that failed names.
+PATH_CANARY = "/CANARY/path/of/a/package/file"
+REMOVAL_CANARY = "/CANARY/path/of/a/partial/package/file"
 
 
 def _digest(text: str) -> str:
@@ -241,6 +246,18 @@ def _closing_then_failing(error_number: int) -> Callable[[int], None]:
         raise OSError(error_number, os.strerror(error_number))
 
     return close
+
+
+def _failing_naming(path_text: str, error_number: int, *, after_closing: bool = False) -> Callable[..., Any]:
+    """A call of the operating system that fails on an error whose own text names `path_text`; with
+    `after_closing`, a close that releases the descriptor first."""
+
+    def fail(*args: Any, **kwargs: object) -> Any:
+        if after_closing:
+            os.close(args[0])
+        raise OSError(error_number, os.strerror(error_number), path_text)
+
+    return fail
 
 
 # --- the master playlist ---------------------------------------------------------------------------
@@ -960,6 +977,63 @@ def test_write_manifest_when_the_disk_fills_should_report_scratch_full_and_leave
     # Assert
     _assert_failure(raised, ("resource_exhausted", "scratch_full", True))
     assert os.listdir(output_root) == []
+
+
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes every line's
+# handler fail; how the write ends is how it ends without it.
+
+
+@pytest.mark.parametrize("failing_call", ["open", "write", "close"])
+def test_write_master_playlist_when_a_log_handler_fails_on_the_line_of_a_failed_write_should_keep_the_path_out(
+    failing_call: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: the file cannot be created, written or closed, on an error whose own text names its path
+    output_root = _output_root(tmp_path)
+    failing = _failing_naming(PATH_CANARY, errno.EIO, after_closing=failing_call == "close")
+    _package_os(monkeypatch, **{failing_call: failing})
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        write_master_playlist(_renditions(), output_root=output_root)
+
+    # Assert: logging did report its failure on that line, with nothing of the path the error named,
+    # and the typed failure carries nothing of the error either
+    written = reported_log_failures(capsys, "a package file could not be written")
+    assert PATH_CANARY not in written
+    _assert_failure(raised, ("output_write_failed", "package_write_failed", True))
+    assert raised.value.failure.detail == "the package file could not be written: EIO"
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert os.listdir(output_root) == []
+
+
+def test_write_manifest_when_a_log_handler_fails_on_the_line_of_a_partial_file_not_removed_should_keep_both_paths_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange: the write fails, and then the partial file cannot be removed, each on an error whose
+    # own text names a path
+    output_root = _output_root(tmp_path)
+    _package_os(
+        monkeypatch,
+        write=_failing_naming(PATH_CANARY, errno.EIO),
+        unlink=_failing_naming(REMOVAL_CANARY, errno.EACCES),
+    )
+
+    # Act
+    with pytest.raises(WorkerFailure) as raised:
+        write_manifest(**_manifest_arguments(), output_root=output_root, max_bytes=manifest_max_bytes(JOB_ARTIFACTS))
+
+    # Assert: nothing of the write's error, behind which the removal ran, nor of the removal's own
+    written = reported_log_failures(capsys, "a partial package file could not be removed")
+    assert [canary for canary in (PATH_CANARY, REMOVAL_CANARY) if canary in written] == []
+    _assert_failure(raised, ("output_write_failed", "package_write_failed", True))
+    assert raised.value.__cause__ is None and raised.value.__context__ is None
+    assert os.listdir(output_root) == ["generation-manifest.json"]
 
 
 def test_write_manifest_and_master_when_written_should_create_files_readable_by_others(tmp_path: Path) -> None:

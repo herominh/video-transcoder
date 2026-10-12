@@ -24,9 +24,13 @@ from core.failure import Failure, WorkerFailure
 S3_CONNECT_TIMEOUT_S = 5
 S3_READ_TIMEOUT_S = 10
 # One attempt per read: botocore's own retries would be requests the budget never sees. (Its S3
-# region redirect can still re-send one request to the same endpoint after a 301 or a malformed
-# authorization header; the budget does not see that one.)
+# region redirector would be another source of them; without_region_redirects() stops it.)
 S3_MAX_ATTEMPTS = 1
+# The event every request of an S3 client passes on its way out, and where botocore's region redirector
+# keeps, in the request's context, whether the request was redirected already.
+BEFORE_S3_CALL_EVENT = "before-call.s3"
+REDIRECT_CONTEXT_KEY = "s3_redirect"
+REDIRECTED_KEY = "redirected"
 
 HTTP_PARTIAL_CONTENT = 206
 HTTP_FORBIDDEN = 403
@@ -67,24 +71,46 @@ def make_s3_client(
     secret_access_key: str,
     session_token: str | None = None,
 ) -> Any:
-    """An S3 client for range reads: path-style, short timeouts, no automatic retries."""
+    """An S3 client for range reads: path-style, short timeouts, no automatic retries and no region redirect."""
     import boto3
 
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint_url,
-        region_name=region,
-        aws_access_key_id=access_key_id,
-        aws_secret_access_key=secret_access_key,
-        aws_session_token=session_token,
-        config=Config(
-            signature_version="s3v4",
-            connect_timeout=S3_CONNECT_TIMEOUT_S,
-            read_timeout=S3_READ_TIMEOUT_S,
-            retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
-            s3={"addressing_style": "path"},
-        ),
+    return without_region_redirects(
+        boto3.client(
+            "s3",
+            endpoint_url=endpoint_url,
+            region_name=region,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            aws_session_token=session_token,
+            config=Config(
+                signature_version="s3v4",
+                connect_timeout=S3_CONNECT_TIMEOUT_S,
+                read_timeout=S3_READ_TIMEOUT_S,
+                retries={"total_max_attempts": S3_MAX_ATTEMPTS, "mode": "standard"},
+                s3={"addressing_style": "path"},
+            ),
+        )
     )
+
+
+def without_region_redirects(client: Any) -> Any:
+    """The same S3 client, made to follow no region redirect: one call of it is one request.
+
+    botocore registers a region redirector on every S3 client. After an answer that is a redirect (301,
+    302, 307) or names another region it sends the request again, signed for the region the answer
+    names; when the answer names none it first asks for the bucket's head, with the same client, so
+    against a host that answers every request with a redirect it asks until Python's recursion limit.
+    The redirector leaves alone a request whose context says it was redirected already, so every
+    request is marked so before it is sent: the answer then reaches the caller as the ClientError it
+    is. Only botocore's public event system is used.
+    """
+    client.meta.events.register(BEFORE_S3_CALL_EVENT, _mark_as_redirected)
+    return client
+
+
+def _mark_as_redirected(context: dict[str, Any], **named_arguments: Any) -> None:
+    """Handles `before-call.s3`: the redirector made the request's entry while the parameters were built."""
+    context.setdefault(REDIRECT_CONTEXT_KEY, {})[REDIRECTED_KEY] = True
 
 
 def _failure(error_class: str, code: str, detail: str, *, retryable: bool = False) -> WorkerFailure:
@@ -105,6 +131,10 @@ class S3RangeSource:
     Every response is checked before its body is read: a storage that ignores the Range header
     (200 instead of 206, or another range) or the If-Match condition (another ETag) fails closed
     without streaming the object.
+
+    A typed failure raised in place of the storage client's own error carries nothing of that error,
+    neither as its cause nor as its context: the client's error names the endpoint and the object, so
+    the failure is raised once the handler that caught it has ended.
     """
 
     def __init__(self, client: Any, *, bucket: str, key: str, size_bytes: int, etag: str) -> None:
@@ -127,33 +157,13 @@ class S3RangeSource:
     def read(self, start: int, length: int) -> bytes:
         _check_range(start, length, self._size_bytes)
         end = start + length - 1
-        try:
-            response = self._client.get_object(
-                Bucket=self._bucket,
-                Key=self._key,
-                Range=f"bytes={start}-{end}",
-                IfMatch=f'"{self._etag}"',
-            )
-        except ClientError as error:
-            raise _client_error_failure(error) from None
-        except BotoCoreError:
-            raise _failure(
-                "source_unavailable", "storage_unreachable",
-                "the storage could not be reached", retryable=True,
-            ) from None
-
+        response = self._answer(start, end)
         body = response.get("Body")
         try:
             self._check_response(response, start, end, length)
             if body is None:
                 raise _failure("source_unavailable", "short_read", "the storage sent no body", retryable=True)
-            try:
-                data = body.read(length)
-            except BotoCoreError:
-                raise _failure(
-                    "source_unavailable", "short_read",
-                    "the storage ended the body early", retryable=True,
-                ) from None
+            data = _body_bytes(body, length)
             if len(data) != length:
                 raise _failure(
                     "source_unavailable", "short_read",
@@ -163,6 +173,26 @@ class S3RangeSource:
         finally:
             if body is not None:
                 body.close()
+
+    def _answer(self, start: int, end: int) -> dict[str, Any]:
+        """The storage's answer to one read of the range, conditional on the recorded ETag; a typed
+        failure where the client raised an error of its own instead."""
+        try:
+            return self._client.get_object(
+                Bucket=self._bucket,
+                Key=self._key,
+                Range=f"bytes={start}-{end}",
+                IfMatch=f'"{self._etag}"',
+            )
+        except ClientError as error:
+            failure = _client_error_failure(error)
+        except BotoCoreError:
+            failure = _failure(
+                "source_unavailable", "storage_unreachable",
+                "the storage could not be reached", retryable=True,
+            )
+        # Raised here, after the handlers have ended: the client's error is neither cause nor context.
+        raise failure
 
     def _check_response(self, response: dict[str, Any], start: int, end: int, length: int) -> None:
         status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
@@ -194,6 +224,20 @@ class S3RangeSource:
                 "source_unavailable", "range_not_honoured",
                 "the storage announced another length than the range asked",
             )
+
+
+def _body_bytes(body: Any, length: int) -> bytes:
+    """What the answer's body gives of the `length` bytes asked; a typed failure where the client
+    failed the read with an error of its own (the connection broke, or went silent)."""
+    try:
+        return body.read(length)
+    except BotoCoreError:
+        failure = _failure(
+            "source_unavailable", "short_read",
+            "the storage ended the body early", retryable=True,
+        )
+    # Raised here, after the handler has ended: the client's error is neither cause nor context.
+    raise failure
 
 
 def _client_error_failure(error: ClientError) -> WorkerFailure:

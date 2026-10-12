@@ -16,7 +16,7 @@ from typing import Any, Mapping
 
 from . import gate, pipeline, signing
 from .context import TrustedContext
-from .registry import load_registry
+from .registry import MessageKind, load_registry
 from .verdict import Verdict
 
 STEP_SIGNATURE = "signature"
@@ -58,9 +58,15 @@ def accept_signed(
 
 
 def accept_hub_error(raw: bytes, *, context: TrustedContext) -> Mapping[str, Any] | None:
-    """The `error` object of a `hub.error` accepted under `context` (`worker_receiver`), or None for any other answer."""
+    """The `error` object of a `hub.error` accepted under `context` (`worker_receiver`), or None for any other answer.
+
+    The message is unsigned, so the context must accept `hub.error` and no other kind: one that accepts
+    another kind would let that kind through here without its signature (ValueError, a wiring bug).
+    """
     if not isinstance(raw, bytes):
         raise TypeError("accept_hub_error() takes the exact received bytes")
+    if context.accepted_message_kinds != (MessageKind.HUB_ERROR.value,):
+        raise ValueError("accept_hub_error() takes a context that accepts hub.error only")
     if not pipeline.validate(raw, context).accepted:
         return None
     return _decoded(raw)["error"]

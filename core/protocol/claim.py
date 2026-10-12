@@ -32,6 +32,8 @@ answer cannot stretch either.
 
 The body of a claim and of a claim response is never logged, stored or put in an error, and the media key
 of a grant exists only inside the returned Grant, whose repr() does not show it (README 15.1, rules 4, 5).
+The Grant holds the key until whoever runs the execution drops it (Grant.drop_media_key): rule 4 gives a
+runtime the key until its encode and the encode's own checks are done, never past its execution.
 """
 
 from __future__ import annotations
@@ -49,14 +51,11 @@ from .messages import ExecutionIdentity
 from .outbox import SealedMessage, seal_message
 from .registry import MessageKind, load_registry
 from .settings import WorkerSettings
-from .transport import HttpAnswer, Transport, TransportFailed
+from .transport import GATEWAY_FAILURE_STATUSES, HTTP_ERROR_STATUSES, HttpAnswer, Transport, TransportFailed
 
 logger = logging.getLogger(__name__)
 
 HTTP_OK = 200
-_HTTP_ERROR_STATUSES = range(400, 600)
-# What a gateway answers while it cannot reach the Hub behind it.
-_GATEWAY_FAILURE_STATUSES = frozenset({502, 503, 504})
 CAUSE_REFUSED = "refused"
 CAUSE_UNREACHABLE = "unreachable"
 CAUSE_INVALID_ANSWER = "invalid_answer"
@@ -70,7 +69,10 @@ CLAIM_BACKOFF_S = (1, 2, 4, 8, 15)
 
 @dataclass(frozen=True)
 class Grant:
-    """An accepted `transcode.claim.granted`: the execution, its generation, where it writes and its media key."""
+    """An accepted `transcode.claim.granted`: the execution, its generation, where it writes and its media key.
+
+    Nothing of it changes but the key, which drop_media_key() lets go of.
+    """
 
     identity: ExecutionIdentity
     generation_id: str
@@ -78,6 +80,14 @@ class Grant:
     output_prefix: str
     media_key_id: str | None
     media_key: bytes | None = field(repr=False)
+
+    def drop_media_key(self) -> None:
+        """Let go of the media key: `media_key` is None from here on, however often this is called.
+
+        The id of the key stays. Python cannot erase the key's bytes: no longer holding them is what a
+        runtime can do (README 15.1, rule 4).
+        """
+        object.__setattr__(self, "media_key", None)
 
 
 @dataclass(frozen=True)
@@ -110,13 +120,19 @@ def claim_execution(
 
     `clock` gives the aware current time, `monotonic` seconds that only ever move forward, and `sleep` waits
     that many seconds. `wall_time_ends_at` is the reading of `monotonic`, a finite number, at which the
-    start's wall time ends (ValueError otherwise, before any claim): no claim is sent at or after it.
+    start's wall time ends (ValueError otherwise, an integer too large to be a float included, before
+    any claim): no claim is sent at or after it.
     """
-    if (
-        isinstance(wall_time_ends_at, bool)
-        or not isinstance(wall_time_ends_at, (int, float))
-        or not math.isfinite(wall_time_ends_at)
-    ):
+    try:
+        finite = (
+            not isinstance(wall_time_ends_at, bool)
+            and isinstance(wall_time_ends_at, (int, float))
+            and math.isfinite(wall_time_ends_at)
+        )
+    except OverflowError:
+        # An integer too large to be a float: no reading of a clock, and nothing can be counted to it.
+        finite = False
+    if not finite:
         raise ValueError("wall_time_ends_at must be a finite reading of the monotonic clock")
     claiming_ends_at = min(monotonic() + CLAIM_PATIENCE_S, wall_time_ends_at)
 
@@ -218,11 +234,11 @@ def _judge(
         logger.info("claim of dispatch %s granted: execution %s", dispatch_id, grant.identity.execution_id)
         return grant
     error = None
-    if answer.status in _HTTP_ERROR_STATUSES:
+    if answer.status in HTTP_ERROR_STATUSES:
         error = accept_hub_error(
             answer.body, context=messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
         )
-    if error is None and answer.status in _GATEWAY_FAILURE_STATUSES:
+    if error is None and answer.status in GATEWAY_FAILURE_STATUSES:
         logger.info("claim of dispatch %s did not reach the Hub: status %d", dispatch_id, answer.status)
         return None
     if error is None:

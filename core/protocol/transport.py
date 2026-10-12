@@ -66,6 +66,11 @@ FAILURE_AMBIGUOUS_FRAMING = "AmbiguousFraming"
 FAILURE_UNFRAMED_BODY = "UnframedBody"
 FAILURE_INCOMPLETE_BODY = "IncompleteBody"
 FIRST_FINAL_STATUS = 200
+# For the callers that read an answer (the claim, a delivery). A `hub.error` is read only under an error
+# status. A gateway in front of the Hub answers with one of the three below while it cannot reach the
+# Hub: such an answer, when it carries no `hub.error`, is no answer from the Hub.
+HTTP_ERROR_STATUSES = range(400, 600)
+GATEWAY_FAILURE_STATUSES = frozenset({502, 503, 504})
 # Statuses whose answer has no body by definition (RFC 9110): such an answer announces no chunks.
 _BODILESS_STATUSES = frozenset({204, 304})
 # What this transport puts in a request line or a header: visible ASCII, so no space, line break or fold.
@@ -156,9 +161,12 @@ class _Target:
 
 
 class HttpsTransport:
-    """The real carrier. `tls_context` is for tests that serve from 127.0.0.1 under a certificate of their own."""
+    """The real carrier. `tls_context` is for tests that serve from 127.0.0.1 under a certificate of their own;
+    anything but an `ssl.SSLContext` or None is a wiring bug (TypeError)."""
 
     def __init__(self, tls_context: ssl.SSLContext | None = None) -> None:
+        if tls_context is not None and not isinstance(tls_context, ssl.SSLContext):
+            raise TypeError("tls_context must be an ssl.SSLContext or None")
         self._tls_context = tls_context if tls_context is not None else verifying_tls_context()
 
     def post(self, url: str, body: bytes, signature: str, *, timeout_s: float, max_body_bytes: int) -> HttpAnswer:
@@ -286,13 +294,18 @@ def _tcp_connected(host: str, port: int, deadline: float) -> socket.socket:
     """A TCP connection to the first address of the host that takes one.
 
     Each address gets an equal part of the time left, so that one address that does not answer cannot use
-    up what the others need.
+    up what the others need. An address no socket can be made for (a family this host cannot open) is
+    passed over like one that refuses the connection.
     """
     addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     failure: Exception = _CutShort(FAILURE_NO_ADDRESS)
     for position, (family, kind, protocol, _, address) in enumerate(addresses):
         left = _time_left(deadline)
-        sock = socket.socket(family, kind, protocol)
+        try:
+            sock = socket.socket(family, kind, protocol)
+        except OSError as error:
+            failure = error
+            continue
         sock.settimeout(left / (len(addresses) - position))
         try:
             sock.connect(address)

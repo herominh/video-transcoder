@@ -66,7 +66,8 @@ class ClaimedExecution:
     `wall_time_ends_at` is the reading of the runtime's monotonic clock at which the start's wall time
     ends: the reading handle() took first, plus the dispatch's limit. It is only ever compared with
     another reading of that clock. Anything but a finite number is refused: TypeError for another type
-    (a bool included), ValueError for a number that is not finite.
+    (a bool included), ValueError for a number that is not finite, an integer too large to be a float
+    included.
     """
 
     dispatch: AcceptedDispatch
@@ -78,7 +79,12 @@ class ClaimedExecution:
         ends_at = self.wall_time_ends_at
         if isinstance(ends_at, bool) or not isinstance(ends_at, (int, float)):
             raise TypeError("wall_time_ends_at must be a number: a reading of the monotonic clock")
-        if not math.isfinite(ends_at):
+        try:
+            finite = math.isfinite(ends_at)
+        except OverflowError:
+            # An integer too large to be a float: no reading of a clock, and nothing can be counted to it.
+            finite = False
+        if not finite:
             raise ValueError("wall_time_ends_at must be finite")
 
 
@@ -127,13 +133,16 @@ def handle(job_input: object, *, runtime: Runtime, run_job: JobRunner) -> dict[s
         new_message_id=runtime.new_uuid,
         wall_time_ends_at=wall_time_ends_at,
     )
-    if isinstance(outcome, Unclaimed):
-        report = _unclaimed_report(dispatch, runtime_id, outcome, runtime)
-    else:
+    # Work only on a Grant, tested for by name: whatever else the claim returned is never worked on.
+    if isinstance(outcome, Grant):
         claimed = ClaimedExecution(
             dispatch=dispatch, grant=outcome, runtime_id=runtime_id, wall_time_ends_at=wall_time_ends_at
         )
         report = run_job(claimed, runtime)
+    elif isinstance(outcome, Unclaimed):
+        report = _unclaimed_report(dispatch, runtime_id, outcome, runtime)
+    else:
+        raise TypeError("the claim ended as neither a Grant nor an Unclaimed")
     output = runpod_output(report)
     _deliver_best_effort(report, runtime, wall_time_ends_at)
     return output
@@ -163,6 +172,11 @@ def _deliver_best_effort(report: SealedMessage, runtime: Runtime, wall_time_ends
     """The callback is the fast path, the job output the one the Hub can always read: no failure here costs the output.
 
     No attempt of it starts at or after `wall_time_ends_at`, a reading of the runtime's monotonic clock.
+
+    An error of the delivery is logged by its class, and only once it is no longer being handled: when a
+    log handler fails on a line, Python's logging prints a report of its own to standard error with every
+    error that failure is chained to, and inside the `except` block that would be the caught error, with
+    its own text.
     """
     try:
         delivered = deliver(
@@ -174,6 +188,10 @@ def _deliver_best_effort(report: SealedMessage, runtime: Runtime, wall_time_ends
             monotonic=runtime.monotonic,
         )
     except Exception as error:  # noqa: BLE001 - whatever fails here, the output is still returned
-        logger.error("callback of a %s failed: %s", report.kind.value, type(error).__name__)
+        # All the line needs of the error, so that the error itself ends with this block.
+        failed_on = type(error).__name__
+    else:
+        logger.info("callback of a %s %s", report.kind.value, "delivered" if delivered else "not delivered")
         return
-    logger.info("callback of a %s %s", report.kind.value, "delivered" if delivered else "not delivered")
+    # Written here, after the `except` block has ended (see the docstring).
+    logger.error("callback of a %s failed: %s", report.kind.value, failed_on)

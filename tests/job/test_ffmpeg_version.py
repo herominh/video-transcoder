@@ -1,7 +1,8 @@
 """The version of the installed ffmpeg, as a result's `encoder.ffmpeg_version` states it, and how each
 way of not getting it is typed: what a retry cannot cure, a passing shortage, a run that did not end, an
 execution whose own deadline passed. The check runs under the execution's deadline; only a version it
-got is remembered for the process.
+got is remembered for the process. Its run of ffmpeg gets nothing of this process's: an environment
+cleared of it, an empty working directory of its own, and a cap on what is kept of its output.
 
 The stand-in ffmpegs are small shell scripts named by FFMPEG_PATH, the variable the stages resolve their
 ffmpeg from; they run under the same bounded process as the real one (POSIX only). The endings no script
@@ -17,9 +18,11 @@ import os
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -28,7 +31,7 @@ from core.failure import Failure, WorkerFailure
 from core.job import ffmpeg_version as ffmpeg_version_module
 from core.job.ffmpeg_version import forget_installed_ffmpeg_version, installed_ffmpeg_version
 from core.protocol import schema
-from tests.job.conftest import ScriptedDeadline
+from tests.job.conftest import ScriptedDeadline, reported_log_failures
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the version is asked under POSIX process groups")
 
@@ -44,8 +47,15 @@ DEADLINE_EXCEEDED = ("deadline_exceeded", "ffmpeg_version_deadline_exceeded", Tr
 CHECK_LIMIT_S = 10.0
 LESS_THAN_THE_CHECK_LIMIT_MS = 9_000
 PATH_CANARY = "/CANARY/path/in/an/os/error"
+# A place for temporary directories that is no directory: nothing can be made in it, by root either.
+MISSING_DIRECTORY_NAME = "no-such-temporary-directory"
 WORKING_FFMPEG = "echo 'ffmpeg version 7.1.1 Copyright'"
 OUTPUT_CAP_BYTES = 16 * 1024
+# More than a pipe holds (64 KiB on Linux), so a stand-in that writes this much cannot end before all
+# but a pipe's worth of it was read: what is kept of it is then full, however busy the host is.
+MORE_THAN_A_PIPE_HOLDS_BYTES = 16 * OUTPUT_CAP_BYTES
+# A variable of this process alone, as a storage secret is one.
+PROCESS_VARIABLE = "VH_TEST_VARIABLE_OF_THE_PROCESS"
 REAL_START = ffmpeg_version_module.run_bounded
 TIMED_OUT = BoundedResult(
     returncode=None, stdout=b"", stderr_tail=b"", timed_out=True, stdout_overflow=False, stderr_truncated=False
@@ -123,6 +133,23 @@ def _start_that(outcome: BaseException | BoundedResult) -> Callable[..., Bounded
         return outcome
 
     return start
+
+
+def _start_noting_endings(endings: list[BoundedResult]) -> Callable[..., BoundedResult]:
+    """The real bounded process start, which also notes the ending of each run it makes."""
+
+    def start(*arguments: Any, **named_arguments: Any) -> BoundedResult:
+        ending = REAL_START(*arguments, **named_arguments)
+        endings.append(ending)
+        return ending
+
+    return start
+
+
+def _stating_its_version_in(directory: Path, output_bytes: int) -> Path:
+    """A stand-in ffmpeg whose whole output is one version statement of exactly `output_bytes` bytes."""
+    padded_to = output_bytes - len("\n")
+    return _stand_in(directory, f"printf '%-{padded_to}s\\n' 'ffmpeg version 7.1.1 Copyright'")
 
 
 def test_version_when_ffmpeg_states_it_should_be_the_token_after_ffmpeg_version(tmp_path, monkeypatch):
@@ -361,6 +388,42 @@ def test_version_when_no_working_directory_can_be_made_should_fail_retryable_and
     assert PATH_CANARY not in failure.detail
 
 
+def test_version_when_no_working_directory_can_be_made_should_say_so_and_not_name_a_failed_start(
+    tmp_path, monkeypatch
+):
+    # Arrange: a working ffmpeg, while temporary directories are to be made where no directory is
+    script = _stand_in(tmp_path, WORKING_FFMPEG)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / MISSING_DIRECTORY_NAME))
+
+    # Act
+    failure = _unavailable(monkeypatch, script).failure
+
+    # Assert: typed as a failed start is, in words of its own; the errno's name, nothing of the path
+    assert _typed(failure) == START_FAILED
+    assert "working directory" in failure.detail
+    assert "started" not in failure.detail
+    assert "ENOENT" in failure.detail
+    assert str(tmp_path) not in failure.detail
+
+
+def test_version_when_no_working_directory_can_be_made_should_log_that_ending_once_and_no_failed_start(
+    tmp_path, monkeypatch, caplog
+):
+    # Arrange
+    caplog.set_level(logging.DEBUG, logger=ffmpeg_version_module.__name__)
+    script = _stand_in(tmp_path, WORKING_FFMPEG)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / MISSING_DIRECTORY_NAME))
+
+    # Act
+    _unavailable(monkeypatch, script)
+
+    # Assert
+    (logged,) = [record for record in caplog.records if record.name == ffmpeg_version_module.__name__]
+    assert "(no_working_directory)" in logged.getMessage()
+    assert "start" not in logged.getMessage()
+    assert str(tmp_path) not in caplog.text
+
+
 def test_version_when_the_run_passes_the_checks_own_limit_with_time_left_should_fail_retryable_as_a_run_failure(
     tmp_path, monkeypatch
 ):
@@ -429,6 +492,177 @@ def test_version_when_it_cannot_be_determined_should_log_the_ending_once_by_its_
     assert f"({ending})" in logged.getMessage()
     assert PATH_CANARY not in caplog.text
     assert str(tmp_path) not in caplog.text
+
+
+# --- an error that a typed failure replaces ---------------------------------------------------------
+
+# The places where the module catches an error and ends the check with a typed failure in its place:
+# no working directory can be made; the start is refused for good, by the system itself (a file that is
+# no program) or as a stand-in has it; the start meets a passing shortage; a reader thread cannot start.
+NO_WORKING_DIRECTORY = "no-working-directory"
+NOT_A_PROGRAM = "not-a-program"
+REFUSED_FOR_GOOD = "refused-for-good"
+A_PASSING_SHORTAGE = "a-passing-shortage"
+NO_READER_THREAD = "no-reader-thread"
+# What each ends as: the typed failure, the name its log line gives the ending, and the failure's detail.
+REPLACED_ERROR_SITES = {
+    NO_WORKING_DIRECTORY: (
+        START_FAILED,
+        "no_working_directory",
+        "the empty working directory ffmpeg states its version in could not be made: ENOENT",
+    ),
+    NOT_A_PROGRAM: (UNAVAILABLE, "not_startable", "ffmpeg could not be started"),
+    REFUSED_FOR_GOOD: (UNAVAILABLE, "not_startable", "ffmpeg could not be started"),
+    A_PASSING_SHORTAGE: (START_FAILED, "start_failed", "ffmpeg could not be started to state its version: EAGAIN"),
+    NO_READER_THREAD: (START_FAILED, "start_failed", "ffmpeg could not be started to state its version: unknown"),
+}
+
+
+def _asked_where_an_error_is_replaced(site: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> WorkerFailure:
+    """Ask for the version where `site` fails, each time on an error whose own text names a path
+    (PATH_CANARY; for the file that is no program, the test's own directory), and return what the ask raised."""
+    ffmpeg = _stand_in(tmp_path, WORKING_FFMPEG)
+    if site == NO_WORKING_DIRECTORY:
+        # What mkdtemp raises when the descriptors or the disk ran out.
+        no_directory = FileNotFoundError(errno.ENOENT, f"No usable temporary directory found in {PATH_CANARY}")
+        monkeypatch.setattr(ffmpeg_version_module.tempfile, "TemporaryDirectory", _start_that(no_directory))
+    if site == NOT_A_PROGRAM:
+        # No stand-in fails here: an executable file with no interpreter line that is no binary.
+        ffmpeg = tmp_path / "broken-ffmpeg"
+        ffmpeg.write_bytes(b"\x00\x01\x02 not a program")
+        ffmpeg.chmod(EXECUTABLE)
+    if site == REFUSED_FOR_GOOD:
+        refused = PermissionError(errno.EACCES, "Permission denied", PATH_CANARY)
+        monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_that(refused))
+    if site == A_PASSING_SHORTAGE:
+        shortage = OSError(errno.EAGAIN, f"cannot start {PATH_CANARY}")
+        monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_that(shortage))
+    if site == NO_READER_THREAD:
+        no_thread = RuntimeError(f"can't start new thread for {PATH_CANARY}")
+        monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_that(no_thread))
+    return _unavailable(monkeypatch, ffmpeg)
+
+
+@pytest.mark.parametrize("site", list(REPLACED_ERROR_SITES))
+def test_version_when_an_error_is_replaced_by_a_typed_failure_should_carry_nothing_of_that_error(
+    tmp_path, monkeypatch, site
+):
+    # Arrange: what the check ends as at this site
+    typed, _, detail = REPLACED_ERROR_SITES[site]
+
+    # Act
+    raised = _asked_where_an_error_is_replaced(site, tmp_path, monkeypatch)
+
+    # Assert: the typed failure alone. The error it replaces, whose text names a path, is neither its
+    # cause nor its context
+    assert (_typed(raised.failure), raised.failure.detail) == (typed, detail)
+    assert [told for told in (PATH_CANARY, str(tmp_path)) if told in str(raised)] == []
+    assert raised.__cause__ is None and raised.__context__ is None
+
+
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes the handler of the
+# check's one line fail; how the check ends is how it ends without it.
+
+
+@pytest.mark.parametrize("site", list(REPLACED_ERROR_SITES))
+def test_version_when_a_log_handler_fails_on_the_line_of_a_replaced_error_should_keep_the_errors_text_out(
+    tmp_path, monkeypatch, capsys, failing_log, site
+):
+    # Arrange: what the check ends as at this site, and the name its line gives that ending
+    typed, ending, detail = REPLACED_ERROR_SITES[site]
+
+    # Act
+    raised = _asked_where_an_error_is_replaced(site, tmp_path, monkeypatch)
+
+    # Assert: logging did report its failure on that ending's line (a report shows the line's arguments,
+    # the ending's name first), with nothing of the path the error named
+    written = reported_log_failures(capsys, f"('{ending}', ")
+    assert [told for told in (PATH_CANARY, str(tmp_path)) if told in written] == []
+    assert (_typed(raised.failure), raised.failure.detail) == (typed, detail)
+
+
+# --- what the run of ffmpeg is given, and what is kept of its output --------------------------------
+
+
+def test_version_when_the_process_holds_variables_should_run_ffmpeg_with_none_of_them(tmp_path, monkeypatch):
+    # Arrange: the stand-in notes the environment it runs with; this process holds a variable of its
+    # own beside the one that names the binary
+    seen = tmp_path / "environment"
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(_stand_in(tmp_path, f"env > '{seen}'\n{WORKING_FFMPEG}")))
+    monkeypatch.setenv(PROCESS_VARIABLE, "of-this-process")
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert: it noted an environment, and neither variable is in it
+    seen_names = {line.partition("=")[0] for line in seen.read_text(encoding="ascii", errors="replace").splitlines()}
+    assert version == "7.1.1"
+    assert seen_names
+    assert not {PROCESS_VARIABLE, FFMPEG_PATH_VARIABLE} & seen_names
+
+
+def test_version_when_ffmpeg_runs_should_run_it_in_an_empty_directory_that_is_gone_afterwards(tmp_path, monkeypatch):
+    # Arrange: the stand-in notes where it runs and what it finds there; this process's own working
+    # directory holds files
+    where, found = tmp_path / "where", tmp_path / "found"
+    listing = f"ls -A > '{found}' || echo 'no listing was made' > '{found}'"
+    script = _stand_in(tmp_path, f"pwd > '{where}'\n{listing}\n{WORKING_FFMPEG}")
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(script))
+    monkeypatch.chdir(tmp_path)
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert
+    working_directory = Path(os.fsdecode(where.read_bytes()).rstrip("\n"))
+    assert version == "7.1.1"
+    assert found.read_bytes() == b""
+    assert working_directory.is_absolute()
+    assert not working_directory.exists()
+
+
+def test_version_when_ffmpeg_writes_exactly_the_output_cap_should_still_read_its_version(tmp_path, monkeypatch):
+    # Arrange: one version statement, padded to the cap and not a byte more
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(_stating_its_version_in(tmp_path, OUTPUT_CAP_BYTES)))
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert
+    assert version == "7.1.1"
+
+
+def test_version_when_ffmpeg_writes_one_byte_more_than_the_output_cap_should_fail_as_ffmpeg_unavailable(
+    tmp_path, monkeypatch
+):
+    # Arrange
+    script = _stating_its_version_in(tmp_path, OUTPUT_CAP_BYTES + 1)
+
+    # Act
+    failure = _unavailable(monkeypatch, script).failure
+
+    # Assert
+    assert _typed(failure) == UNAVAILABLE
+
+
+def test_version_when_ffmpeg_writes_more_than_the_output_cap_to_stderr_should_keep_the_caps_worth_of_it(
+    tmp_path, monkeypatch
+):
+    # Arrange: the stand-in writes far more than the cap to stderr before it states its version
+    endings: list[BoundedResult] = []
+    monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_noting_endings(endings))
+    script = _stand_in(tmp_path, f"head -c {MORE_THAN_A_PIPE_HOLDS_BYTES} /dev/zero >&2\n{WORKING_FFMPEG}")
+    monkeypatch.setenv(FFMPEG_PATH_VARIABLE, str(script))
+
+    # Act
+    version = installed_ffmpeg_version(_time_left())
+
+    # Assert: what it wrote there costs the check nothing, and the cap's worth of it was kept, no more
+    (ending,) = endings
+    assert version == "7.1.1"
+    assert len(ending.stderr_tail) == OUTPUT_CAP_BYTES
 
 
 # --- under the execution's deadline -----------------------------------------------------------------

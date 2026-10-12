@@ -10,6 +10,7 @@ import pytest
 
 import core.hls_key
 from core.hls_key import KEY_URI_PLACEHOLDER, PROC_SELF_FD, hls_key_info, memory_key_supported
+from tests.failing_log import reported_log_failures
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="file modes are POSIX only")
 
@@ -19,6 +20,10 @@ OWNER_ONLY_DIRECTORY = 0o700
 requires_memory_key = pytest.mark.skipif(
     not memory_key_supported(), reason="the key lives in a memfd only where Linux offers one"
 )
+# What the text of an error holds that must never reach the worker's output: the path a removal that
+# failed names, and what a key-info file that could not be written names.
+PATH_CANARY = "/CANARY/path/of/a/key/file"
+SETUP_CANARY = "/CANARY/path/of/a/key-info/file/not/written"
 
 
 class _EncodeFailed(Exception):
@@ -172,3 +177,100 @@ def test_hls_key_info_when_parent_is_relative_should_raise() -> None:
     with pytest.raises(ValueError):
         with hls_key_info(KEY, parent=relative):
             pass
+
+
+# --- a log line whose handler fails ------------------------------------------------------------------
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes every line's
+# handler fail; the key is released as it is without it.
+
+
+def _refuse_every_removal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the removal of a file fail, on an error whose own text names a path."""
+
+    def refuse(path: Path, missing_ok: bool = False) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", PATH_CANARY)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+
+def test_hls_key_info_when_a_log_handler_fails_on_the_line_of_a_key_file_not_removed_should_keep_its_path_out(
+    tmp_path: Path, file_key: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange
+    _refuse_every_removal(monkeypatch)
+
+    # Act
+    with hls_key_info(KEY, parent=tmp_path) as key_info:
+        directory = key_info.path.parent
+
+    # Assert: logging did report its failure on that line, with nothing of the path the removal's error named
+    written = reported_log_failures(capsys, "an HLS key file could not be removed")
+    assert PATH_CANARY not in written
+    assert sorted(path.name for path in directory.iterdir()) == ["key.info", "media.key"]
+
+
+def test_hls_key_info_when_a_log_handler_fails_on_the_line_of_a_key_directory_not_removed_should_keep_its_path_out(
+    tmp_path: Path, file_key: None, capsys: pytest.CaptureFixture[str], failing_log: None
+) -> None:
+    # Arrange / Act: a file the block leaves in the key's directory, so that the directory cannot be
+    # removed, on the operating system's own error, whose text names the directory
+    with hls_key_info(KEY, parent=tmp_path) as key_info:
+        directory = key_info.path.parent
+        (directory / "left-behind").write_bytes(b"x")
+
+    # Assert
+    written = reported_log_failures(capsys, "an HLS key directory could not be removed")
+    assert str(tmp_path) not in written
+    assert [path.name for path in directory.iterdir()] == ["left-behind"]
+
+
+def test_hls_key_info_when_a_log_handler_fails_while_an_unwritten_key_is_released_should_keep_the_errors_text_out(
+    tmp_path: Path, file_key: None, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    failing_log: None,
+) -> None:
+    # Arrange: the key is written, the key-info file is not, on an error whose text names its path, and
+    # then neither file can be removed
+    not_written = OSError(errno.ENOSPC, "No space left on device", SETUP_CANARY)
+    write_private = core.hls_key._write_private
+    written_paths: list[Path] = []
+
+    def write_the_key_only(path: Path, data: bytes) -> None:
+        written_paths.append(path)
+        if len(written_paths) > 1:
+            raise not_written
+        write_private(path, data)
+
+    monkeypatch.setattr(core.hls_key, "_write_private", write_the_key_only)
+    _refuse_every_removal(monkeypatch)
+
+    # Act
+    with pytest.raises(OSError) as raised:
+        with hls_key_info(KEY, parent=tmp_path):
+            pass
+
+    # Assert: nothing of the error the release ran behind, which is the one that is raised, as it is
+    written = reported_log_failures(capsys, "an HLS key file could not be removed")
+    assert [canary for canary in (SETUP_CANARY, PATH_CANARY) if canary in written] == []
+    assert raised.value is not_written
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt(), SystemExit(3)], ids=["a-keyboard-interrupt", "an-exit"])
+def test_hls_key_info_when_the_block_is_interrupted_should_remove_the_key_and_raise_the_interrupt_as_it_is(
+    tmp_path: Path, file_key: None, interrupt: BaseException
+) -> None:
+    # Arrange
+    directory: Path | None = None
+
+    # Act
+    with pytest.raises(type(interrupt)) as raised:
+        with hls_key_info(KEY, parent=tmp_path) as key_info:
+            directory = key_info.path.parent
+            raise interrupt
+
+    # Assert
+    assert raised.value is interrupt
+    assert directory is not None and not directory.exists()
+    assert list(tmp_path.iterdir()) == []

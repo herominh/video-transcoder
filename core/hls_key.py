@@ -10,6 +10,12 @@ directory, so no listing or upload of the output can reach them.
 The muxer re-reads the key-info file at every segment (`periodic_rekey`), which is what makes it use
 each segment's media sequence number as that segment's IV and write the IV into the playlist;
 without it, ffmpeg (7.1 and 8) encrypts every segment with the first segment's IV.
+
+A file or a directory that could not be removed is logged by its errno's symbolic name, and the line
+is written once the `except` block that caught the operating system's error has ended. A log handler
+that fails on a line does not raise: Python's logging prints a report of its own, with every error
+that failure is chained to, which inside the block would be the caught error, whose own text names
+the key's path.
 """
 
 from __future__ import annotations
@@ -84,11 +90,26 @@ def _memory_key(key: bytes) -> int:
 
 
 def _remove(path: Path) -> None:
+    errno_name: str | None = None
     try:
         path.unlink(missing_ok=True)
     except OSError as error:
+        # Only the errno's name is kept past this block: the error's own text names the path.
+        errno_name = _errno_name(error)
+    if errno_name is not None:
         # The job's scratch cleanup still removes it; the path itself is never logged.
-        logger.warning("an HLS key file could not be removed: errno=%s", _errno_name(error))
+        logger.warning("an HLS key file could not be removed: errno=%s", errno_name)
+
+
+def _remove_directory(directory: Path) -> None:
+    errno_name: str | None = None
+    try:
+        directory.rmdir()
+    except OSError as error:
+        # Only the errno's name is kept past this block: the error's own text names the path.
+        errno_name = _errno_name(error)
+    if errno_name is not None:
+        logger.warning("an HLS key directory could not be removed: errno=%s", errno_name)
 
 
 @contextmanager
@@ -98,6 +119,14 @@ def hls_key_info(key: bytes, *, parent: Path) -> Iterator[KeyInfo]:
 
     `parent` must be an existing absolute directory outside every output directory. Raises
     OSError when the key cannot be held or the files cannot be written (nothing is left then).
+
+    An error the key is released behind (one of this function's own before it yields, or the one the
+    caller's block raised) is raised again as it is once the key is released. The release runs after
+    the `except` block that caught that error, so a line it logs is not written while an error of
+    this function's own is being handled. An error the caller's block raised is still being handled
+    by the caller's `with` while the key is released, as under every context manager: a caller that
+    keeps such an error's text out of a failing log handler's report ends its block without raising
+    (core/encode.py does).
     """
     if not isinstance(key, bytes) or len(key) != KEY_BYTES:
         raise ValueError(f"key must be {KEY_BYTES} bytes")
@@ -107,6 +136,7 @@ def hls_key_info(key: bytes, *, parent: Path) -> Iterator[KeyInfo]:
     key_path = directory / KEY_FILE_NAME
     info_path = directory / KEY_INFO_FILE_NAME
     memory_descriptor: int | None = None
+    held_error: BaseException | None = None
     try:
         if memory_key_supported():
             memory_descriptor = _memory_key(key)
@@ -120,12 +150,19 @@ def hls_key_info(key: bytes, *, parent: Path) -> Iterator[KeyInfo]:
             pass_fds = ()
         _write_private(info_path, f"{KEY_URI_PLACEHOLDER}\n{key_location}\n".encode())
         yield KeyInfo(path=info_path, key_path=key_location, pass_fds=pass_fds)
-    finally:
+    except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+        held_error = error
+    # Behind the `except` block, not inside it and not in a `finally`: a line the release logs is then
+    # not written while the error it runs behind is still being handled here.
+    try:
         if memory_descriptor is not None:
             os.close(memory_descriptor)
         _remove(key_path)
         _remove(info_path)
-        try:
-            directory.rmdir()
-        except OSError as error:
-            logger.warning("an HLS key directory could not be removed: errno=%s", _errno_name(error))
+        _remove_directory(directory)
+        if held_error is not None:
+            raise held_error
+    finally:
+        # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+        # holds this frame, and this frame would hold the error (and the key).
+        del held_error
