@@ -5,7 +5,11 @@ laravel/resources/contracts/transcode/v2/, shipped in the RunPod image at the sa
 path); its README.md is the normative rule text this package implements. files.verify_contract_tree()
 is the fail-closed start-up check of that tree. settings.WorkerSettings is the worker's trusted
 configuration (the VH_* variables); messages builds, encodes and seals what the worker sends and
-builds the contexts it validates with. The handler does not call this package yet: D1 wires it in,
-on the RunPod entry path only (the Modal app and the v1 dev server never import it). The live v1
-signer (core/signing.py) is unrelated.
+builds the contexts it validates with. handler.handle() is one start of the worker for one dispatch
+(README section 15.1): dispatch accepts the RunPod job input (inbound: the signature first, then the
+validation, then the key the body names), claim runs the claim exchange over transport, and outbox
+self-checks, signs and carries what the worker sends back. The RunPod entry point
+(wrappers/runpod_handler.py) calls handle() with the job runner (core/job/) for every job; this package
+is on the RunPod entry path only (the Modal app and the v1 dev server never import it). The v1 signer
+(core/signing.py) is unrelated.
 """

@@ -487,6 +487,15 @@ def test_deadline_after_ms_when_ms_is_below_one_should_raise(ms: int) -> None:
         Deadline.after_ms(ms)
 
 
+@pytest.mark.parametrize("expires_at", [10**400, -(10**400)], ids=["far-ahead", "far-back"])
+def test_deadline_when_its_instant_is_an_integer_too_large_to_be_a_float_should_raise_value_error(
+    expires_at: int,
+) -> None:
+    # Arrange / Act / Assert: refused as not finite, like an infinity, and not with the conversion's own OverflowError
+    with pytest.raises(ValueError, match="finite"):
+        Deadline(expires_at=expires_at)
+
+
 MONITOR_INTERVAL_MS = 20
 LONG_MONITOR_INTERVAL_MS = 60_000
 SHORT_RUN_SCRIPT = "sleep 0.3; exit 0"

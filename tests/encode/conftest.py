@@ -15,6 +15,7 @@ import pytest
 
 from core.profile import PILOT_PROFILE, MediaProfile
 from core.source_facts import SourceFacts, parse_ffprobe_output
+from tests.failing_log import failing_log  # noqa: F401 - a fixture of this directory's tests
 from tests.preflight.conftest import (
     FFMPEG_TIMEOUT_S,
     FULL_DURATION_S,

@@ -52,7 +52,8 @@ BUILDERS = (
 )
 
 
-def _settings(worker_key_id: str = "test-wk2hub-k1") -> WorkerSettings:
+def _settings(worker_key_id: str = "test-wk2hub-k1", **changes: str) -> WorkerSettings:
+    """The worker's settings for the catalog's keys; `changes` replace or add variables."""
     return WorkerSettings.from_env(
         {
             "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0-draft",
@@ -66,6 +67,7 @@ def _settings(worker_key_id: str = "test-wk2hub-k1") -> WorkerSettings:
             "VH_STORAGE_DEFAULT_ENDPOINT": "https://storage.test.invalid",
             "VH_STORAGE_DEFAULT_ACCESS_KEY_ID": "test-access-key-id",
             "VH_STORAGE_DEFAULT_SECRET_ACCESS_KEY": "test-secret-access-key",
+            **changes,
         }
     )
 
@@ -217,6 +219,45 @@ def test_builder_output_when_self_checked_as_worker_sender_should_be_accepted(pa
     assert verdict.accepted, verdict
 
 
+# The members a failed result may leave out; no positive fixture of the catalog holds all of them.
+OPTIONAL_FAILED_MEMBERS = ("source", "encoder", "diagnostics", "ext")
+
+
+def _failed_with_every_optional_member() -> dict[str, Any]:
+    """The catalog's P10, which has a `source`, with the encoder, the diagnostics and the ext of the completed P07."""
+    completed = _fixture("fixtures/result-completed/P07-full.json")
+    return _build_failed(
+        _fixture("fixtures/result-failed/P10-source-unavailable-retryable.json"),
+        encoder=Encoder(**completed["encoder"]),
+        diagnostics=_diagnostics(completed),
+        ext=completed["ext"],
+    )
+
+
+def test_result_failed_when_every_optional_member_is_given_should_write_the_members_in_the_schemas_order():
+    # Arrange
+    properties = files.read_json("schemas/transcode-result-failed.schema.json")["properties"]
+
+    # Act
+    built = _failed_with_every_optional_member()
+
+    # Assert
+    assert set(OPTIONAL_FAILED_MEMBERS) <= set(built)
+    assert list(built) == [name for name in properties if name in built]
+    assert list(built["error"]) == list(properties["error"]["properties"])
+
+
+def test_result_failed_when_every_optional_member_is_given_should_pass_the_self_check():
+    # Arrange
+    built = _failed_with_every_optional_member()
+
+    # Act
+    verdict = pipeline.validate(encode(built), _sender_context(built, "push"))
+
+    # Assert
+    assert verdict.accepted, verdict
+
+
 def test_self_check_when_the_message_names_another_key_than_the_workers_should_refuse_it():
     # Arrange: P05 is signed under test-wk2hub-k2; this worker signs with test-wk2hub-k1.
     built = _build_progress(_fixture("fixtures/progress/P05-counters-and-unknown-ext-member.json"))
@@ -232,6 +273,28 @@ def test_self_check_when_the_message_names_another_key_than_the_workers_should_r
     verdict = pipeline.validate(encode(built), context)
 
     # Assert
+    assert (verdict.layer, verdict.reason, verdict.instance_path) == (Layer.SEMANTIC, ReasonCode.UNKNOWN_KEY_ID, "/key_id")
+
+
+def test_self_check_when_the_message_names_a_hub_to_worker_key_should_refuse_it():
+    # Arrange: the catalog's N41, a progress message under a key the Hub signs with. This worker holds that
+    # key, to verify what it receives; its sender context knows only the key it signs with.
+    path = "fixtures/progress/N41-hub-to-worker-key-on-worker-message.json"
+    message = _fixture(path)
+    settings = _settings()
+    assert message["key_id"] in settings.hub_to_worker_key_ids
+    context = worker_sender_context(
+        "transcode.progress",
+        ExecutionIdentity(**message["identity"]),
+        settings=settings,
+        now=NOW,
+        last_event_seq=LAST_EVENT_SEQ,
+    )
+
+    # Act
+    verdict = pipeline.validate(files.read_bytes(path), context)
+
+    # Assert: the verdict the catalog pins for the Hub's side of the same message.
     assert (verdict.layer, verdict.reason, verdict.instance_path) == (Layer.SEMANTIC, ReasonCode.UNKNOWN_KEY_ID, "/key_id")
 
 
@@ -338,13 +401,25 @@ def test_encode_when_a_string_is_not_ascii_should_escape_it():
         {"message_kind": "transcode.unknown"},
         {"identity": {}},
         {"message_kind": "transcode.progress", "stage_progress_pct": 10.0},
+        _fixture("fixtures/request/P01-encrypted-three-renditions.json"),
+        _fixture("fixtures/hub-error/P12-schema-violation-with-pointer.json"),
     ],
-    ids=["a-manifest", "an-unknown-kind", "no-kind", "a-float"],
+    ids=["a-manifest", "an-unknown-kind", "no-kind", "a-float", "a-request-it-received", "a-hub-error-it-received"],
 )
 def test_encode_when_the_mapping_is_not_an_encodable_message_should_refuse(message):
     # Act / Assert
     with pytest.raises(ValueError):
         encode(message)
+
+
+def test_encode_when_given_a_claim_grant_should_refuse_without_showing_its_media_key():
+    # Arrange: the one kind that carries key material; the worker receives it and never writes it again.
+    grant = _fixture("fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json")
+
+    # Act / Assert
+    with pytest.raises(ValueError) as raised:
+        encode(grant)
+    assert grant["media_key"]["key_hex"] not in str(raised.value)
 
 
 @pytest.mark.parametrize(
@@ -368,6 +443,15 @@ def test_timestamp_when_given_a_naive_datetime_should_refuse():
     # Act / Assert
     with pytest.raises(ValueError):
         timestamp(datetime(2030, 1, 1))
+
+
+def test_timestamp_when_the_moment_is_before_year_1_in_utc_should_refuse():
+    # Arrange: the first midnight of year 1, one hour east of UTC: an hour before any UTC instant a datetime holds.
+    moment = datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1)))
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        timestamp(moment)
 
 
 # --- wiring bugs are refused -------------------------------------------------------------------
@@ -407,6 +491,18 @@ def test_dispatch_identity_when_a_field_breaks_its_definition_should_refuse(chan
         DispatchIdentity(**{**DISPATCH_FIELDS, **changes})
 
 
+def test_dispatch_identity_when_a_member_is_refused_should_name_the_member_without_showing_its_value():
+    # Arrange
+    canary = "CANARY"
+    not_a_uuid = f"{canary}-not-a-uuid-0123456789"
+
+    # Act / Assert
+    with pytest.raises(ValueError) as raised:
+        DispatchIdentity(**{**DISPATCH_FIELDS, "org_uuid": not_a_uuid})
+    assert "/org_uuid" in str(raised.value)
+    assert canary not in str(raised.value)
+
+
 def test_execution_identity_when_made_of_a_dispatch_and_its_grant_should_equal_the_full_identity():
     # Act
     identity = ExecutionIdentity.of(
@@ -417,6 +513,19 @@ def test_execution_identity_when_made_of_a_dispatch_and_its_grant_should_equal_t
 
     # Assert
     assert identity.to_dict() == IDENTITY
+
+
+def test_execution_identity_when_the_dispatch_is_a_dict_should_refuse():
+    # Arrange: the dispatch's members as a dict, not the typed DispatchIdentity.
+    dispatch = dict(DISPATCH_FIELDS)
+
+    # Act / Assert
+    with pytest.raises(TypeError, match="dispatch"):
+        ExecutionIdentity.of(
+            dispatch,
+            execution_id=IDENTITY["execution_id"],
+            execution_fence=IDENTITY["execution_fence"],
+        )
 
 
 def test_encryption_when_aes_128_lacks_its_media_key_id_should_refuse():
@@ -459,6 +568,15 @@ def test_progress_when_the_event_sequence_is_zero_should_refuse_naming_it():
     # Act / Assert
     with pytest.raises(ValueError, match="/event_seq"):
         _build_progress({**fixture, "event_seq": 0})
+
+
+def test_progress_when_the_event_sequence_is_a_float_should_refuse():
+    # Arrange: the fixture's own sequence number as a float, which a JSON Schema integer admits.
+    fixture = _fixture("fixtures/progress/P04-downloading.json")
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="float"):
+        _build_progress({**fixture, "event_seq": float(fixture["event_seq"])})
 
 
 @pytest.mark.parametrize(
@@ -526,6 +644,45 @@ def test_result_builder_when_the_diagnostics_are_a_list_or_a_tuple_should_build_
     # Assert
     assert from_list["diagnostics"] == DIAGNOSTIC_ENTRIES
     assert encode(from_tuple) == encode(from_list)
+
+
+NOT_A_DIAGNOSTIC = "each diagnostic must be a Diagnostic"
+
+
+@pytest.mark.parametrize(("build", "path"), RESULT_BUILDS, ids=RESULT_IDS)
+def test_result_builder_when_the_diagnostics_are_dicts_should_refuse(build, path):
+    # Arrange: the entries as the message holds them, not the typed Diagnostic the builder takes.
+    diagnostics = [dict(entry) for entry in DIAGNOSTIC_ENTRIES]
+
+    # Act / Assert
+    with pytest.raises(TypeError, match=NOT_A_DIAGNOSTIC):
+        build(_fixture(path), diagnostics=diagnostics)
+
+
+# Every builder that takes `ext`, each with a fixture for its other values.
+EXT_BUILDS = [(_build_progress, "fixtures/progress/P05-counters-and-unknown-ext-member.json"), *RESULT_BUILDS]
+EXT_IDS = ["progress", *RESULT_IDS]
+# What dict() turns into a valid `ext`: only the type handed over is wrong.
+EXT_AS_PAIRS = [("x_attempt", 1)]
+
+
+@pytest.mark.parametrize(("build", "path"), EXT_BUILDS, ids=EXT_IDS)
+def test_builder_when_ext_is_not_a_mapping_should_refuse(build, path):
+    # Arrange
+    fixture = {**_fixture(path), "ext": EXT_AS_PAIRS}
+
+    # Act / Assert
+    with pytest.raises(TypeError, match=r"\bext\b"):
+        build(fixture)
+
+
+def test_result_failed_when_the_failure_is_a_dict_should_refuse():
+    # Arrange: the error object as the message holds it, not the typed Failure the builder takes.
+    fixture = _fixture("fixtures/result-failed/P10-source-unavailable-retryable.json")
+
+    # Act / Assert
+    with pytest.raises(TypeError, match="failure"):
+        _build_failed(fixture, failure=fixture["error"])
 
 
 # --- the contexts ------------------------------------------------------------------------------
@@ -633,10 +790,73 @@ def test_context_factory_when_a_required_value_is_missing_should_raise_context_i
         (lambda: worker_sender_context("transcode.request", DispatchIdentity(**DISPATCH_FIELDS), settings=_settings(), now=NOW), ValueError),
         (lambda: receiver_context("transcode.progress", settings=_settings(), now=NOW), ValueError),
         (lambda: worker_sender_context("transcode.claim", DispatchIdentity(**DISPATCH_FIELDS), settings=None, now=NOW), TypeError),
+        (
+            lambda: worker_sender_context(
+                "transcode.result.completed",
+                ExecutionIdentity(**IDENTITY),
+                settings=_settings(),
+                now=NOW,
+                source_id=HUB_PUSH_EXPECT["source_id"],
+                output_location_id=HUB_PUSH_EXPECT["output_location_id"],
+                profile=HUB_PUSH_EXPECT["profile"],
+            ),
+            TypeError,
+        ),
     ],
-    ids=["claim-with-an-execution-identity", "a-kind-the-worker-does-not-send", "a-kind-the-worker-does-not-receive", "no-settings"],
+    ids=[
+        "claim-with-an-execution-identity",
+        "a-kind-the-worker-does-not-send",
+        "a-kind-the-worker-does-not-receive",
+        "no-settings",
+        "a-profile-as-a-dict",
+    ],
 )
 def test_context_factory_when_called_with_the_wrong_kind_or_type_should_refuse(build, error):
     # Act / Assert
     with pytest.raises(error):
         build()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda settings: worker_sender_context(
+            "transcode.claim", DispatchIdentity(**DISPATCH_FIELDS), settings=settings, now=NOW
+        ),
+        lambda settings: receiver_context("transcode.request", settings=settings, now=NOW),
+    ],
+    ids=["worker-sender", "receiver"],
+)
+def test_context_factory_when_the_settings_hold_a_clock_skew_should_take_it(build):
+    # Arrange: zero, which is not the contract's default and which no fallback on a falsy value keeps.
+    settings = _settings(VH_CLOCK_SKEW_S="0")
+
+    # Act
+    context = build(settings)
+
+    # Assert
+    assert context.clock_skew_s == settings.clock_skew_s == 0
+
+
+# A contract timestamp as text, where a builder and a context factory take a datetime.
+MOMENT_AS_TEXT = "2030-01-01T00:00:00.000Z"
+
+
+@pytest.mark.parametrize(
+    ("call", "parameter"),
+    [
+        (lambda: messages.claim(**_claim_values(sent_at=MOMENT_AS_TEXT)), "sent_at"),
+        (
+            lambda: worker_sender_context(
+                "transcode.claim", DispatchIdentity(**DISPATCH_FIELDS), settings=_settings(), now=MOMENT_AS_TEXT
+            ),
+            "now",
+        ),
+        (lambda: receiver_context("transcode.request", settings=_settings(), now=MOMENT_AS_TEXT), "now"),
+    ],
+    ids=["a-builders-sent-at", "the-sender-contexts-now", "the-receiver-contexts-now"],
+)
+def test_call_when_a_moment_is_a_string_should_refuse_naming_the_callers_own_parameter(call, parameter):
+    # Act / Assert
+    with pytest.raises(TypeError, match=rf"\b{parameter}\b"):
+        call()
