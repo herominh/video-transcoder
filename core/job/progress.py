@@ -15,6 +15,13 @@ nothing more built or posted, as soon as either holds:
 So progress costs one execution at most PROGRESS_ALLOWANCE_S plus one post's PROGRESS_TIMEOUT_S, however
 slowly the Hub answers. Each report still takes the next `event_seq` (1, 2, 3, ...), sent or not: the
 Hub refuses a sequence number it has already seen, and whether a post arrived is not always known.
+
+No line of this module is written while an error is being handled: the line of a dropped report is
+written after the `except` block that caught what the report failed on, and the line that says
+reporting stopped once the post has ended, behind the block that caught what the post raised, which
+then goes on as it is. A log handler that fails on a line does not raise: Python's logging prints a
+report of its own, with every error that failure is chained to, which while an error is being handled
+would be that error with its own text.
 """
 
 from __future__ import annotations
@@ -51,10 +58,15 @@ def _best_effort(report: Callable[_Arguments, None]) -> Callable[_Arguments, Non
 
     @functools.wraps(report)
     def guarded(*arguments: _Arguments.args, **named_arguments: _Arguments.kwargs) -> None:
+        error_class: str | None = None
         try:
             report(*arguments, **named_arguments)
         except Exception as error:  # noqa: BLE001 - progress never changes an execution's outcome
-            logger.warning("a progress report was dropped: %s", type(error).__name__)
+            # Only the class name is kept past this block: what a report fails on can say anything.
+            error_class = type(error).__name__
+        if error_class is not None:
+            # Logged here, after the `except` block has ended (see the module's last paragraph).
+            logger.warning("a progress report was dropped: %s", error_class)
 
     return guarded
 
@@ -132,14 +144,28 @@ class ProgressReporter:
         if self._gave_up:
             return
         delivered = False
+        post_error: BaseException | None = None
         try:
             delivered = self._post(self._stage, percent, previous_event_seq)
-        finally:
-            self._note_delivery(delivered)
+        except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+            post_error = error
+        # Behind the `except` block, and in no `finally`: the line this may log is then not written
+        # while the post's error is on its way (see the module's last paragraph). A post that raised,
+        # on an interrupt too, counts as a report that was not delivered.
+        self._note_delivery(delivered)
+        if post_error is not None:
+            try:
+                raise post_error
+            finally:
+                # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+                # holds this frame, and this frame would hold the error.
+                del post_error
 
     def _note_delivery(self, delivered: bool) -> None:
         """Count the reports in a row that did not arrive, and give up for good once that count or the
-        time the posts took reaches its limit; the one log line says which."""
+        time the posts took reaches its limit; the one log line says which.
+
+        Called once the post has ended and what it raised, if anything, is no longer being handled."""
         self._undelivered_in_a_row = 0 if delivered else self._undelivered_in_a_row + 1
         if self._undelivered_in_a_row >= MAX_CONSECUTIVE_UNDELIVERED:
             self._gave_up = True

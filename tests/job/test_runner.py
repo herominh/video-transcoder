@@ -3573,3 +3573,95 @@ def test_progress_when_the_total_is_unknown_should_report_no_step_and_drop_nothi
     # Assert: only the stage's opening was posted, and no report failed on the way
     assert [json.loads(call.body)["stage_progress_pct"] for call in harness.transport.calls] == [0]
     assert [record.getMessage() for record in caplog.records if "dropped" in record.getMessage()] == []
+
+
+# The reporter's own lines under a log handler that fails (see "a log line whose handler fails" above):
+# the error a post ended on must not be what that handler's failure is chained to, neither on the line of
+# the report it cost nor on the line that says reporting stopped, which is settled as that post ends.
+
+
+def test_progress_when_a_log_handler_fails_on_the_line_of_a_dropped_report_should_keep_the_errors_text_out(
+    harness, capsys, failing_log
+):
+    # Arrange: the first post ends on an error of the transport, in words no output may show; the Hub
+    # takes every later report, so reporting never stops and the reporter writes that one line only
+    harness.transport.route(CALLBACK_URL, RuntimeError(CANARY), then=DELIVERED)
+
+    # Act
+    sealed = harness.run()
+
+    # Assert: logging did report its failure on that line, with nothing of the error's text
+    written = reported_log_failures(capsys, "a progress report was dropped")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    posted = harness.progress
+    assert CANARY not in written
+    assert "progress reporting stopped" not in written
+    assert result["message_kind"] == COMPLETED_KIND
+    assert (posted[-1]["stage"], posted[-1]["stage_progress_pct"]) == ("uploading", 100)
+
+
+def test_progress_when_a_log_handler_fails_on_the_line_of_three_reports_lost_in_a_row_should_keep_the_errors_text_out(
+    harness, capsys, failing_log
+):
+    # Arrange: every post ends on an error of the transport, in words no output may show: the third
+    # lost in a row stops the reporting as it ends
+    harness.transport.route(CALLBACK_URL, then=RuntimeError(CANARY))
+
+    # Act
+    sealed = harness.run()
+
+    # Assert: logging did report its failure on the line that says so, with nothing of the error's text
+    written = reported_log_failures(capsys, "reports in a row were not delivered")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert CANARY not in written
+    assert result["message_kind"] == COMPLETED_KIND
+    assert [message["event_seq"] for message in harness.progress] == [1, 2, 3]
+
+
+def test_progress_when_a_log_handler_fails_on_the_line_of_a_spent_allowance_should_keep_the_errors_text_out(
+    tmp_path, monkeypatch, capsys, failing_log
+):
+    # Arrange: every other post ends on an error of the transport, in words no output may show, the
+    # others are taken (never three lost in a row), and each takes 2.9 s either way: the eleventh, one
+    # that ends on that error, spends the allowance
+    harness = Harness(tmp_path, monkeypatch, seconds_per_post=SLOW_POST_S)
+    harness.transport.route(CALLBACK_URL, *(RuntimeError(CANARY), DELIVERED) * 10, then=DELIVERED)
+
+    # Act
+    sealed = harness.run()
+
+    # Assert: logging did report its failure on the line that says so, with nothing of the error's text
+    written = reported_log_failures(capsys, "its posts took")
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert CANARY not in written
+    assert "reports in a row were not delivered" not in written
+    assert result["message_kind"] == COMPLETED_KIND
+    assert len(harness.progress) == POSTS_THE_ALLOWANCE_HOLDS_WHEN_SLOW
+
+
+def test_progress_when_a_log_handler_fails_on_the_line_of_a_stop_at_an_interrupted_post_should_keep_its_text_out(
+    harness, monkeypatch, capsys, failing_log
+):
+    # Arrange: two reports got no answer; the third post is interrupted, in words no output may show
+    harness.transport.route(CALLBACK_URL, then=NO_ANSWER)
+    reporter = ProgressReporter(harness.claimed, harness.runtime)
+    reporter.stage_started("probing")
+    reporter.stage_started("downloading")
+    interrupt = KeyboardInterrupt(CANARY)
+
+    # Act: the interrupted post, then one more report, on a transport that takes posts again
+    with monkeypatch.context() as interrupted:
+        interrupted.setattr(harness.transport, "post", _raising(interrupt))
+        with pytest.raises(KeyboardInterrupt) as raised:
+            reporter.stage_started("transcoding")
+    ids_drawn_by_then = harness.ids_drawn
+    reporter.stage_started("finalizing")
+
+    # Assert: the very same interrupt went on, its report counted as the third lost in a row (reporting
+    # stopped for good: nothing more is built, and the transport took the two posts before it and none
+    # after), and the line that says so quotes nothing of it
+    written = reported_log_failures(capsys, "reports in a row were not delivered")
+    assert raised.value is interrupt
+    assert CANARY not in written
+    assert (ids_drawn_by_then, harness.ids_drawn) == (UNDELIVERED_BEFORE_GIVING_UP, UNDELIVERED_BEFORE_GIVING_UP)
+    assert len(harness.transport.calls) == UNDELIVERED_BEFORE_GIVING_UP - 1

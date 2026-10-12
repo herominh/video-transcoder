@@ -31,7 +31,7 @@ from core.failure import Failure, WorkerFailure
 from core.job import ffmpeg_version as ffmpeg_version_module
 from core.job.ffmpeg_version import forget_installed_ffmpeg_version, installed_ffmpeg_version
 from core.protocol import schema
-from tests.job.conftest import ScriptedDeadline
+from tests.job.conftest import ScriptedDeadline, reported_log_failures
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="the version is asked under POSIX process groups")
 
@@ -492,6 +492,95 @@ def test_version_when_it_cannot_be_determined_should_log_the_ending_once_by_its_
     assert f"({ending})" in logged.getMessage()
     assert PATH_CANARY not in caplog.text
     assert str(tmp_path) not in caplog.text
+
+
+# --- an error that a typed failure replaces ---------------------------------------------------------
+
+# The places where the module catches an error and ends the check with a typed failure in its place:
+# no working directory can be made; the start is refused for good, by the system itself (a file that is
+# no program) or as a stand-in has it; the start meets a passing shortage; a reader thread cannot start.
+NO_WORKING_DIRECTORY = "no-working-directory"
+NOT_A_PROGRAM = "not-a-program"
+REFUSED_FOR_GOOD = "refused-for-good"
+A_PASSING_SHORTAGE = "a-passing-shortage"
+NO_READER_THREAD = "no-reader-thread"
+# What each ends as: the typed failure, the name its log line gives the ending, and the failure's detail.
+REPLACED_ERROR_SITES = {
+    NO_WORKING_DIRECTORY: (
+        START_FAILED,
+        "no_working_directory",
+        "the empty working directory ffmpeg states its version in could not be made: ENOENT",
+    ),
+    NOT_A_PROGRAM: (UNAVAILABLE, "not_startable", "ffmpeg could not be started"),
+    REFUSED_FOR_GOOD: (UNAVAILABLE, "not_startable", "ffmpeg could not be started"),
+    A_PASSING_SHORTAGE: (START_FAILED, "start_failed", "ffmpeg could not be started to state its version: EAGAIN"),
+    NO_READER_THREAD: (START_FAILED, "start_failed", "ffmpeg could not be started to state its version: unknown"),
+}
+
+
+def _asked_where_an_error_is_replaced(site: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> WorkerFailure:
+    """Ask for the version where `site` fails, each time on an error whose own text names a path
+    (PATH_CANARY; for the file that is no program, the test's own directory), and return what the ask raised."""
+    ffmpeg = _stand_in(tmp_path, WORKING_FFMPEG)
+    if site == NO_WORKING_DIRECTORY:
+        # What mkdtemp raises when the descriptors or the disk ran out.
+        no_directory = FileNotFoundError(errno.ENOENT, f"No usable temporary directory found in {PATH_CANARY}")
+        monkeypatch.setattr(ffmpeg_version_module.tempfile, "TemporaryDirectory", _start_that(no_directory))
+    if site == NOT_A_PROGRAM:
+        # No stand-in fails here: an executable file with no interpreter line that is no binary.
+        ffmpeg = tmp_path / "broken-ffmpeg"
+        ffmpeg.write_bytes(b"\x00\x01\x02 not a program")
+        ffmpeg.chmod(EXECUTABLE)
+    if site == REFUSED_FOR_GOOD:
+        refused = PermissionError(errno.EACCES, "Permission denied", PATH_CANARY)
+        monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_that(refused))
+    if site == A_PASSING_SHORTAGE:
+        shortage = OSError(errno.EAGAIN, f"cannot start {PATH_CANARY}")
+        monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_that(shortage))
+    if site == NO_READER_THREAD:
+        no_thread = RuntimeError(f"can't start new thread for {PATH_CANARY}")
+        monkeypatch.setattr(ffmpeg_version_module, "run_bounded", _start_that(no_thread))
+    return _unavailable(monkeypatch, ffmpeg)
+
+
+@pytest.mark.parametrize("site", list(REPLACED_ERROR_SITES))
+def test_version_when_an_error_is_replaced_by_a_typed_failure_should_carry_nothing_of_that_error(
+    tmp_path, monkeypatch, site
+):
+    # Arrange: what the check ends as at this site
+    typed, _, detail = REPLACED_ERROR_SITES[site]
+
+    # Act
+    raised = _asked_where_an_error_is_replaced(site, tmp_path, monkeypatch)
+
+    # Assert: the typed failure alone. The error it replaces, whose text names a path, is neither its
+    # cause nor its context
+    assert (_typed(raised.failure), raised.failure.detail) == (typed, detail)
+    assert [told for told in (PATH_CANARY, str(tmp_path)) if told in str(raised)] == []
+    assert raised.__cause__ is None and raised.__context__ is None
+
+
+# A log handler that fails on a line does not raise: Python's logging prints a report of its own to
+# standard error, with every error that failure is chained to. A line written while an error is still
+# being handled would put that error's own text into the report. `failing_log` makes the handler of the
+# check's one line fail; how the check ends is how it ends without it.
+
+
+@pytest.mark.parametrize("site", list(REPLACED_ERROR_SITES))
+def test_version_when_a_log_handler_fails_on_the_line_of_a_replaced_error_should_keep_the_errors_text_out(
+    tmp_path, monkeypatch, capsys, failing_log, site
+):
+    # Arrange: what the check ends as at this site, and the name its line gives that ending
+    typed, ending, detail = REPLACED_ERROR_SITES[site]
+
+    # Act
+    raised = _asked_where_an_error_is_replaced(site, tmp_path, monkeypatch)
+
+    # Assert: logging did report its failure on that ending's line (a report shows the line's arguments,
+    # the ending's name first), with nothing of the path the error named
+    written = reported_log_failures(capsys, f"('{ending}', ")
+    assert [told for told in (PATH_CANARY, str(tmp_path)) if told in written] == []
+    assert (_typed(raised.failure), raised.failure.detail) == (typed, detail)
 
 
 # --- what the run of ffmpeg is given, and what is kept of its output --------------------------------
