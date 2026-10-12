@@ -20,6 +20,13 @@ alone: the file must be a regular file within the limit and a whole JPEG whose f
 exactly the planned size and which carries no segment before its scan but its JFIF header, its tables
 and its frame, so a later ffmpeg that wrote metadata there would be refused. The walk stops at the
 scan: nothing between the scan data and the end marker is checked, where ffmpeg writes nothing today.
+
+An error of the operating system is named by its class and its errno's symbolic name, never by its
+own text, which names a path. The line that tells of one is written once the `except` block that
+caught it has ended, and a thumbnail an attempt left behind its own error is removed once that
+error's block has ended, the error then raised again as it is. A log handler that fails on a line
+does not raise: Python's logging prints a report of its own, with every error that failure is chained
+to, which inside the block would be the caught error with its own text.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from core.encode import (
     MS_PER_SECOND,
     SHELL_CANNOT_RUN_EXIT_CODES,
     ArtifactFile,
+    _CaughtError,
     _deadline_exceeded,
     _disk_full,
     _errno_name,
@@ -250,8 +258,11 @@ def _too_large(max_bytes: int) -> str:
     return f"the thumbnail exceeds {max_bytes} bytes"
 
 
-def _unreadable(error: OSError) -> str:
-    logger.warning("the thumbnail could not be read: %s errno=%s", type(error).__name__, _errno_name(error))
+def _unreadable(caught: _CaughtError) -> str:
+    """Why a thumbnail the operating system would not let us read is unavailable, and the one line
+    that tells of it. Called once the `except` block that caught the error has ended, with what was
+    kept of it (see the module's last paragraph)."""
+    logger.warning("the thumbnail could not be read: %s errno=%s", caught.class_name, caught.errno_name)
     return UNREADABLE
 
 
@@ -264,13 +275,16 @@ class _SizeMonitor:
         self.problem: str | None = None
 
     def __call__(self) -> bool:
+        caught: _CaughtError | None = None
         try:
             size = os.lstat(self._path).st_size
         except FileNotFoundError:
             # Nothing written yet.
             return True
         except OSError as error:
-            self.problem = _unreadable(error)
+            caught = _CaughtError.of(error)
+        if caught is not None:
+            self.problem = _unreadable(caught)
             return False
         if size > self._max_bytes:
             self.problem = _too_large(self._max_bytes)
@@ -374,13 +388,18 @@ def _run_ffmpeg(
             )
     except OSError as error:
         # Also where ffmpeg's output could not be fully read; the group is dead by then.
-        logger.warning(
-            "the thumbnail encoder could not be started: %s errno=%s", type(error).__name__, _errno_name(error)
-        )
-        return None
+        caught: _CaughtError | None = _CaughtError.of(error)
     except RuntimeError:
+        # A reader thread did not start: its line says so, and needs nothing of the error.
+        caught = None
+    # Logged here, once the `except` block has ended (see the module's last paragraph).
+    if caught is None:
         logger.warning("the thumbnail encoder could not be started: a reader thread did not start")
-        return None
+    else:
+        logger.warning(
+            "the thumbnail encoder could not be started: %s errno=%s", caught.class_name, caught.errno_name
+        )
+    return None
 
 
 def _ending_problem(result: BoundedResult, monitor: _SizeMonitor, wall_ms: int) -> str | None:
@@ -443,12 +462,15 @@ def _read_at_most(descriptor: int, limit: int) -> bytes:
 def _read_thumbnail(target: Path, max_bytes: int) -> bytes | str:
     """The bytes of the regular file at `target`, read never through a link; or why they cannot be
     the thumbnail."""
+    caught: _CaughtError | None = None
     try:
         info = os.lstat(target)
     except FileNotFoundError:
         return NO_IMAGE
     except OSError as error:
-        return _unreadable(error)
+        caught = _CaughtError.of(error)
+    if caught is not None:
+        return _unreadable(caught)
     if not stat.S_ISREG(info.st_mode):
         return NOT_A_FILE
     if info.st_size > max_bytes:
@@ -463,7 +485,9 @@ def _read_thumbnail(target: Path, max_bytes: int) -> bytes | str:
         finally:
             os.close(descriptor)
     except OSError as error:
-        return _unreadable(error)
+        caught = _CaughtError.of(error)
+    if caught is not None:
+        return _unreadable(caught)
     if not data:
         return NO_IMAGE
     if len(data) > max_bytes:
@@ -529,6 +553,7 @@ def _attempt(
 
 def _remove_thumbnail(target: Path) -> None:
     """Best effort: the job's scratch cleanup removes whatever is left. Paths are never logged."""
+    errno_name: str | None = None
     try:
         if stat.S_ISDIR(os.lstat(target).st_mode):
             shutil.rmtree(target)
@@ -537,7 +562,10 @@ def _remove_thumbnail(target: Path) -> None:
     except FileNotFoundError:
         return
     except OSError as error:
-        logger.warning("a failed thumbnail could not be removed: errno=%s", _errno_name(error))
+        # Only the errno's name is kept past this block: the error's own text names the path.
+        errno_name = _errno_name(error)
+    if errno_name is not None:
+        logger.warning("a failed thumbnail could not be removed: errno=%s", errno_name)
 
 
 def _validate_arguments(
@@ -593,6 +621,7 @@ def make_thumbnail(
     if deadline.expired():
         raise _deadline_exceeded()
     target = output_root / THUMBNAIL_PATH
+    attempt_error: BaseException | None = None
     try:
         outcome = _attempt(
             source,
@@ -603,9 +632,18 @@ def make_thumbnail(
             deadline=deadline,
             ffmpeg_path=ffmpeg_path,
         )
-    except BaseException:
-        _remove_thumbnail(target)
-        raise
+    except BaseException as error:  # noqa: BLE001 - kept, and raised again below as it is
+        attempt_error = error
+    if attempt_error is not None:
+        # Behind the `except` block, not inside it: a line the removal logs is then not written while
+        # the attempt's error is still being handled (see the module's last paragraph).
+        try:
+            _remove_thumbnail(target)
+            raise attempt_error
+        finally:
+            # Let go of, as Python lets go of a caught error where its block ends: the error's stack
+            # holds this frame, and this frame would hold the error.
+            del attempt_error
     if isinstance(outcome, ArtifactFile):
         return ThumbnailResult(artifact=outcome, diagnostic=None)
     _remove_thumbnail(target)

@@ -12,6 +12,13 @@ existing file, and a failed write leaves nothing behind.
 
 `reserve_package` sets aside what the master, the thumbnail and the manifest may take, so the
 renditions can never use their room.
+
+An error of the operating system is named by its class and its errno's symbolic name, never by its
+own text, which names a path. The line that tells of one is written, and the typed failure that
+replaces one is raised, once the `except` block that caught it has ended, so the failure carries the
+error neither as its cause nor as its context. A log handler that fails on a line does not raise:
+Python's logging prints a report of its own, with every error that failure is chained to, which
+inside the block would be the caught error with its own text.
 """
 
 from __future__ import annotations
@@ -237,24 +244,48 @@ def master_playlist_bytes(renditions: Sequence[RenditionOutput]) -> bytes:
     return data
 
 
-def _write_failure(error: OSError) -> WorkerFailure:
-    logger.warning("a package file could not be written: %s errno=%s", type(error).__name__, _errno_name(error))
-    if error.errno in DISK_FULL_ERRNOS:
+@dataclass(frozen=True, slots=True)
+class _FailedWrite:
+    """What is kept of an error of the operating system that failed a write of a package file, once
+    the `except` block that caught it has ended: its class's name, its errno's symbolic name and whether
+    it says that the disk is full. The error itself is not kept: its own text may name a path."""
+
+    error_class: str
+    errno_name: str
+    disk_full: bool
+
+    @classmethod
+    def of(cls, error: OSError) -> _FailedWrite:
+        return cls(type(error).__name__, _errno_name(error), error.errno in DISK_FULL_ERRNOS)
+
+
+def _write_failure(failed: _FailedWrite) -> WorkerFailure:
+    """The typed failure of a write of a package file that failed, and the one line that tells of it.
+
+    Called once the `except` block that caught the operating system's error has ended, with what was
+    kept of that error: the error is then neither what a failing log handler's report is chained to
+    nor the failure's cause or context."""
+    logger.warning("a package file could not be written: %s errno=%s", failed.error_class, failed.errno_name)
+    if failed.disk_full:
         return _scratch_full()
     return _failure(
         "output_write_failed", "package_write_failed",
-        f"the package file could not be written: {_errno_name(error)}", retryable=True,
+        f"the package file could not be written: {failed.errno_name}", retryable=True,
     )
 
 
 def _remove_partial(path: Path) -> None:
     """Best effort: the job's scratch cleanup removes whatever is left. Paths are never logged."""
+    errno_name: str | None = None
     try:
         os.unlink(path)
     except FileNotFoundError:
         return
     except OSError as error:
-        logger.warning("a partial package file could not be removed: errno=%s", _errno_name(error))
+        # Only the errno's name is kept past this block: the error's own text names the path.
+        errno_name = _errno_name(error)
+    if errno_name is not None:
+        logger.warning("a partial package file could not be removed: errno=%s", errno_name)
 
 
 def _write_all(descriptor: int, data: bytes) -> None:
@@ -270,21 +301,27 @@ def _write_all(descriptor: int, data: bytes) -> None:
 def _write_new_file(path: Path, data: bytes) -> None:
     """Create `path` with exactly `data`, never through a link and never over an existing file.
 
-    Raises the typed write failure; a file it created is removed first.
+    Raises the typed write failure; a file it created is removed first. Both happen once the handler
+    that caught the operating system's error has ended (see the module's last paragraph).
     """
+    failed: _FailedWrite | None = None
     try:
         descriptor = os.open(path, NEW_FILE_FLAGS, NEW_FILE_MODE)
     except OSError as error:
+        failed = _FailedWrite.of(error)
+    if failed is not None:
         # Nothing of ours to remove: the file was not created, or it was not created by this call.
-        raise _write_failure(error) from None
+        raise _write_failure(failed)
     try:
         try:
             _write_all(descriptor, data)
         finally:
             os.close(descriptor)
     except OSError as error:
+        failed = _FailedWrite.of(error)
+    if failed is not None:
         _remove_partial(path)
-        raise _write_failure(error) from None
+        raise _write_failure(failed)
 
 
 def _require_new_file(output_root: object, name: str) -> Path:

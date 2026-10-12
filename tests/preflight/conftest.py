@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.failing_log import failing_log  # noqa: F401 - a fixture of this directory's tests
+
 FFMPEG_TIMEOUT_S = 60
 FULL_DURATION_S = 2
 SUBSECOND_DURATION_S = 0.4

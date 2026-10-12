@@ -6,7 +6,10 @@ dispatch, this runtime and this encryption. Every other ending is Unclaimed: `re
 `unreachable` (no answer from the Hub) or `invalid_answer` (anything else, never retried). A gateway's
 502, 503 or 504 that carries no accepted `hub.error` is no answer from the Hub. It claims again only after
 a transport failure, such a gateway failure or a retryable `hub.error`, never at or after the dispatch's
-`claim.expires_at`, and never for longer than its patience. Nothing of a claim or of an answer is logged.
+`claim.expires_at`, never for longer than its patience, and never at or after the instant its start's
+wall time ends; sealing a claim takes time, so those ends are judged again once it is sealed, and a
+claim whose time ran out meanwhile is neither sent nor counted. Nothing of a claim or of an answer is
+logged.
 
 The transport and the clock are the test's own (v2_support): no network, no real waiting.
 """
@@ -15,8 +18,8 @@ import dataclasses
 import json
 import logging
 import re
-from datetime import timedelta
-from typing import Any, Mapping, Sequence
+from datetime import datetime, timedelta
+from typing import Any, Mapping
 
 import pytest
 
@@ -35,10 +38,12 @@ from tests.contract.v2_support import (
     GRANT_UNENCRYPTED,
     HUB_CLAIM_CONTEXT,
     HUB_KEY,
+    LOG_PROBE,
     MEDIA_KEY_HEX,
     REQUEST_ENCRYPTED,
     REQUEST_UNENCRYPTED,
     RUNTIME_ID,
+    TOO_LARGE_FOR_A_FLOAT,
     UNCONFIGURED_KEY,
     WORKER_GRANT_CONTEXT,
     WORKER_GRANT_CONTEXT_UNENCRYPTED,
@@ -50,12 +55,14 @@ from tests.contract.v2_support import (
     catalog_context,
     hub_error_answer,
     hub_error_body,
+    key_forms,
     modified_fixture,
     moment,
     padded_to,
     resigned_fixture,
     seconds_from_now,
     signed_answer,
+    slices_shown,
     uuid_source,
     worker_settings,
 )
@@ -116,15 +123,27 @@ NO_ANSWER = TransportFailed("ConnectTimeout")
 RETRYABLE_REFUSAL_CODE = "service_unavailable"
 OTHER_RETRYABLE_REFUSAL_CODE = "internal_error"
 FINAL_REFUSAL_CODE = "claim_conflict"
-# What the log says of a claiming that ends unreachable: no claim was sent, or so many were.
+# What the log says of a claiming that ends unreachable: no claim was sent (and for which of two reasons),
+# or so many were.
 NOTHING_WAS_SENT = "nothing was sent"
+BOOTSTRAP_HAD_EXPIRED = "bootstrap had expired"
+WALL_TIME_WAS_SPENT = "wall time was spent"
 ENDED_UNREACHABLE = "ended unreachable"
+# A start's wall time that ends before the claiming's patience would, and the request's own time-outs.
+WALL_TIME_SHORTER_THAN_THE_PATIENCE_S = 30.0
+REQUEST_TIMEOUT_S = 15.0
+LEAST_REQUEST_TIMEOUT_S = 1.0
+# The two ends of a claiming a test brings near, by the names of its cases.
+THE_STARTS_WALL_TIME = "the-starts-wall-time"
+THE_BOOTSTRAPS_EXPIRY = "the-bootstraps-expiry"
+# How long sealing one claim takes on the fake clock in the tests of the second look at the clocks, and a
+# time left that holds one such claim, the first wait and less than the sealing of a second claim.
+SEALING_TAKES_S = 1.0
+TIME_FOR_ONE_SLOWLY_SEALED_CLAIM_S = 2.8
 ENDED_UNREACHABLE_AFTER = re.compile(r"ended unreachable after (\d+) claims")
 # Steps of the wall clock while the Hub does not answer: set back an hour, set forward a minute.
 WALL_CLOCK_STEPS_S = {"set-back-an-hour": -3600.0, "set-forward-a-minute": 60.0}
-# A log line may name these two ids; any longer slice of a claim or of a grant is a leak.
-LEAK_SLICE_CHARS = 16
-LOG_PROBE = "probe: the capture sees this module's logger at DEBUG"
+MILLISECONDS_PER_SECOND = 1000
 
 
 def _request(path: str = REQUEST_ENCRYPTED) -> dict[str, Any]:
@@ -137,7 +156,13 @@ def _dispatch(path: str = REQUEST_ENCRYPTED, **changes: Any) -> AcceptedDispatch
     return accepted_dispatch(request, settings=SETTINGS)
 
 
-def _claim(dispatch: AcceptedDispatch, transport: FakeTransport, clock: FakeClock) -> Grant | Unclaimed:
+def _claim(
+    dispatch: AcceptedDispatch, transport: FakeTransport, clock: FakeClock, *, wall_time_left_s: float | None = None
+) -> Grant | Unclaimed:
+    """Claim as a start does that has `wall_time_left_s` of its wall time left when it claims; when none
+    is given, the dispatch's whole limit, as for a start that has just begun."""
+    if wall_time_left_s is None:
+        wall_time_left_s = dispatch.limits.max_wall_time_ms / MILLISECONDS_PER_SECOND
     return claim_execution(
         dispatch,
         settings=SETTINGS,
@@ -147,6 +172,7 @@ def _claim(dispatch: AcceptedDispatch, transport: FakeTransport, clock: FakeCloc
         monotonic=clock.monotonic,
         sleep=clock.sleep,
         new_message_id=uuid_source(),
+        wall_time_ends_at=clock.monotonic() + wall_time_left_s,
     )
 
 
@@ -228,6 +254,37 @@ def test_grant_when_shown_with_repr_should_not_show_the_media_key():
     assert grant.media_key == key
     assert [value for value in (MEDIA_KEY_HEX, MEDIA_KEY_HEX.upper(), repr(key), repr(key)[2:-1]) if value in shown] == []
     assert grant.generation_id in shown
+
+
+def test_grant_when_its_media_key_is_dropped_should_hold_no_key_and_keep_the_keys_id_and_everything_else():
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    grant = _claim(dispatch, FakeTransport(_granted(), clock=clock), clock)
+    as_granted = dataclasses.replace(grant)
+
+    # Act
+    grant.drop_media_key()
+
+    # Assert
+    assert as_granted.media_key == bytes.fromhex(MEDIA_KEY_HEX)
+    assert grant.media_key is None
+    assert grant.media_key_id == as_granted.media_key_id is not None
+    assert dataclasses.replace(grant, media_key=as_granted.media_key) == as_granted
+
+
+@pytest.mark.parametrize("fixture", [GRANT_ENCRYPTED, GRANT_UNENCRYPTED], ids=["a-grant-with-a-key", "a-grant-without-one"])
+def test_grant_when_its_media_key_is_dropped_again_should_stay_without_a_key(fixture):
+    # Arrange: a grant whose key was dropped once already, or that never held one
+    request = REQUEST_ENCRYPTED if fixture == GRANT_ENCRYPTED else REQUEST_UNENCRYPTED
+    dispatch, clock = _dispatch(request), FakeClock()
+    grant = _claim(dispatch, FakeTransport(_granted(fixture), clock=clock), clock)
+    grant.drop_media_key()
+
+    # Act
+    grant.drop_media_key()
+
+    # Assert
+    assert grant.media_key is None
 
 
 @pytest.mark.parametrize(
@@ -733,6 +790,28 @@ def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_not_cl
     assert clock.waits == []
 
 
+@pytest.mark.parametrize("past_the_expiry_s", [0.0, 60.0], ids=["to-the-expiry", "a-minute-past-the-expiry"])
+def test_claim_execution_when_the_wall_clock_is_stepped_to_or_past_the_expiry_while_claiming_should_not_claim_again(
+    past_the_expiry_s,
+):
+    # Arrange: the first claim gets no answer, and while it is out the wall clock is set forward. The
+    # patience and the start's wall time, both counted in seconds that passed, are nowhere near their end.
+    dispatch, clock = _dispatch(), FakeClock()
+    until_the_expiry_s = (dispatch.claim_expires_at - clock()).total_seconds()
+    transport = _SteppedOnItsFirstPost(clock, until_the_expiry_s + past_the_expiry_s)
+    assert until_the_expiry_s > PATIENCE_S
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert: the expiry is judged on the wall clock, as the contract states it
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+    assert clock() >= dispatch.claim_expires_at
+    assert clock.elapsed_s < PATIENCE_S
+
+
 @pytest.mark.parametrize(
     ("expires_in_s", "retry_after_s"),
     [(None, RETRY_AFTER_AN_HOUR_S), (EXPIRES_SOON_S, EXPIRES_SOON_S)],
@@ -753,6 +832,326 @@ def test_claim_execution_when_the_hub_asks_to_retry_after_the_claiming_ends_shou
     assert outcome == Unclaimed(CAUSE_REFUSED, RETRYABLE_REFUSAL_CODE)
     assert len(transport.calls) == 1
     assert clock.waits == []
+
+
+# --- never at or after the end of the start's wall time -----------------------------------------
+
+
+def _wall_time_ends(clock: FakeClock, seconds: float = WALL_TIME_SHORTER_THAN_THE_PATIENCE_S) -> datetime:
+    """The instant, on the test's wall clock, `seconds` after the clock began (nothing steps it in these tests)."""
+    return clock.start + timedelta(seconds=seconds)
+
+
+@pytest.mark.parametrize("seconds_per_post", [0.0, SLOW_POST_S], ids=["failing-at-once", "timing-out"])
+def test_claim_execution_when_the_wall_time_ends_before_its_patience_should_stop_claiming_there_and_end_unreachable(
+    seconds_per_post,
+):
+    # Arrange: the bootstrap and the patience both outlast the 30 s the start has
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=NO_ANSWER, clock=clock, seconds_per_post=seconds_per_post)
+    assert WALL_TIME_SHORTER_THAN_THE_PATIENCE_S < PATIENCE_S
+    assert dispatch.claim_expires_at > PATIENCE_ENDS
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) > 1
+    assert [call.at for call in transport.calls if call.at >= _wall_time_ends(clock)] == []
+    assert sum(clock.waits) < WALL_TIME_SHORTER_THAN_THE_PATIENCE_S
+
+
+def test_claim_execution_when_the_wall_time_ends_while_it_is_refused_for_now_should_end_refused_with_that_code():
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=_retryable_refusal(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_REFUSED, RETRYABLE_REFUSAL_CODE)
+    assert len(transport.calls) > 1
+    assert [call.at for call in transport.calls if call.at >= _wall_time_ends(clock)] == []
+
+
+def test_claim_execution_when_the_hub_asks_to_retry_after_the_wall_time_ends_should_end_refused_at_once():
+    # Arrange: the Hub asks for exactly the time the start has left
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(_retryable_refusal(int(WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_REFUSED, RETRYABLE_REFUSAL_CODE)
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+def test_claim_execution_when_the_grant_comes_before_the_wall_time_ends_should_return_it():
+    # Arrange: one claim is lost, the next is granted, well inside the 30 s
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(NO_ANSWER, _granted(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+
+    # Assert
+    assert isinstance(outcome, Grant)
+    assert len(transport.calls) == 2
+
+
+@pytest.mark.parametrize("left_s", [0.0, -10.0], ids=["this-very-instant", "ten-seconds-ago"])
+def test_claim_execution_when_the_wall_time_is_already_spent_should_not_claim_at_all(left_s):
+    # Arrange: a Hub that would grant, and a bootstrap that has not expired
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=_granted(), clock=clock)
+    assert dispatch.claim_expires_at > clock()
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=left_s)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert transport.calls == []
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize(
+    ("left_s", "timeout_s"),
+    [
+        pytest.param(3600.0, REQUEST_TIMEOUT_S, id="far-more-left-than-the-requests-time-out"),
+        pytest.param(6.0, 6.0, id="less-left-than-the-requests-time-out"),
+        pytest.param(0.4, LEAST_REQUEST_TIMEOUT_S, id="less-left-than-the-least-time-out"),
+    ],
+)
+def test_claim_execution_when_the_wall_time_ends_soon_should_give_a_claim_the_time_left_and_never_below_one_second(
+    left_s, timeout_s
+):
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(_granted(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=left_s)
+
+    # Assert: a claim sent before the end is given at least a second, as one sent just before the expiry is
+    (call,) = transport.calls
+    assert isinstance(outcome, Grant)
+    assert call.timeout_s == timeout_s
+    assert (REQUEST_TIMEOUT_S, LEAST_REQUEST_TIMEOUT_S) == (15.0, 1.0)
+
+
+def test_claim_execution_when_the_wall_time_ends_after_its_patience_should_claim_exactly_as_with_a_far_one():
+    # Arrange: what a start with an hour of wall time gives; this one's ends a second after the patience
+    far_clock = FakeClock()
+    far = FakeTransport(then=NO_ANSWER, clock=far_clock)
+    _claim(_dispatch(), far, far_clock, wall_time_left_s=3600.0)
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=NO_ANSWER, clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=PATIENCE_S + 1.0)
+
+    # Assert: the patience ends the claiming, as before
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert clock.waits == far_clock.waits
+    assert [call.at for call in transport.calls] == [call.at for call in far.calls]
+    assert [call.timeout_s for call in transport.calls] == [call.timeout_s for call in far.calls]
+    assert clock.elapsed_s < PATIENCE_S
+
+
+def test_claim_execution_when_the_bootstrap_expires_before_the_wall_time_ends_should_still_stop_at_the_expiry():
+    # Arrange: the bootstrap expires in 5 s, the start has 30 s
+    dispatch, clock = _dispatch(**{"/claim/expires_at": seconds_from_now(EXPIRES_SOON_S)}), FakeClock()
+    transport = FakeTransport(then=NO_ANSWER, clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) >= 1
+    assert [call.at for call in transport.calls if call.at >= dispatch.claim_expires_at] == []
+
+
+@pytest.mark.parametrize("step_s", list(WALL_CLOCK_STEPS_S.values()), ids=list(WALL_CLOCK_STEPS_S))
+def test_claim_execution_when_the_wall_clock_is_stepped_while_claiming_should_keep_to_the_starts_wall_time(step_s):
+    # Arrange: what an undisturbed clock gives; the bootstrap outlasts the 30 s even after a step forward
+    steady_clock = FakeClock()
+    steady = FakeTransport(then=NO_ANSWER, clock=steady_clock)
+    _claim(_dispatch(), steady, steady_clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = _SteppedOnItsFirstPost(clock, step_s)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=WALL_TIME_SHORTER_THAN_THE_PATIENCE_S)
+
+    # Assert: the wall time is counted in seconds that passed, whatever the wall clock was set to
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert clock.waits == steady_clock.waits
+    assert len(transport.calls) == len(steady.calls)
+    assert clock.elapsed_s < WALL_TIME_SHORTER_THAN_THE_PATIENCE_S
+
+
+@pytest.mark.parametrize(
+    "wall_time_ends_at",
+    [
+        pytest.param(float("nan"), id="not-a-number"),
+        pytest.param(float("inf"), id="infinite"),
+        pytest.param(float("-inf"), id="minus-infinite"),
+        pytest.param(TOO_LARGE_FOR_A_FLOAT, id="an-integer-too-large-to-be-a-float"),
+        pytest.param(-TOO_LARGE_FOR_A_FLOAT, id="a-negative-integer-too-large-to-be-a-float"),
+        pytest.param(True, id="a-bool"),
+        pytest.param("30.0", id="text"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_claim_execution_when_the_wall_times_end_is_no_finite_number_should_raise_value_error_without_claiming(
+    wall_time_ends_at,
+):
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=_granted(), clock=clock)
+
+    # Act / Assert
+    with pytest.raises(ValueError):
+        claim_execution(
+            dispatch,
+            settings=SETTINGS,
+            runtime_id=RUNTIME_ID,
+            transport=transport,
+            clock=clock,
+            monotonic=clock.monotonic,
+            sleep=clock.sleep,
+            new_message_id=uuid_source(),
+            wall_time_ends_at=wall_time_ends_at,
+        )
+    assert transport.calls == []
+
+
+# --- the time left is read again once a claim is sealed, immediately before it is posted --------
+
+
+def _make_sealing_take(monkeypatch: pytest.MonkeyPatch, clock: FakeClock, seconds: float = SEALING_TAKES_S) -> None:
+    """Make every claim take `seconds` of the test's clock to seal: the time that passes, between the
+    claiming's look at its clocks and the POST, while a claim is built, validated and signed."""
+    seal = claim_module.seal_message
+
+    def seal_slowly(*arguments: Any, **named_arguments: Any) -> Any:
+        sealed = seal(*arguments, **named_arguments)
+        clock.advance(seconds)
+        return sealed
+
+    monkeypatch.setattr(claim_module, "seal_message", seal_slowly)
+
+
+def _claim_with_one_end_near(
+    end: str, left_s: float, transport: FakeTransport, clock: FakeClock
+) -> Grant | Unclaimed:
+    """Claim `left_s` seconds before one end of the claiming, the other one far away."""
+    if end == THE_BOOTSTRAPS_EXPIRY:
+        return _claim(_dispatch(**{"/claim/expires_at": seconds_from_now(left_s)}), transport, clock)
+    return _claim(_dispatch(), transport, clock, wall_time_left_s=left_s)
+
+
+@pytest.mark.parametrize("end", [THE_STARTS_WALL_TIME, THE_BOOTSTRAPS_EXPIRY])
+@pytest.mark.parametrize(
+    "left_s",
+    [
+        pytest.param(SEALING_TAKES_S / 2, id="the-end-passes-while-the-claim-is-sealed"),
+        pytest.param(SEALING_TAKES_S, id="the-end-is-reached-just-as-the-claim-is-sealed"),
+    ],
+)
+def test_claim_execution_when_an_end_is_reached_while_the_first_claim_is_sealed_should_send_nothing(
+    monkeypatch, caplog, end, left_s
+):
+    # Arrange: time is left when the claim is built, none when it is sealed; the Hub would grant
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    clock = FakeClock()
+    _make_sealing_take(monkeypatch, clock)
+    transport = FakeTransport(then=_granted(), clock=clock)
+
+    # Act
+    outcome = _claim_with_one_end_near(end, left_s, transport, clock)
+    logged = _claim_log(caplog)
+
+    # Assert: nothing is posted at or after the end, and the log names the end, not a network fault
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert transport.calls == []
+    assert clock.waits == []
+    assert NOTHING_WAS_SENT in logged and ENDED_UNREACHABLE not in logged
+    assert (WALL_TIME_WAS_SPENT in logged) == (end == THE_STARTS_WALL_TIME)
+    assert (BOOTSTRAP_HAD_EXPIRED in logged) == (end == THE_BOOTSTRAPS_EXPIRY)
+
+
+@pytest.mark.parametrize("end", [THE_STARTS_WALL_TIME, THE_BOOTSTRAPS_EXPIRY])
+@pytest.mark.parametrize("unanswered", [NO_ANSWER, GATEWAY_FAILURE], ids=["no-answer", "a-gateway-failure"])
+def test_claim_execution_when_an_end_is_reached_while_a_later_claim_is_sealed_should_neither_send_nor_count_it(
+    monkeypatch, caplog, end, unanswered
+):
+    # Arrange: sealing takes 1 s and 2.8 s are left: the first claim is posted with 1.8 s left and gets no
+    # answer; after the first wait 0.8 s are left, and they pass while the second claim is sealed
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    clock = FakeClock()
+    _make_sealing_take(monkeypatch, clock)
+    transport = FakeTransport(unanswered, then=_granted(), clock=clock)
+
+    # Act
+    outcome = _claim_with_one_end_near(end, TIME_FOR_ONE_SLOWLY_SEALED_CLAIM_S, transport, clock)
+    logged = _claim_log(caplog)
+
+    # Assert: one claim was sent, and one is what the log counts
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) == 1
+    assert clock.waits == [FIRST_BACKOFF_S]
+    assert ENDED_UNREACHABLE_AFTER.findall(logged) == ["1"]
+    assert NOTHING_WAS_SENT not in logged
+
+
+@pytest.mark.parametrize("end", [THE_STARTS_WALL_TIME, THE_BOOTSTRAPS_EXPIRY])
+def test_claim_execution_when_an_end_is_reached_while_a_claim_is_sealed_after_a_refusal_for_now_should_end_refused(
+    monkeypatch, end
+):
+    # Arrange: as above, with a Hub that refuses the one claim it gets for now
+    clock = FakeClock()
+    _make_sealing_take(monkeypatch, clock)
+    transport = FakeTransport(_retryable_refusal(), then=_granted(), clock=clock)
+
+    # Act
+    outcome = _claim_with_one_end_near(end, TIME_FOR_ONE_SLOWLY_SEALED_CLAIM_S, transport, clock)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_REFUSED, RETRYABLE_REFUSAL_CODE)
+    assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("end", [THE_STARTS_WALL_TIME, THE_BOOTSTRAPS_EXPIRY])
+@pytest.mark.parametrize(
+    ("left_s", "timeout_s"),
+    [
+        pytest.param(7.0, 6.0, id="six-seconds-left-once-sealed"),
+        pytest.param(1.4, LEAST_REQUEST_TIMEOUT_S, id="less-than-the-least-time-out-left-once-sealed"),
+    ],
+)
+def test_claim_execution_when_sealing_took_time_should_give_the_claim_what_is_left_once_it_is_sealed(
+    monkeypatch, end, left_s, timeout_s
+):
+    # Arrange: sealing takes 1 s of the time that is left when the claim is built
+    clock = FakeClock()
+    _make_sealing_take(monkeypatch, clock)
+    transport = FakeTransport(_granted(), clock=clock)
+
+    # Act
+    outcome = _claim_with_one_end_near(end, left_s, transport, clock)
+
+    # Assert: posted before the end, with the time then left as its time-out, a second at least
+    (call,) = transport.calls
+    assert isinstance(outcome, Grant)
+    assert call.at == clock.start + timedelta(seconds=SEALING_TAKES_S)
+    assert call.timeout_s == timeout_s
 
 
 # --- what the log says of an unreachable ending -------------------------------------------------
@@ -778,6 +1177,30 @@ def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_log_th
     assert outcome == Unclaimed(CAUSE_UNREACHABLE)
     assert transport.calls == []
     assert NOTHING_WAS_SENT in logged
+    assert ENDED_UNREACHABLE not in logged
+    assert BOOTSTRAP_HAD_EXPIRED in logged
+    assert WALL_TIME_WAS_SPENT not in logged
+
+
+@pytest.mark.parametrize("left_s", [0.0, -10.0], ids=["this-very-instant", "ten-seconds-ago"])
+def test_claim_execution_when_the_wall_time_is_already_spent_should_log_that_nothing_was_sent_and_why(
+    caplog, left_s
+):
+    # Arrange: the bootstrap has not expired; only the start's own time is gone
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(then=_granted(), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=left_s)
+    logged = _claim_log(caplog)
+
+    # Assert: one cause in the contract, and a log line that tells this start from a late one
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert transport.calls == []
+    assert NOTHING_WAS_SENT in logged
+    assert WALL_TIME_WAS_SPENT in logged
+    assert BOOTSTRAP_HAD_EXPIRED not in logged
     assert ENDED_UNREACHABLE not in logged
 
 
@@ -822,14 +1245,6 @@ def test_claim_execution_when_its_one_claim_was_not_answered_should_log_unreacha
 # --- nothing of a claim or of an answer is logged -----------------------------------------------
 
 
-def _slices_shown(logged: str, body: str, nameable: Sequence[str]) -> list[str]:
-    """Every LEAK_SLICE_CHARS-character slice of `body` that `logged` shows, the ids a log line may name left out."""
-    for value in nameable:
-        logged = logged.replace(value, " ")
-    slices = (body[start : start + LEAK_SLICE_CHARS] for start in range(len(body) - LEAK_SLICE_CHARS + 1))
-    return [piece for piece in slices if piece in logged]
-
-
 @pytest.mark.parametrize(
     ("outcomes", "then", "expected"),
     [
@@ -852,6 +1267,7 @@ def test_claim_execution_when_it_ends_any_way_should_log_nothing_of_a_claim_or_o
     dispatch, clock = _dispatch(), FakeClock()
     transport = FakeTransport(*outcomes, then=then, clock=clock)
     grant = json.loads(files.read_bytes(GRANT_ENCRYPTED))
+    # A line may name the dispatch and the execution, and nothing else of a claim or of a grant.
     nameable = (dispatch.identity.dispatch_id, grant["identity"]["execution_id"])
     signatures = [answer.signature for answer in outcomes if isinstance(answer, HttpAnswer) and answer.signature]
 
@@ -864,9 +1280,11 @@ def test_claim_execution_when_it_ends_any_way_should_log_nothing_of_a_claim_or_o
     signatures += [call.signature for call in transport.calls]
     bodies = [call.body.decode("ascii") for call in transport.calls]
     bodies += [files.read_bytes(GRANT_ENCRYPTED).decode("ascii"), HTML_BODY.decode("ascii")]
-    secrets = [dispatch.bootstrap_token, MEDIA_KEY_HEX, RUNTIME_ID, "vh_", "bootstrap_token", "key_hex", *signatures]
-    secrets += [ERROR_PAGE_CANARY]
+    # A key is held as bytes, so it is looked for as bytes are printed too, not as hex alone.
+    keys = [bytes.fromhex(MEDIA_KEY_HEX), WORKER_KEY, HUB_KEY]
+    secrets = [dispatch.bootstrap_token, RUNTIME_ID, *(form for key in keys for form in key_forms(key))]
+    secrets += ["vh_", "bootstrap_token", "key_hex", ERROR_PAGE_CANARY, *signatures]
     assert isinstance(outcome, expected)
     assert LOG_PROBE in logged
     assert [secret for secret in secrets if secret in logged] == []
-    assert [piece for body in bodies for piece in _slices_shown(logged, body, nameable)] == []
+    assert [piece for body in bodies for piece in slices_shown(logged, body, nameable)] == []

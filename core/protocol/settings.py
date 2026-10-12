@@ -15,8 +15,9 @@ Everything here comes from the worker's own configuration, never from a message:
                                     default limits.json clock_skew_seconds
     VH_STORAGE_PROFILES             comma list of credential_ref names; for each, with NAME the ref in
                                     upper case and `-` as `_`: VH_STORAGE_<NAME>_ENDPOINT (https URL),
-                                    VH_STORAGE_<NAME>_REGION (default `auto`), VH_STORAGE_<NAME>_ACCESS_KEY_ID
-                                    and VH_STORAGE_<NAME>_SECRET_ACCESS_KEY
+                                    VH_STORAGE_<NAME>_REGION (one host label, not digits only; default
+                                    `auto`), VH_STORAGE_<NAME>_ACCESS_KEY_ID and
+                                    VH_STORAGE_<NAME>_SECRET_ACCESS_KEY
 
 A key id is the contract `key_id`, a key at least 32 bytes in lowercase hex. Every value is printable
 ASCII without a leading or trailing space. A refusal (SettingsInvalid) names the variable and the rule,
@@ -70,6 +71,9 @@ _PRINTABLE_ASCII = re.compile(r"[\x20-\x7e]*")
 _NOT_URL_CHARACTERS = re.compile(r'[ "<>\\^`{|}]')
 _AUTHORITY = re.compile(r"(?P<host>\[[0-9A-Fa-f:.]{2,45}\]|[A-Za-z0-9.-]{1,253})(?::(?P<port>[0-9]{1,5}))?")
 _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
+# A region as the S3 client accepts one (botocore's validate_region_name): one host label that is not all
+# digits. The client refuses any other only when it is made, which is in the middle of a job.
+_REGION = re.compile(r"(?![0-9]+\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 # A host whose last label is a number is an IPv4 address to an HTTP client, whatever form it takes.
 _NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*")
 _LOWERCASE_HEX_PAIRS = re.compile(r"(?:[0-9a-f]{2})+")
@@ -334,6 +338,15 @@ def _storage_profiles(env: Mapping[str, str]) -> dict[str, StorageProfile]:
     return profiles
 
 
+def _region(region: str, where: str) -> str:
+    if _REGION.fullmatch(region) is None:
+        raise SettingsInvalid(
+            STORAGE_PROFILES_VARIABLE,
+            f"{where}must be a region name: letters, digits and inner hyphens, at most 63, not digits only",
+        )
+    return region
+
+
 def _storage_profile(env: Mapping[str, str], credential_ref: str, position: int) -> StorageProfile:
     variable_stem = STORAGE_VARIABLE_PREFIX + storage_variable_name(credential_ref)
 
@@ -349,7 +362,7 @@ def _storage_profile(env: Mapping[str, str], credential_ref: str, position: int)
         endpoint=_https_url(
             STORAGE_PROFILES_VARIABLE, text(STORAGE_ENDPOINT_SUFFIX), lead_in(STORAGE_ENDPOINT_SUFFIX)
         ),
-        region=text(STORAGE_REGION_SUFFIX, DEFAULT_REGION),
+        region=_region(text(STORAGE_REGION_SUFFIX, DEFAULT_REGION), lead_in(STORAGE_REGION_SUFFIX)),
         access_key_id=text(STORAGE_ACCESS_KEY_ID_SUFFIX),
         secret_access_key=text(STORAGE_SECRET_ACCESS_KEY_SUFFIX),
     )

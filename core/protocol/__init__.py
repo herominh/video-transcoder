@@ -8,7 +8,8 @@ configuration (the VH_* variables); messages builds, encodes and seals what the 
 builds the contexts it validates with. handler.handle() is one start of the worker for one dispatch
 (README section 15.1): dispatch accepts the RunPod job input (inbound: the signature first, then the
 validation, then the key the body names), claim runs the claim exchange over transport, and outbox
-self-checks, signs and carries what the worker sends back. The RunPod entry point does not call
-handle() yet: D1's next slice gives it the job runner, on the RunPod entry path only (the Modal app
-and the v1 dev server never import this package). The live v1 signer (core/signing.py) is unrelated.
+self-checks, signs and carries what the worker sends back. The RunPod entry point
+(wrappers/runpod_handler.py) calls handle() with the job runner (core/job/) for every job; this package
+is on the RunPod entry path only (the Modal app and the v1 dev server never import it). The v1 signer
+(core/signing.py) is unrelated.
 """

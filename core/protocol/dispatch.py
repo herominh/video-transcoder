@@ -7,7 +7,9 @@ else raises DispatchRefused, which names the step, never the content: nothing of
 trusted, so there is no identity to report it under. The accepted dispatch is a typed, immutable value;
 its bootstrap token is kept out of every repr (a claim body can fetch the media key, README 15.2).
 The provider hands the handler a decoded value, so the carrier's byte limit (limits.json
-`carrier_max_bytes`) is the sender's to keep: here the carrier schema bounds both members.
+`carrier_max_bytes`) is the sender's to keep: here the carrier schema bounds both members. A value that
+is not an object of text members is refused before the schema sees it: the schema could only refuse it
+too, and its error first renders the value, which fails for a deeply nested one (RecursionError).
 """
 
 from __future__ import annotations
@@ -105,6 +107,8 @@ def instant(timestamp: str) -> datetime:
 
 def accept_dispatch(job_input: object, *, settings: WorkerSettings, now: datetime) -> AcceptedDispatch:
     """The dispatch a RunPod job input carries, or DispatchRefused. `now` is the worker's clock at the start."""
+    if not _is_object_of_text(job_input):
+        raise DispatchRefused(STEP_CARRIER)
     if schema.first_error_pointer(RUNPOD_INPUT_SCHEMA, job_input) is not None:
         raise DispatchRefused(STEP_CARRIER)
     carrier = cast(Mapping[str, str], job_input)  # the carrier schema: an object of two strings
@@ -120,6 +124,13 @@ def accept_dispatch(job_input: object, *, settings: WorkerSettings, now: datetim
         # A NotAccepted holds a step and a verdict only, so chaining it shows nothing of the message.
         raise DispatchRefused(refusal.step, refusal.verdict) from None
     return _typed(request)
+
+
+def _is_object_of_text(value: object) -> bool:
+    """Whether the value is a JSON object whose members are all text: one level deep, nothing is descended into."""
+    return isinstance(value, dict) and all(
+        isinstance(name, str) and isinstance(member, str) for name, member in value.items()
+    )
 
 
 def _ascii_bytes(text: str) -> bytes | None:

@@ -7,22 +7,25 @@ header lines of HTTP/1.x, each ended by CRLF and closed by an empty line, within
 body is delimited by one plain length or by chunks of plain hexadecimal sizes, never by both or by anything
 else; and a cut or garbled connection (in the head, in the body, or as the only end a body has) is never
 returned. The whole exchange ends within its time-out, counted from one deadline: the addresses of the
-host share it for the connect, neither a TLS handshake nor an answer that trickles outlasts it, and what
-fails at or after it is named DeadlinePassed. The address and the signature are visible ASCII, or nothing
-is sent. The server's certificate and the address it names are always verified, and nothing in the
-environment (a proxy, a CA file or directory, a netrc, a TLS key log) changes anything. A request without
-a whole answer raises TransportFailed, whose text is a bare name.
+host share it for the connect (one no socket can be made for is passed over like one that refuses),
+neither a TLS handshake nor an answer that trickles outlasts it, and what fails at or after it is named
+DeadlinePassed. The address and the signature are visible ASCII, or nothing is sent. The server's
+certificate and the address it names are always verified, and nothing in the environment (a proxy, a CA
+file or directory, a netrc, a TLS key log) changes anything. A request without a whole answer raises
+TransportFailed, whose text is a bare name. A transport is built with an `ssl.SSLContext` or with none.
 
 Every server here answers on 127.0.0.1 under a certificate the test generates, and the transport gets its
 own verifying context with that certificate added as a CA: the default HttpsTransport() trusts certifi's
 bundle only, so it refuses every server of this module (a test of its own, below). Where a test needs a
-host with several addresses, or one that does not answer, it steers the resolver and the socket class the
-transport's module sees (the `network` fixture): nothing ever leaves 127.0.0.1.
+host with several addresses, one that does not answer or one no socket can be made for, it steers the
+resolver and the socket class the transport's module sees (the `network` fixture): nothing ever leaves
+127.0.0.1.
 """
 
 from __future__ import annotations
 
 import enum
+import errno
 import gzip
 import hashlib
 import http
@@ -159,6 +162,10 @@ LATE_CONNECT_S = LATE_TIMEOUT_S / 2
 LATE_CUT_WITHIN_S = LATE_TIMEOUT_S + LATE_CONNECT_S / 2
 # A value no failure may show, placed in the error of a resolver that fails.
 RESOLVER_CANARY = "CANARY-transport-resolver"
+# Another, placed in the error of a socket that cannot be made, and the name such a failure goes by:
+# its error's class.
+SOCKET_CANARY = "CANARY-transport-socket"
+NO_SOCKET = "OSError"
 # The lines of an answer's head a connection can be cut in, each named by how it starts.
 STATUS_LINE = "HTTP/"
 CONNECTION_HEADER = "Connection"
@@ -241,12 +248,13 @@ BARE_CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 @dataclass(frozen=True)
 class Received:
-    """One request the local server received."""
+    """One request the local server received; `line` is its request line as it came, less the line end."""
 
     method: str
     path: str
     headers: Mapping[str, str]
     body: bytes
+    line: str
 
 
 class Framing(enum.Enum):
@@ -427,7 +435,7 @@ class LocalServer:
         length = int(handler.headers.get("Content-Length", "0"))
         body = handler.rfile.read(length)
         headers = {name.lower(): value for name, value in handler.headers.items()}
-        self.received.append(Received(handler.command, handler.path, headers, body))
+        self.received.append(Received(handler.command, handler.path, headers, body, handler.requestline))
         handler.close_connection = True
         reply = self.replies.get(handler.path, Reply())
         if reply.hold:
@@ -650,6 +658,8 @@ class Network:
     without an address), and `resolution_fails()` with an error. A port in `silent` answers no attempt to
     connect: the attempt lasts its whole time-out and then times out, as when the packets are dropped,
     and `given_s` records that time-out. A port in `late` takes the connection only after so many seconds.
+    A port in `unopenable` is given as an address of `::1`, a family no socket can be made for here, as on
+    a host that cannot open it: `sockets_refused` counts the sockets that were asked for and not made.
     """
 
     def __init__(self) -> None:
@@ -658,6 +668,8 @@ class Network:
         self.silent: set[int] = set()
         self.late: dict[int, float] = {}
         self.given_s: list[float] = []
+        self.unopenable: set[int] = set()
+        self.sockets_refused = 0
         self._ports: list[int] | None = None
         self._fails = False
 
@@ -674,7 +686,12 @@ class Network:
         if self._fails or (self._ports is None and host != LOOPBACK):
             raise socket.gaierror(socket.EAI_NONAME, RESOLVER_CANARY)
         ports = [port] if self._ports is None else self._ports
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (LOOPBACK, each)) for each in ports]
+        return [self._address(each) for each in ports]
+
+    def _address(self, port: int) -> tuple[Any, ...]:
+        if port in self.unopenable:
+            return (socket.AF_INET6, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (IPV6_HOST, port, 0, 0))
+        return (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (LOOPBACK, port))
 
 
 @pytest.fixture
@@ -683,6 +700,12 @@ def network(monkeypatch: pytest.MonkeyPatch) -> Network:
     steered = Network()
 
     class SteeredSocket(socket.socket):
+        def __init__(self, family: int = -1, *arguments: Any, **options: Any) -> None:
+            if family == socket.AF_INET6 and steered.unopenable:
+                steered.sockets_refused += 1
+                raise OSError(errno.EAFNOSUPPORT, SOCKET_CANARY)
+            super().__init__(family, *arguments, **options)
+
         def connect(self, address: Any) -> None:
             port = address[1]
             if port in steered.silent:
@@ -758,6 +781,24 @@ def test_post_when_the_server_answers_should_send_the_exact_body_and_signature_a
     assert request.headers["content-type"] == "application/json"
     assert request.headers["user-agent"] == USER_AGENT
     assert (answer.status, answer.body, answer.signature) == (HTTP_CONFLICT, ANSWER_BODY, ANSWER_SIGNATURE)
+
+
+@pytest.mark.parametrize(
+    ("path_in_the_address", "asked_for"),
+    [(PATH_WITH_A_QUERY, PATH_WITH_A_QUERY), ("", "/"), ("?a=1", "/?a=1")],
+    ids=["a-path-and-a-query", "no-path", "a-query-and-no-path"],
+)
+def test_post_when_it_asks_should_send_one_http_1_1_request_line_and_say_it_closes_and_takes_json(
+    server, transport, path_in_the_address, asked_for
+):
+    # Act
+    _post(transport, f"https://{LOOPBACK}:{server.port}{path_in_the_address}")
+
+    # Assert: the path and the query as the address has them, on a connection the transport does not keep
+    (request,) = server.received
+    assert request.line == f"POST {asked_for} HTTP/1.1"
+    assert request.headers["connection"] == "close"
+    assert request.headers["accept"] == "application/json"
 
 
 @pytest.mark.parametrize("authority", [LOOPBACK, f"{LOOPBACK}:{HTTPS_PORT}"], ids=["no-port", "the-https-port"])
@@ -1724,6 +1765,40 @@ def test_post_when_the_first_address_of_the_host_refuses_should_reach_the_next(s
     assert network.resolved == [LOOPBACK]
 
 
+def test_post_when_no_socket_can_be_made_for_the_first_address_should_reach_the_next(server, transport, network):
+    # Arrange: the host's first address is of a family this host cannot open
+    unopenable = _closed_port()
+    network.unopenable.add(unopenable)
+    network.resolves_to(unopenable, server.port)
+    server.replies[FIRST_PATH] = Reply(HTTP_OK, {}, ANSWER_BODY)
+
+    # Act
+    answer = _post(transport, server.url(FIRST_PATH))
+
+    # Assert: passed over like an address that refuses the connection
+    assert (answer.status, answer.body) == (HTTP_OK, ANSWER_BODY)
+    assert network.sockets_refused == 1
+    assert server.paths() == [FIRST_PATH]
+
+
+def test_post_when_no_socket_can_be_made_for_any_address_should_raise_transport_failed_named_after_the_error(
+    server, transport, network
+):
+    # Arrange
+    unopenable = [_closed_port(), _closed_port()]
+    network.unopenable.update(unopenable)
+    network.resolves_to(*unopenable)
+
+    # Act
+    failure = _failure(transport, server.url(FIRST_PATH))
+
+    # Assert: every address was tried, and the failure goes by its error's class, as a refused connection does
+    assert str(failure) == NO_SOCKET
+    assert network.sockets_refused == len(unopenable)
+    assert server.connections == 0
+    _assert_shows_nothing_of_the_request(failure, server.port)
+
+
 def test_post_when_the_first_address_does_not_answer_should_leave_the_next_its_part_of_the_time_out(
     server, transport, network
 ):
@@ -2070,6 +2145,27 @@ def test_post_when_the_transport_is_built_without_a_context_should_write_no_key_
     # Assert
     assert (answer.status, answer.body) == (HTTP_OK, ANSWER_BODY)
     assert not key_log.exists() or key_log.read_bytes() == b""
+
+
+# --- the context a transport is built with ------------------------------------------------------
+
+# What is no TLS context, each a way to wire a transport wrongly: a transport that took one of these as
+# it is would fail every POST as if the Hub never answered.
+NOT_TLS_CONTEXTS = {
+    "the-name-of-a-ca-file": "ca-bundle.pem",
+    "true": True,
+    "false": False,
+    "zero": 0,
+    "the-function-that-makes-one": verifying_tls_context,
+    "the-class-of-one": ssl.SSLContext,
+}
+
+
+@pytest.mark.parametrize("tls_context", list(NOT_TLS_CONTEXTS.values()), ids=list(NOT_TLS_CONTEXTS))
+def test_https_transport_when_built_with_what_is_no_tls_context_should_raise_type_error(tls_context):
+    # Act / Assert
+    with pytest.raises(TypeError):
+        HttpsTransport(tls_context=tls_context)
 
 
 # --- what an answer shows -----------------------------------------------------------------------

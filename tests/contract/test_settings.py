@@ -81,6 +81,7 @@ TWO_PROFILES_ENV = {
 NOT_AN_HTTPS_URL = "must be an absolute https URL"
 CARRIES_USERINFO = "must not carry userinfo"
 CARRIES_A_FRAGMENT = "must not carry a fragment"
+NOT_A_REGION_NAME = "must be a region name"
 # The printable ASCII characters no URL holds (RFC 3986), by name.
 NOT_URL_CHARACTERS = {
     "space": " ",
@@ -98,6 +99,24 @@ NOT_URL_CHARACTERS = {
 MAX_LABEL_LENGTH = 63
 MAX_HOST_NAME_LENGTH = 253
 HIGHEST_PORT = 65535
+# A storage region is one host label that is not all digits: what the S3 client takes when it is made,
+# which is in the middle of a job. These are regions, and these are not.
+REGIONS = {
+    "the-default-written-out": "auto",
+    "letters-digits-and-inner-hyphens": "us-east-1",
+    "of-the-longest-length": "a" * MAX_LABEL_LENGTH,
+    "a-digit-first": "1a",
+    "one-letter": "a",
+}
+NOT_REGIONS = {
+    "a-space-inside": "us east",
+    "a-hyphen-first": "-a",
+    "a-hyphen-last": "a-",
+    "digits-only": "123",
+    "one-character-too-long": "a" * (MAX_LABEL_LENGTH + 1),
+    "two-labels": "a.b",
+    "an-underscore": "a_b",
+}
 # Brackets around what is not an IPv6 address. A current urlsplit() refuses this URL itself (seen on 3.12.0
 # and on the worker image's 3.10.12); one without that check returns this split, the host unread (seen on 3.9.6).
 BRACKETED_IPV4_URL = "https://[1.2.3.4]/claim"
@@ -686,6 +705,71 @@ def test_from_env_when_a_variable_of_the_second_profile_breaks_a_rule_should_ref
     assert str(refusal) == f"VH_STORAGE_PROFILES {rule}"
 
 
+@pytest.mark.parametrize("region", list(REGIONS.values()), ids=list(REGIONS))
+def test_from_env_when_a_storage_region_is_one_host_label_should_hold_it_unchanged(region):
+    # Act
+    settings = WorkerSettings.from_env(_env(VH_STORAGE_DEFAULT_REGION=region))
+
+    # Assert
+    assert settings.storage_profile("default").region == region
+
+
+@pytest.mark.parametrize("region", list(NOT_REGIONS.values()), ids=list(NOT_REGIONS))
+def test_from_env_when_a_storage_region_is_no_host_label_should_refuse_naming_its_entry_and_not_its_value(region):
+    # Arrange
+    shown, lead_in = _shown_as("VH_STORAGE_DEFAULT_REGION")
+
+    # Act
+    refusal = _refusal(_env(VH_STORAGE_DEFAULT_REGION=region))
+
+    # Assert
+    assert refusal.variable == shown
+    assert refusal.rule.startswith(lead_in + NOT_A_REGION_NAME)
+    assert region not in str(refusal)
+
+
+def test_from_env_when_the_region_of_the_second_profile_is_no_host_label_should_refuse_naming_entry_2():
+    # Arrange: `default`, the first entry, is whole.
+    env = _env(**{**TWO_PROFILES_ENV, "VH_STORAGE_EU_ARCHIVE_REGION": "eu_west_1"})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert refusal.variable == "VH_STORAGE_PROFILES"
+    assert refusal.rule.startswith("entry 2: its VH_STORAGE_<NAME>_REGION variable " + NOT_A_REGION_NAME)
+    assert str(refusal) == f"VH_STORAGE_PROFILES {refusal.rule}"
+
+
+def test_storage_regions_when_the_s3_client_judges_them_should_get_the_verdict_the_settings_gave():
+    # Arrange: the client's own check of a region name, which it runs only when a client is made
+    botocore_utils = pytest.importorskip("botocore.utils")
+    botocore_exceptions = pytest.importorskip("botocore.exceptions")
+    default = WorkerSettings.from_env(VALID_ENV).storage_profile("default").region
+
+    def the_settings_take(region: str) -> bool:
+        try:
+            WorkerSettings.from_env(_env(VH_STORAGE_DEFAULT_REGION=region))
+        except SettingsInvalid:
+            return False
+        return True
+
+    def the_client_takes(region: str) -> bool:
+        try:
+            botocore_utils.validate_region_name(region)
+        except botocore_exceptions.InvalidRegionError:
+            return False
+        return True
+
+    # Act
+    by_the_settings = {region: the_settings_take(region) for region in (*REGIONS.values(), *NOT_REGIONS.values())}
+    by_the_client = {region: the_client_takes(region) for region in by_the_settings}
+
+    # Assert: a region the settings take never fails a job when its client is made, the default included
+    assert by_the_client == by_the_settings
+    assert [region for region in (default, *REGIONS.values()) if not the_client_takes(region)] == []
+
+
 def test_from_env_when_two_refs_map_to_the_same_variables_should_refuse():
     # Arrange: `a-b` and `a_b` both read VH_STORAGE_A_B_*.
     env = _env(
@@ -752,6 +836,7 @@ def _canaries_in(shown: str) -> list[str]:
         {"VH_STORAGE_PROFILES": f"default,{WORKER_KEY_HEX}"},
         {"VH_STORAGE_PROFILES": SECRET_ACCESS_KEY},
         {"VH_STORAGE_PROFILES": f"default,{WORKER_KEY_HEX.upper()}"},
+        {"VH_STORAGE_DEFAULT_REGION": f"{SECRET_ACCESS_KEY}.{SECRET_ACCESS_KEY}"},
     ],
     ids=[
         "hub-key-upper-case",
@@ -772,6 +857,7 @@ def _canaries_in(shown: str) -> list[str]:
         "profile-list-holding-a-key-as-its-second-entry",
         "profile-list-holding-a-secret-that-is-no-credential-ref",
         "profile-list-holding-an-upper-case-key-as-its-second-entry",
+        "region-holding-a-secret-that-is-no-region",
     ],
 )
 def test_from_env_when_a_refused_value_holds_a_secret_should_never_show_it(changes):

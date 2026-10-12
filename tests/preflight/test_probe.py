@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import errno
+import inspect
 import logging
 import selectors
 import shutil
+import socketserver
 import subprocess
 import threading
 import time
@@ -31,6 +33,10 @@ KIB = 1024
 TEN_GIB = 10 * GIB
 OPEN_LIMITS = RequestLimits(max_source_bytes=TEN_GIB, max_source_duration_ms=21_600_000)
 TEST_DEADLINE_MS = 60_000
+# The longest the loopback server may go between two looks for its shutdown: leaving the server waits
+# for the next look, so every preflight returns at most this long after its prober ended. The standard
+# library's own interval is half a second.
+LONGEST_SHUTDOWN_POLL_S = 0.1
 
 pytestmark = pytest.mark.skipif(shutil.which("ffprobe") is None, reason="ffprobe is not installed")
 
@@ -95,6 +101,31 @@ class StallingSource(FileSource):
 
     def read(self, start: int, length: int) -> bytes:
         self.release.wait(timeout=30)
+        return super().read(start, length)
+
+
+class SlowThenStallingSource(FileSource):
+    """The first `slow_reads` reads each take `slow_read_s`; every later read waits until the test
+    releases it, and `stalled` is set once one of them has begun."""
+
+    def __init__(self, path: Path, *, slow_reads: int, slow_read_s: float) -> None:
+        super().__init__(path)
+        self._slow_reads = slow_reads
+        self._slow_read_s = slow_read_s
+        self._count_lock = threading.Lock()
+        self._count = 0
+        self.stalled = threading.Event()
+        self.release = threading.Event()
+
+    def read(self, start: int, length: int) -> bytes:
+        with self._count_lock:
+            self._count += 1
+            number = self._count
+        if number <= self._slow_reads:
+            time.sleep(self._slow_read_s)
+        else:
+            self.stalled.set()
+            self.release.wait(timeout=30)
         return super().read(start, length)
 
 
@@ -306,10 +337,14 @@ def test_preflight_when_the_source_changes_during_the_probe_should_fail_as_sourc
     assert (failure.error_class, failure.code) == ("source_integrity_mismatch", "source_changed")
 
 
-def test_preflight_when_storage_stalls_should_end_at_its_deadline(media):
-    # Arrange
+def test_preflight_when_storage_stalls_should_end_at_its_deadline_as_a_slow_source_worth_a_retry(media):
+    # Arrange: a time budget of 8 s with the execution's deadline a minute away, and a read that never
+    # returns. The share of the time in reads is counted from the moment the reader is made, so what
+    # ffprobe takes to start and ask for its first byte is time outside the reads: the outcome holds
+    # while that start-up stays under half of the budget, 4 s here, where it normally takes some 50 ms
+    # (the exact boundary is decided on a clock the test moves, in test_probe_time_budget.py)
     source = StallingSource(media.mp4_faststart)
-    profile = _profile(max_wall_ms=1_500)
+    profile = _profile(max_wall_ms=8_000)
     started = time.monotonic()
 
     # Act
@@ -318,9 +353,39 @@ def test_preflight_when_storage_stalls_should_end_at_its_deadline(media):
     finally:
         source.release.set()
 
-    # Assert
-    assert (failure.error_class, failure.code) == ("deadline_exceeded", "probe_deadline_exceeded")
-    assert time.monotonic() - started < 10
+    # Assert: the one read was in flight for nearly all of the preflight's time while the execution's
+    # deadline was a minute away, so the storage was the slow party, and another start may fare better.
+    # The preflight ended at its deadline, long before the read would have let go by itself (30 s)
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "probe_source_slow", True)
+    assert time.monotonic() - started < 20
+
+
+def test_preflight_when_a_read_stalls_after_two_slow_reads_should_fail_retryable_as_a_slow_source(media):
+    # Arrange: a time budget of 8 s with the execution's deadline a minute away. Two reads take 1.5 s
+    # each and the third never returns: no read alone outlasts the budget, the three together do.
+    # Chunks of 1 KiB, so that ffprobe cannot have the file's index after two reads. What ffprobe
+    # takes to start is time outside the reads (the share is counted from the moment the reader is
+    # made) and comes before the two slow reads: the third read is in flight before the budget ends,
+    # and the reads keep their half of the time, while that start-up stays under 4 s, where it
+    # normally takes some 50 ms (the exact boundary is decided on a clock the test moves, in
+    # test_probe_time_budget.py)
+    source = SlowThenStallingSource(media.mp4_moov_at_end, slow_reads=2, slow_read_s=1.5)
+    profile = _profile(max_wall_ms=8_000, chunk_bytes=KIB)
+    started = time.monotonic()
+
+    # Act
+    try:
+        failure = _failure_of(source, profile)
+        stalled_read_was_in_flight = source.stalled.is_set()
+    finally:
+        source.release.set()
+
+    # Assert: the storage used the time, so the failure is one another start may not meet. The
+    # preflight ended at its deadline, long before the third read would have let go by itself (30 s)
+    assert stalled_read_was_in_flight
+    assert (failure.error_class, failure.code, failure.retryable) == ("source_unavailable", "probe_source_slow", True)
+    assert failure.detail == "the preflight ran out of time while the storage was slow"
+    assert time.monotonic() - started < 20
 
 
 @pytest.mark.parametrize(
@@ -758,3 +823,30 @@ def test_loopback_server_when_the_range_starts_beyond_the_object_should_refuse_i
     # Assert
     assert raised.value.code == 416
     assert inner.reads == []
+
+
+def test_loopback_server_when_serving_should_look_for_its_shutdown_at_least_ten_times_a_second(monkeypatch):
+    # Arrange: note the time between two looks for a shutdown that the standard library's serving loop
+    # is run with. Leaving the server waits for the loop's next look, at most that long; the wait
+    # itself is not timed here, because a bound far below half a second would be one on this machine's load.
+    intervals: list[float] = []
+    serve_forever = socketserver.BaseServer.serve_forever
+
+    def serve_noting_the_interval(server: Any, *args: Any, **kwargs: Any) -> None:
+        call = inspect.signature(serve_forever).bind(server, *args, **kwargs)
+        call.apply_defaults()
+        intervals.append(call.arguments["poll_interval"])
+        serve_forever(server, *args, **kwargs)
+
+    monkeypatch.setattr(socketserver.BaseServer, "serve_forever", serve_noting_the_interval)
+    data = bytes(range(100))
+    server, _ = _serve(data)
+
+    # Act: one served request, then the server is left
+    with server:
+        body = urllib.request.urlopen(server.url, timeout=5).read()
+
+    # Assert
+    assert body == data
+    assert len(intervals) == 1
+    assert 0 < intervals[0] <= LONGEST_SHUTDOWN_POLL_S

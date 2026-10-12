@@ -26,8 +26,16 @@ FAILED_RESULT_SCHEMA = (
 )
 DETAIL_LIMIT = 1000
 SANITIZED_LIMIT = 200
-HUGE_TEXT_CHARS = 1024 * 1024
-FAST_ENOUGH_S = 2.0
+# make_detail's time on a run of letters must grow with the run's length, not with its square (a URL
+# pattern whose scheme has no cap scans the rest of the run from every letter of it). The same letters
+# are timed as one long run and as RUN_GROWTH short ones: in proportion to the length both take the
+# same time, and with a quadratic step the long run takes up to RUN_GROWTH times as long, so the line
+# between the two is drawn half way, in powers. What is timed is this thread's processor time, and the
+# least of several timings counts: on a loaded machine a call waits for its turn, which is no work.
+SHORT_RUN_CHARS = 512
+RUN_GROWTH = 64
+QUADRATIC_GROWTH_LINE = RUN_GROWTH ** 0.5
+TIMINGS = 5
 
 
 def _failure(**overrides: Any) -> Failure:
@@ -204,17 +212,29 @@ def test_make_detail_when_a_scheme_separator_has_no_scheme_should_still_break_it
     assert detail == "odd 9:__host and ?:__other and bare :__ end"
 
 
-def test_make_detail_when_text_is_a_huge_run_of_letters_should_finish_quickly() -> None:
-    # Arrange
-    text = "a" * HUGE_TEXT_CHARS
-    started = time.monotonic()
+def _processor_seconds(texts: list[str]) -> float:
+    """This thread's processor time for one make_detail of each of `texts`; waiting for a turn is not in it."""
+    started = time.thread_time()
+    for text in texts:
+        make_detail(text)
+    return time.thread_time() - started
 
-    # Act
-    detail = make_detail(text)
+
+def test_make_detail_when_a_run_of_letters_grows_should_take_time_in_proportion_to_its_length_not_its_square() -> None:
+    # Arrange: the same letters as one long run and as many short ones
+    short_run = "a" * SHORT_RUN_CHARS
+    long_run = short_run * RUN_GROWTH
+
+    # Act: the two are timed in turns, so that what disturbs one disturbs the other
+    timings = [
+        (_processor_seconds([short_run] * RUN_GROWTH), _processor_seconds([long_run])) for _ in range(TIMINGS)
+    ]
+    short_runs_s = min(short for short, _ in timings)
+    long_run_s = min(long for _, long in timings)
 
     # Assert
-    assert detail == "a" * SANITIZED_LIMIT
-    assert time.monotonic() - started < FAST_ENOUGH_S
+    assert make_detail(long_run) == "a" * SANITIZED_LIMIT
+    assert long_run_s < short_runs_s * QUADRATIC_GROWTH_LINE
 
 
 def test_make_detail_when_text_is_long_should_truncate_to_200_characters() -> None:
