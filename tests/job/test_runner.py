@@ -86,7 +86,6 @@ from tests.job.conftest import (
     HANG_RELEASE_S,
     IMAGE_DIGEST,
     LOCK_RELEASE_S,
-    LOG_FAILURE_CANARY,
     MANIFEST_NAME,
     SETTINGS,
     FakeS3,

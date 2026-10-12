@@ -40,7 +40,9 @@ No log line of this module holds a path or an error's own text, which may name o
 by its class. And the line that tells of an error is written once the `except` block that caught that
 error has ended: a log handler that fails on a line does not raise, Python's logging prints a report of
 its own with every error that failure is chained to, and inside the block that would be the caught
-error, with its own text.
+error, with its own text. One line is not kept from every such chain: a lock is also released behind
+another error (in hold_scratch_lock(), and behind a removal that failed), and the line of a
+descriptor that could not be closed is then written while that other error is on its way.
 """
 
 from __future__ import annotations

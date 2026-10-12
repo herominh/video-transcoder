@@ -4,7 +4,7 @@ seal_message() is the one way a built message becomes bytes with a signature: it
 within its kind's byte limit, validates those exact bytes with the worker's own validator under the
 sender context (`worker_sender` runs what the Hub's receiver runs), and signs them. A message that fails
 its self-check is a wiring bug and is never sent. A SealedMessage made any other way is refused
-(TypeError), so whatever is carried has passed that check.
+(TypeError), so every SealedMessage has passed that check; that what is carried is one is not tested.
 
 A result or a `transcode.unclaimed` report travels two ways with the same bytes: deliver() posts it to
 the callback address (best effort: the provider's job output is the path the Hub can always read), and

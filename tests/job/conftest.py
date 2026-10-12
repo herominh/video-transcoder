@@ -221,8 +221,9 @@ class _FailingStream(io.TextIOBase):
 
 @pytest.fixture
 def failing_log(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """While the test runs, every line the job's modules log also goes to a handler of the kind the
-    process's log has (a stream handler), whose stream fails every write.
+    """While the test runs, every line the job's modules log at WARNING or above (the level their
+    logger has unless the test sets another) also goes to a handler of the kind the process's log has
+    (a stream handler), whose stream fails every write.
 
     Such a handler does not raise: Python's logging prints a report of its own to standard error
     (raiseExceptions, set here to its default), with every error the failure is chained to. A line

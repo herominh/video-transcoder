@@ -57,7 +57,8 @@ its own time budget ran out while the storage was the slow party, it fails retry
 (core/probe.py, source_unavailable / probe_source_slow). So that the Hub and an operator can tell a
 limit that is too small from a start whose claim took most of the time, the detail of a failed
 `deadline_exceeded` result ends with how much of the start's wall time was gone before the execution began, in
-whole seconds: the failure's own detail first, never cut, so one that leaves no room goes without.
+whole seconds: the failure's own detail first, never cut, so one that leaves no room goes without, and
+so does an execution whose reading of the time left lay too far back to be counted.
 """
 
 from __future__ import annotations

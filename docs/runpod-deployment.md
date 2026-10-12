@@ -50,10 +50,12 @@ Variables of the v2 worker (set on the endpoint; the v1 variables of Step 2 are 
   backslash; a usable system temporary directory (`TMPDIR`) is required whatever the scratch directory is. The
   scratch directory (this one, or the system's temporary directory when the variable is not set) must be on a file
   system on which a directory can be locked with `flock`: every job locks its own directory in it, and the worker
-  refuses to start where a directory cannot be locked. Keep it on the worker's own disk, not on a volume shared
-  between hosts: a lock is seen only on the host that holds it, so a worker never removes a directory another host
+  refuses to start where a directory cannot be locked. Keep it on the worker's own disk, never on a volume that
+  workers share. A lock is seen only on the host that holds it, so a worker never removes a directory another host
   made, and what a killed worker of another host left there (or this host before a reboot) stays until someone
-  removes it by hand;
+  removes it by hand. And a shared file system that every worker mounts for itself can keep their locks apart even
+  on one host, where a starting worker then cannot tell a sibling's running job from a leftover: the start cannot
+  check that;
 - `FFMPEG_PATH` and `FFPROBE_PATH` (optional): the tools the stages run, when they are not `ffmpeg` and `ffprobe` on
   the `PATH` (the image links both into `/usr/local/bin`).
 
@@ -93,10 +95,10 @@ Things an operator should know:
   ```
 
   It must end with no failure; the five cases that drive the handler through the SDK run there (they are skipped
-  where the SDK is not installed). Keep `--init`: one test (`tests/preflight/test_bounded_process.py`, in which a
-  killed grandchild must be gone) needs a first process in the container that reaps killed children. A `bash -c` that
-  stays the container's first process reaps them as well, but bash runs the last command of its line in its own
-  place, so here pytest would be the first process; without `--init`, end the line with a pipeline
+  where the SDK is not installed). Keep `--init`: some tests of `tests/preflight/test_bounded_process.py` (those in
+  which a killed grandchild must be gone) need a first process in the container that reaps killed children. A
+  `bash -c` that stays the container's first process reaps them as well, but bash runs the last command of its line
+  in its own place, so here pytest would be the first process; without `--init`, end the line with a pipeline
   (`... 2>&1 | tail -25`), for which bash stays.
 
 ## Architecture

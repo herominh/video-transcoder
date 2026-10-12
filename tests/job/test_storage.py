@@ -5,12 +5,12 @@ checked range reads) against the fake S3 client of conftest. upload_generation()
 files it is told, each under the granted prefix, the manifest last, and refuses anything that would put
 an object elsewhere before it sends a single request.
 
-A request that "never returns" is one a test double keeps until the test lets it go (_Hold). No test
-needs a thread to get anywhere within a time limit, so none depends on how loaded the host is: where a
-deadline is to pass under a kept request, it starts to run out only once that request is kept
-(_PassedSoonAfter), and the job starts to wait for a request only once the request has ended or is
-kept (the `requests_settle_first` fixture). A test asserts how the job ended and only a generous bound
-on how long that took.
+A request that "never returns" is one a test double keeps until the test lets it go (_Hold). Two tests
+keep a real, short deadline (100 ms and 500 ms); no other needs a thread to get anywhere within a time
+limit, so no other depends on how loaded the host is: where a deadline is to pass under a kept request,
+it starts to run out only once that request is kept (_PassedSoonAfter), and the job starts to wait for
+a request only once the request has ended or is kept (the `requests_settle_first` fixture). A test
+asserts how the job ended and only a generous bound on how long that took.
 
 No test waits between two attempts for real: every transfer is handed a stand-in for `sleep` that
 records the waits it is asked for (_Waits) and takes no time. Where a test states its waits exactly,
