@@ -15,6 +15,7 @@ RESERVED_CODES = {
     "invalid_bootstrap_token",
     "claim_conflict",
     "claim_refused",
+    "claim_replayed",
 }
 
 

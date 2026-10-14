@@ -376,6 +376,14 @@
       "retryable": false,
       "reserved": true,
       "first_unit": "B07"
+    },
+    {
+      "code": "claim_replayed",
+      "layer": "claim",
+      "http_status": 409,
+      "retryable": true,
+      "reserved": true,
+      "first_unit": "B07"
     }
   ]
 }

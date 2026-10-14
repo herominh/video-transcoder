@@ -83,7 +83,8 @@
             "service_unavailable",
             "invalid_bootstrap_token",
             "claim_conflict",
-            "claim_refused"
+            "claim_refused",
+            "claim_replayed"
           ]
         },
         "message": {

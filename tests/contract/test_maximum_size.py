@@ -31,6 +31,8 @@ MAX_SOURCE_BYTES = 32_212_254_720
 MAX_DURATION_MS = 21_600_000
 MAX_ARTIFACTS = 25_209
 REL_PATH = "a" * 32 + "/" + "a" * 31 + "/" + "a" * 31 + "/" + "a" * 31
+# The completed result's manifest.path: a const of its schema (README section 15.2, "The fixed keys").
+MANIFEST_PATH = "generation-manifest.json"
 OBJECT_KEY = "a/" * 255 + "aa"
 BOOTSTRAP_TOKEN = "t" * files.read_json("schemas/common.schema.json")["$defs"]["bootstrap_token"]["maxLength"]
 BUCKET = "b" * files.read_json("schemas/common.schema.json")["$defs"]["bucket"]["maxLength"]
@@ -149,7 +151,7 @@ def worst_cases() -> dict[MessageKind, dict[str, Any]]:
             "generation_id": UUID,
             "manifest": {
                 "location_id": UUID,
-                "path": REL_PATH,
+                "path": MANIFEST_PATH,
                 "sha256": SHA256,
                 "size_bytes": 8_388_608,
                 "artifact_count": MAX_ARTIFACTS,
