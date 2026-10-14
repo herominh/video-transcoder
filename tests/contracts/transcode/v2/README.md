@@ -17,7 +17,7 @@ encoding, trailing newline): both repositories mark it `-text` in `.gitattribute
 | `README.md` | this rule text |
 | `SHA256SUMS` | `<sha256>  <relative path>\n` for every other file, sorted by path bytes, LF endings |
 | `versions.json` | accepted versions per line (`protocol`, `manifest`) and channel (`draft`, `live`) |
-| `limits.json` | byte limits per kind and carrier, `max_json_depth`, `max_tokens`, `clock_skew_seconds`, `max_segments_per_rendition` |
+| `limits.json` | byte limits per kind and carrier, `max_json_depth`, `max_tokens`, `clock_skew_seconds`, `max_segments_per_rendition`, `storage_call_margin_seconds` |
 | `reason-codes.json` | every reason code: layer, HTTP status (B07), retryable, reserved, first unit |
 | `artifact-kinds.json` | active and reserved artifact kinds per manifest version |
 | `schemas/common.schema.json` | shared `$defs` |
@@ -215,7 +215,8 @@ generation's 16-byte AES-128 key in lowercase hex, which the Hub sends only for 
 and only in the body of the claim response to the runtime it grants (section 15). No other kind
 carries it, and the worker never puts it in a message. `bucket` and `credential_ref` name a
 location's bucket and the worker's configured access to it; `credential_ref` is a name, never a
-secret. Free text (`message`, `error.detail`, `error.message`, `diagnostics[].detail`,
+secret. `transcode.request` `claim.bootstrap_token` is a secret of its dispatch: neither side
+logs it or puts it in any other message or output, and the Hub stores only its SHA-256. Free text (`message`, `error.detail`, `error.message`, `diagnostics[].detail`,
 `encoder.ffmpeg_version`) and `ext` string values are printable ASCII and refuse the substring
 `://` (the `ascii_text_*` definitions: `not` `[^\x20-\x7e]` and `allOf` `not` `://`). Free text is
 producer-sanitized and never holds a URL (`://` is refused); the contract cannot prove that opaque
@@ -245,7 +246,7 @@ profile) and is not a request field.
 The claim kinds: `runtime_id` is a lowercase UUID. `output.prefix` is an object key (at most 512
 characters, no leading or trailing `/`, no `.` or `..` segment); the contract fixes no literal
 layout, only that its last segment is the generation (S30). `cause` is one of `refused`,
-`unreachable`, `invalid_answer`; `hub_error_code` is required when the cause is `refused` and
+`unreachable`, `invalid_answer`, `expired` (15.1, rule 7); `hub_error_code` is required when the cause is `refused` and
 forbidden otherwise. It repeats the `error.code` of the refusing `hub.error`; its schema is the
 shape of a reason code, not the enum of this version, so this kind's schema does not change when
 a later version adds a code (a worker still accepts only a `hub.error` whose code its own version
@@ -406,6 +407,28 @@ reads it, whatever the channel:
 `expect.<name>` is missing when `expect` itself is missing or null. An empty version list is present
 (not missing): it makes every message `unsupported_version`.
 
+### 9.4 Which values `expect` holds
+
+The Hub builds `expect` from its own records, and which record depends on the kind:
+
+* `transcode.claim`: the dispatch's identity as recorded, with the organization's **current**
+  `placement_epoch` and the video's **current** `lifecycle_revision`. A claim for a video that was
+  deleted or restored since its dispatch (a higher `lifecycle_revision`), or whose organization
+  moved to another cell (a higher `placement_epoch`), fails S12 or S11, and no execution starts.
+* `transcode.progress`, both results, `transcode.unclaimed` and `generation.manifest`: the values
+  **recorded on the dispatch and on its execution** (`placement_epoch` and `lifecycle_revision`
+  as dispatched, `execution_id` and `execution_fence` as granted), never the current ones. The
+  outcome of an execution that ran across a deletion, a restore or a cell move is therefore accepted
+  and its cost settled. Whether a completed result is published is decided by the publication's
+  own conditional step, against the current values: a result whose video's revision or organization's epoch
+  moved since its dispatch is never published.
+* `hub_sender` (the request and the grant): the dispatch as recorded, which equals the current
+  values when the grant is made (the claim passed S11 and S12).
+* The Hub raises `lifecycle_revision` at every lifecycle decision of a video, among them its
+  deletion, its restore, its purge request and every publication; a move between folders or
+  libraries is no lifecycle decision and raises nothing. It raises `execution_fence`
+  at every grant for the video, so a grant's fence is above every earlier grant's for that video.
+
 ## 10. Compatibility rules
 
 | Id | Rule |
@@ -439,8 +462,16 @@ reads it, whatever the channel:
 The schema enum holds only the active kinds of the declared manifest version, so a reserved or
 unknown kind fails L3 and the whole manifest is rejected; it is never skipped. Adding a kind means a
 new manifest minor that the Hub reader accepts before any worker writes it. `artifact-kinds.json` lists
-active and reserved kinds per manifest version and equals the schema enum. The encryption key and the
-manifest itself are never artifacts.
+active and reserved kinds per manifest version and equals the schema enum. The encryption key, the
+manifest itself and the stored result (15.1, rule 9) are never artifacts.
+
+**The key line.** With encryption `aes-128`, every media playlist holds, immediately before each
+segment's `#EXTINF` line, `#EXT-X-KEY:METHOD=AES-128,URI="enc.key",IV=0x` followed by 32
+lowercase hex digits: the segment's media sequence number (the playlist's `#EXT-X-MEDIA-SEQUENCE`
+is 0) as a 128-bit big-endian integer. `enc.key` is a fixed literal that names no object: the key
+is never stored with the generation, and the Hub replaces the URI when it serves the playlist. It
+is the only reference a playlist holds outside the inventory. With `none`, no playlist holds a
+key line.
 
 ## 12. Signing and carriers
 
@@ -464,15 +495,24 @@ manifest itself are never artifacts.
 * **RunPod input** (`carriers/runpod-input.schema.json`) validates the value of RunPod's `input`
   object: `{"vh_message": <message text>, "vh_signature": "hmac-sha256=<hex>"}`, nothing else;
   `vh_message` at most 4,096 characters. **RunPod output** (`carriers/runpod-output.schema.json`) is
-  the same shape, returned by the worker handler for both outcomes and for a `transcode.unclaimed` report, `vh_message` at most 16,384
+  the same shape, returned by the worker handler for both outcomes and for a `transcode.unclaimed` report (a start
+  that refused its dispatch returns none, 15.1 rule 7), `vh_message` at most 16,384
   characters. `vh_message` holds only printable ASCII and JSON whitespace (tab, LF, CR); every
   accepted message is ASCII in all its bytes (section 4, step 1, overwritten duplicates included),
   so characters equal bytes, and decoding the JSON string yields the exact message bytes. The raw limits of `limits.json` `carrier_max_bytes` (`runpod.input` 8,448,
   `runpod.output` 33,024) apply to the serialized carrier value.
 * **Live receiver order (B07, not B03):** L0, L1, L2, then key lookup by `key_id` (`unknown_key_id`),
   then signature verification over the exact received bytes (`invalid_signature`), then L3, L4 and
-  dedupe (`duplicate_message`, `conflicting_terminal_result`). B03 fixtures carry no signatures, so B03
+  dedupe (below). B03 fixtures carry no signatures, so B03
   checks key id membership in L4 (S3).
+* **Dedupe (B07).** An execution has exactly one terminal message, `transcode.result.completed` or
+  `transcode.result.failed`, and the worker sends the same bytes on every channel (the callback,
+  the RunPod output and the stored result, 15.1 rule 9). The Hub keys terminal outcomes by
+  `execution_id`: a terminal message whose bytes equal the accepted one's is answered
+  `duplicate_message` (200, with the prior outcome), and one whose bytes differ is answered
+  `conflicting_terminal_result` (409); neither changes the outcome. Progress is deduplicated by
+  `event_seq` (S22) and `transcode.unclaimed` by `message_id`. A claim is never deduplicated: a
+  claim whose `message_id` repeats is refused (15.2).
 * **`signing/vectors.json`**: `keys` (`key_id`, `direction`, `key_hex`; test-only keys),
   `vectors` (`id`, `category`, `purpose`, `message_file`, `key_id` = the key to verify with,
   `v1_timestamp` on the `v1_signing_input` vector, `value`, `valid`), and `carrier_examples` (`carrier`, `schema`, `vector`, `value`: a carrier value whose
@@ -488,7 +528,7 @@ manifest itself are never artifacts.
 `limits.json`: `max_bytes` per kind (request 4,096; progress 4,096; completed 16,384; failed 16,384;
 `hub.error` 2,048; manifest 8,388,608; claim, claim grant and unclaimed 4,096 each), `carrier_max_bytes` (`runpod.input` 8,448, `runpod.output`
 33,024), `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
-`max_segments_per_rendition` 3,600. The worst case of every kind (every string at its maximum length
+`max_segments_per_rendition` 3,600, `storage_call_margin_seconds` 600 (15.1, rule 8; 15.2). The worst case of every kind (every string at its maximum length
 in the costliest characters, every integer at its maximum, every array full, every optional member
 present, `/` written as `\/`) passes its schema and fits its limit; both suites build it, prove it
 maximal against the schema's bounds, and measure it.
@@ -502,7 +542,7 @@ for such writers; receivers accept any JSON text within the byte limit.
 returns; null when the code never becomes an HTTP response), `retryable`, `reserved` (not produced by
 the validation pipeline: `invalid_signature`, `duplicate_message`, `conflicting_terminal_result`,
 `manifest_digest_mismatch`, `internal_error`, `service_unavailable`, and the claim core's
-`invalid_bootstrap_token`, `claim_conflict`, `claim_refused`; section 15) and `first_unit`.
+`invalid_bootstrap_token`, `claim_conflict`, `claim_refused`, `claim_replayed`; section 15) and `first_unit`.
 `dispatch_expired` is not reserved: S6 produces it on the worker, and it is also the claim core's
 answer to a claim that arrives after the bootstrap's expiry (section 15.2), with status 410. The PHP and
 Python enums equal this list, and `hub.error`'s `error.code` enum equals it too.
@@ -522,7 +562,7 @@ file (9.2), validate, and assert:
   (`instance_path` is null for L0 and L1; for `schema` it is the first error both libraries report,
   section 6).
 
-Catalog rules: 26 positive and 148 negative cases, ids `P01`-`P27` and `N01`-`N148` (two or three
+Catalog rules: 28 positive and 149 negative cases, ids `P01`-`P29` and `N01`-`N149` (two or three
 digits). `P17` is retired: it pinned an integer-valued float as accepted, and its payload became
 `N76` when number literals had to be integer literals. Large payloads (`P21`, `N84`, `N112`, `N113`)
 are stored compact; every file stays under 1 MB; every non-reserved reason code is produced by at
@@ -584,22 +624,50 @@ the rules below bind the worker and the Hub's claim core, which keeps the state.
    it receives is never logged, stored or put in the provider's job output, and the key of a
    response the runtime does not accept (rule 7) is discarded at once, unused.
 6. When the request fails in transport, times out, or is answered with a `hub.error` whose
-   `retryable` is true, it may send the claim again, with the same `runtime_id` and token and a new
-   `message_id` and `sent_at`, until the dispatch's `claim.expires_at`. It never claims after that
-   instant.
+   `retryable` is true, it may send the claim again, after at least the error's `retry_after_s`
+   when it carries one, with the same `runtime_id` and token and a new
+   `message_id` and `sent_at`, until the dispatch's `claim.expires_at`, by its own clock. It never claims after that
+   instant. S6 accepts a dispatch up to `claim.expires_at` plus the skew, so that a runtime whose
+   clock runs ahead still reports: a dispatch it accepted after that instant is answered by rule
+   7's `expired`, never by a claim.
 7. In every other case it does no work: it reads no source and writes no object. It reports
    `transcode.unclaimed` where it would have reported a result, with `cause` `refused` (a
    `hub.error` that is not retryable, or still retryable at the expiry; `hub_error_code` is that
-   error's code), `unreachable` (no answer until the expiry) or `invalid_answer` (any other answer,
-   a grant that does not verify or is not accepted included). A `hub.error` is unsigned: the worker
-   never acts on one except by not working.
+   error's code), `unreachable` (no answer until the expiry), `invalid_answer` (any other answer,
+   a grant that does not verify or is not accepted included) or `expired` (it sent no claim
+   because `claim.expires_at` had passed by its own clock, rule 6). A `hub.error` is
+   unsigned: the worker never acts on one except by not working. A start that refuses the dispatch
+   itself (a verdict other than accepted at `worker_receiver`, or a signature that does not
+   verify) has no identity it may report under: it sends no message and ends the provider job
+   as failed, the failure's text naming only the refusing step, layer and reason, never content. A
+   receiver reads a failed provider job, an absent output and an output that is no carrier alike:
+   no message, and nothing settled.
+8. **Its deadline.** A runtime's deadline is the instant it started plus the dispatch's
+   `limits.max_wall_time_ms`, by its own clock. From that instant it starts no storage write (no
+   object put, no part upload, no multipart completion), sends no further byte of a write in
+   flight, starts no retry of one, closes every write call still open within `limits.json`
+   `storage_call_margin_seconds`, and aborts every multipart upload it opened. When it was granted
+   and has not yet built and signed its terminal message, it then builds and reports
+   `transcode.result.failed` with error class `deadline_exceeded`. A runtime that built and signed
+   its terminal message before its deadline returns those same bytes as its provider output and
+   starts no new callback attempt after the deadline (section 12: one terminal message per
+   execution). Reads are not bounded by this rule. A runtime that was not granted writes nothing
+   at any time (rule 7).
+9. **Its fixed keys.** A granted runtime writes its generation manifest at
+   `{output.prefix}/generation-manifest.json` (the completed result's `manifest.path` is
+   `generation-manifest.json`), and, before it reports its terminal result, attempts to write the carrier value of
+   that result in the RunPod output shape (`vh_message`, the exact message bytes, and
+   `vh_signature`) at `{output.prefix}/result.json`, while its deadline allows a write (rule 8:
+   a result reported after the deadline is not stored); a write that fails, or that the deadline
+   forbids, never holds back the report. Neither is an artifact (section 11).
 
 ### 15.2 The Hub's claim core
 
 The Hub validates the claim (`hub_receiver`, `transcode.claim`, with the live receiver order of
 section 12) against the dispatch its `dispatch_id` names, then decides in one atomic step. A claim
 whose `dispatch_id` names no dispatch of the Hub is answered `hub.error` `dispatch_mismatch`,
-before the token is looked at. The rows are tried in order and the first that matches decides:
+before the token is looked at: after L0 to L3 and the signature, before L4, whose context needs
+the dispatch. A claim whose `message_id` the replay record holds (below) is answered `hub.error` `claim_replayed` (retryable) and decided no further (below). The rows are tried in order and the first that matches decides:
 
 | # | Case | Answer |
 |---|---|---|
@@ -607,9 +675,10 @@ before the token is looked at. The rows are tried in order and the first that ma
 | 2 | an execution was granted for the dispatch to another `runtime_id`, whatever became of it since | `hub.error` `claim_conflict`: no authority and no new execution, also after that execution ended or its deadline passed |
 | 3 | an execution was granted to this same `runtime_id` and the Hub still holds it as the dispatch's execution (it has not ended and the Hub has not withdrawn it) | the same grant again: identity, `runtime_id`, `generation_id`, `output` and `media_key` identical, `message_id` and `sent_at` new. A limit that is reached never refuses this row: the granted execution is what holds the limit's place |
 | 4 | an execution was granted to this same `runtime_id` and it has ended or the Hub has withdrawn it (the organization was suspended, the work was cancelled) | `hub.error` `claim_refused` |
-| 5 | no execution was granted and the dispatch's bootstrap has expired | `hub.error` `dispatch_expired` |
-| 6 | no execution was granted and the Hub's records no longer authorize the work for a reason no semantic check names (the organization is suspended, a limit is reached) | `hub.error` `claim_refused` |
-| 7 | otherwise | it mints `execution_id` (a fresh UUID, also the generation id), sets `execution_fence`, binds them to the claim's `runtime_id`, consumes the bootstrap and answers `transcode.claim.granted`, with the dispatch's media key (`media_key_id` as dispatched) when the dispatch is encrypted |
+| 5 | no execution was granted and the dispatch's bootstrap was revoked (the Hub withdrew the dispatch before any grant: a cancellation, a confirmed rejection of its send, a replacement) | `hub.error` `claim_refused` |
+| 6 | no execution was granted and the dispatch's bootstrap has expired | `hub.error` `dispatch_expired` |
+| 7 | no execution was granted and the Hub's records no longer authorize the work for a reason no semantic check names (the organization is suspended, a limit is reached) | `hub.error` `claim_refused` |
+| 8 | otherwise | it mints `execution_id` (a fresh UUID, also the generation id), sets `execution_fence`, binds them to the claim's `runtime_id`, consumes the bootstrap and answers `transcode.claim.granted`, with the dispatch's media key (`media_key_id` as dispatched) when the dispatch is encrypted |
 
 * The media key travels only in the claim response, and the claim address is served only over TLS
   (15.1, rule 2); the claim route never redirects a plain-HTTP request to HTTPS. A claim that
@@ -624,26 +693,76 @@ before the token is looked at. The rows are tried in order and the first that ma
   `runtime_id`, for as long as the Hub holds the execution; the Hub never logs a claim body and
   never exposes a granted `runtime_id`. A claim body is therefore as sensitive as the key it can
   fetch: whoever holds a valid one, captured or built with the worker's signing key and the
-  dispatch's token, obtains the key at row 7 or row 3. That is why 15.1's rules 2 and 5 (the
+  dispatch's token, obtains the key at row 8 or row 3. That is why 15.1's rules 2 and 5 (the
   worker) and this section's TLS-only route and logging rule (the Hub) keep claim bodies off any
   untrusted path and out of every log.
 * A deleted or superseded video has a higher `lifecycle_revision`, and a moved organization a
   higher `placement_epoch`: those claims fail S12 or S11 before the table applies.
-* The dedupe step of section 12 does not apply to a claim: a claim whose `message_id` repeats an
-  earlier one is decided by the table like any other, never answered `duplicate_message`.
+* **The replay record.** The Hub records the `message_id` of every claim whose signature verified and
+  whose `dispatch_id` names a dispatch of the Hub, whatever its answer, a server error included: the record is committed before the claim is
+  decided, so a decision that fails or rolls back leaves it. It keeps it for at least twice
+  `clock_skew_seconds` after its `sent_at`, and answers a
+  claim that repeats one with `hub.error` `claim_replayed`, retryable, and no grant. A captured claim
+  replayed inside the skew window keeps its `message_id`, because re-signing it needs the worker's
+  key; every legitimate retry carries a new one (15.1, rule 6), so the refusal costs a correct
+  runtime nothing. The dedupe step of section 12 does not apply to a claim otherwise.
+* Every response of the claim route, a grant or a `hub.error`, carries `Cache-Control: no-store`.
+  A `hub.error`'s `retryable` is the value `reason-codes.json` gives its code.
+* **One key per dispatch.** For every encrypted dispatch, a replacement dispatch included, the Hub
+  draws a fresh random 16-byte key and a fresh `media_key_id`, never an earlier key of the video
+  or of any other dispatch: a key protects at most one execution, so the key of a superseded
+  generation never decrypts another.
 * A consumed bootstrap never creates a second execution. A replacement needs a new dispatch with
-  a new `dispatch_id` and a new bootstrap.
+  a new `dispatch_id` and a new bootstrap. **A replacement fences its predecessor:** it is made
+  only once the earlier dispatch's bootstrap was revoked (row 5; at the latest in the transaction
+  that records the replacement) or expired without being consumed: its `claim.expires_at` plus
+  `clock_skew_seconds` passed with no grant, or the Hub recorded it expired under the same lock as
+  the grant, after which no claim of it is granted (row 6). A replacement is a new dispatch of the
+  same attempt; a new attempt makes its own dispatches. A bootstrap is revoked only while it is unconsumed,
+  under the same lock as the grant, whatever the cause. A dispatch whose bootstrap was consumed is
+  never replaced before its execution has ended (rows 2 to 4). A bootstrap that was revoked, or that
+  expired without being consumed, proves that its dispatch never had an execution: no start of it
+  can be granted, so none did work.
+* **The last write.** At the grant the Hub records the execution's write deadline: the dispatch's
+  `claim.expires_at`, plus `limits.max_wall_time_ms`, plus twice `clock_skew_seconds`, plus
+  `storage_call_margin_seconds`. No write of the execution lands in the store after it: a granted
+  runtime started before its claim, which the Hub granted no later than `claim.expires_at` (row
+  6); it starts no write once `limits.max_wall_time_ms` has passed since its start, and it closes a write still open within the margin (15.1, rule 8); twice the skew is the
+  allowance for the two clocks. The margin bounds how long a runtime keeps a write open, not when a
+  store applies a write it received: it is a bound the contract assumes. Narrow credentials that
+  expire with the grant (B07, section 15.3) will tighten it, since no write can start after they
+  expire, but a write that started before still lands when the store applies it. A removal of the
+  execution's prefix, by a deletion or a cleanup, waits for that instant, and so does any proof
+  that the prefix is empty.
+* **Ended and withdrawn** (rows 2 to 4). An execution has ended once the Hub accepted its
+  terminal result or its write deadline passed. The Hub has withdrawn it when it ended the
+  execution's authority before then (the organization was suspended, the work was cancelled).
 * The Hub accepts progress, results and a manifest only from the execution it granted (S15, S16,
   S21). A `transcode.unclaimed` message settles nothing: it says that one start did no work, never
   what became of the granted execution.
-* A prefix is granted once and never reused.
+* **Where a prefix may lie.** A prefix is granted once and never reused. Every granted prefix lies
+  in the location its dispatch names as output (S18) and is recorded by the Hub, with that
+  location, before the grant is answered, where a deletion of the video finds it, so that a deletion removes every prefix ever
+  granted for the video. No granted prefix followed by `/` begins another granted prefix or a
+  source object key, and none is begun by one: the removal of one prefix never reaches into
+  another, nor into an original.
+* **The fixed keys.** The Hub reads a generation's manifest only at
+  `{output.prefix}/generation-manifest.json` of the granted prefix, and a completed result whose
+  `manifest.path` is another fails L3 (`transcode.result.completed` fixes it as a constant). It reads `{output.prefix}/result.json` only when neither
+  the callback nor the RunPod output delivered a terminal result, and judges it as a message of
+  the `poll` channel (`hub_receiver`), its signature included.
 
 ### 15.3 Outside this version
 
 The grant carries no storage credential, no lease and no deadline: the worker still holds its
-configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its run. It
+configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its run from its own start (15.1, rule 8; 15.2, the write deadline). It
 carries the media key since the amendment of 2026-10-10 (C1b): the plan's protected channel, so the
-dispatch never needs one. Narrow credentials issued with the grant, the lease and its renewal are
+dispatch never needs one. The amendment of 2026-10-15 (C1c) added, after the pilot stream's
+review: the runtime's deadline and the execution's write deadline (15.1 rule 8, 15.2), where a
+prefix may lie, one key per dispatch, the revoked bootstrap (row 5), the replay record
+(`claim_replayed`), the fixed keys of the manifest and the stored result (15.1 rule 9), the cause
+`expired` and a refused dispatch's output (15.1 rule 7), which values `expect` holds (9.4), the
+dedupe of terminal messages (section 12) and the key line (section 11). Narrow credentials issued with the grant, the lease and its renewal are
 B07's and arrive as a later protocol version that both sides list before either writes it (C5);
 those credentials will replace the configured access profile that `credential_ref` names, the
 dispatch still naming the location (section 7, "Reaching a location"). Until then one configured

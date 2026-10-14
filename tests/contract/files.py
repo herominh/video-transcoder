@@ -13,7 +13,7 @@ from typing import Any
 
 CONTRACT_ROOT: Path = Path(__file__).resolve().parent.parent / "contracts" / "transcode" / "v2"
 CHECKSUM_FILE = "SHA256SUMS"
-EXPECTED_CONTRACT_DIGEST = "e31fefb6b3230eb52f598b209adae83f4a38b9ba2bfa8e664a63febeda13f31e"
+EXPECTED_CONTRACT_DIGEST = "45560c6f9d0130da5e3e47ebe9d14d810ebd6def0e2ff63f5cd2c249dcaa30dc"
 
 _FORBIDDEN_SEGMENTS = frozenset({"", ".", ".."})
 

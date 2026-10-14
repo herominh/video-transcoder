@@ -61,7 +61,8 @@
           "$ref": "common.schema.json#/$defs/uuid"
         },
         "path": {
-          "$ref": "common.schema.json#/$defs/rel_path"
+          "type": "string",
+          "const": "generation-manifest.json"
         },
         "sha256": {
           "$ref": "common.schema.json#/$defs/sha256"

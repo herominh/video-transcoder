@@ -366,6 +366,34 @@
       }
     },
     {
+      "id": "P28",
+      "payload": "fixtures/unclaimed/P28-expired-before-any-claim.json",
+      "context": "fixtures/contexts/ctx-hub-unclaimed-poll.json",
+      "rule": "15.1, 7 if/else",
+      "purpose": "A start that sent no claim because claim.expires_at had passed by its own clock: cause expired, no hub_error_code",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
+      "id": "P29",
+      "payload": "fixtures/hub-error/P29-claim-replayed-retryable.json",
+      "context": "fixtures/contexts/ctx-worker-error.json",
+      "rule": "13, 15.2 the replay record",
+      "purpose": "The claim core refuses a claim whose message_id it has already seen: claim_replayed, retryable",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
+    },
+    {
       "id": "N01",
       "payload": "fixtures/progress/N01-oversized-by-whitespace.json",
       "context": "fixtures/contexts/ctx-hub-push.json",
@@ -2162,7 +2190,7 @@
       "payload": "fixtures/unclaimed/N129-unknown-cause.json",
       "context": "fixtures/contexts/ctx-hub-unclaimed-poll.json",
       "rule": "C11",
-      "purpose": "Cause expired is not one of refused, unreachable, invalid_answer",
+      "purpose": "Cause skipped is not one of refused, unreachable, invalid_answer, expired",
       "context_needed": false,
       "expect": {
         "outcome": "reject",
@@ -2435,6 +2463,20 @@
         "layer": "schema",
         "reason": "schema_violation",
         "instance_path": "/output/credential_ref"
+      }
+    },
+    {
+      "id": "N149",
+      "payload": "fixtures/result-completed/N149-manifest-at-another-path.json",
+      "context": "fixtures/contexts/ctx-hub-push.json",
+      "rule": "15.1 rule 9, 15.2 the fixed keys",
+      "purpose": "manifest.path is other-manifest.json, a valid relative path: the Hub reads a manifest only at generation-manifest.json",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/manifest/path"
       }
     }
   ]

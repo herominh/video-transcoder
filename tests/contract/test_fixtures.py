@@ -15,8 +15,8 @@ PAYLOAD_DIRECTORIES = (
     "request", "progress", "result-completed", "result-failed", "hub-error", "manifest", "claim", "claim-granted",
     "unclaimed",
 )
-EXPECTED_POSITIVE_IDS = {f"P{number:02d}" for number in range(1, 28)} - {"P17"}  # P17 retired into N76
-EXPECTED_NEGATIVE_IDS = {f"N{number:02d}" for number in range(1, 149)}
+EXPECTED_POSITIVE_IDS = {f"P{number:02d}" for number in range(1, 30)} - {"P17"}  # P17 retired into N76
+EXPECTED_NEGATIVE_IDS = {f"N{number:02d}" for number in range(1, 150)}
 
 # README section 14: an S7 case also fails the equality check of the aliased id where its row runs one (S13 for
 # N45, S15 for N91); N126, whose row runs no S15, fails S21 instead. Every other negative fails its pinned check
@@ -108,12 +108,12 @@ def test_catalog_when_validated_should_satisfy_catalog_schema():
     assert pointers == []
 
 
-def test_catalog_when_counted_should_hold_26_positive_and_148_negative_cases():
+def test_catalog_when_counted_should_hold_28_positive_and_149_negative_cases():
     # Act
     counts = (len(POSITIVE_CASES), len(NEGATIVE_CASES))
 
     # Assert
-    assert counts == (26, 148)
+    assert counts == (28, 149)
 
 
 def test_catalog_when_listed_should_hold_exactly_the_expected_case_ids():

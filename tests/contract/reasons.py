@@ -65,3 +65,4 @@ class ReasonCode(str, Enum):
     INVALID_BOOTSTRAP_TOKEN = "invalid_bootstrap_token"
     CLAIM_CONFLICT = "claim_conflict"
     CLAIM_REFUSED = "claim_refused"
+    CLAIM_REPLAYED = "claim_replayed"
