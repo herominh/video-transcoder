@@ -46,7 +46,8 @@
       "enum": [
         "refused",
         "unreachable",
-        "invalid_answer"
+        "invalid_answer",
+        "expired"
       ]
     },
     "hub_error_code": {

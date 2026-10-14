@@ -318,11 +318,17 @@ def test_unclaimed_when_three_hours_old_on_the_push_channel_should_be_out_of_tol
 
 @pytest.mark.parametrize(
     ("cause", "hub_error_code"),
-    [("refused", None), ("unreachable", "claim_conflict"), ("invalid_answer", "claim_conflict")],
+    [
+        ("refused", None),
+        ("unreachable", "claim_conflict"),
+        ("invalid_answer", "claim_conflict"),
+        ("expired", "claim_conflict"),
+    ],
     ids=[
         "refused without the code of the refusal",
         "unreachable with a code no answer gave",
         "an invalid answer with a code",
+        "an expired dispatch with a code",
     ],
 )
 def test_unclaimed_when_hub_error_code_does_not_fit_its_cause_should_be_a_schema_violation(cause, hub_error_code):
