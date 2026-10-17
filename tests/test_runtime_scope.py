@@ -8,9 +8,15 @@ The v1 dev server (wrappers/docker_server.py) serves `core.api:app` by name, so 
 The RunPod entry point (wrappers/runpod_handler.py) is the other side of that boundary: it reaches one
 start of the worker under contract v2 (core.protocol.handler) and the job runner (core.job.runner), and
 none of the v1 worker's modules.
+
+The import endpoint's entry point (wrappers/runpod_import_handler.py; its image ships core/drive_import/ and
+core/__init__.py alone) reaches the import job (core.drive_import) and nothing of the transcode: no core.protocol,
+no core.job, no v1 module. The transcode's RunPod entry point reaches nothing of the import.
 """
 
 import ast
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,7 +25,17 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_PACKAGE = "core.protocol"
 ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py", "wrappers/docker_server.py"]
 RUNPOD_ENTRY_POINT = "wrappers/runpod_handler.py"
+IMPORT_ENTRY_POINT = "wrappers/runpod_import_handler.py"
+IMPORT_PACKAGE = "core.drive_import"
+IMPORT_REQUIREMENTS = "requirements-import.txt"
+# A requirement line's distribution name: what comes before a version specifier, an extra or a marker.
+REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+JOB_PACKAGE = "core.job"
 V1_MODULES = ["core.api", "core.config", "core.transcoder", "core.storage", "core.callback", "core.signing"]
+
+
+def _in_package(name: str, package: str) -> bool:
+    return name == package or name.startswith(package + ".")
 
 
 def _module_path(module: str) -> Path | None:
@@ -111,3 +127,72 @@ def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_a_v
 
     # Assert
     assert sorted(name for name in reachable if name in V1_MODULES) == []
+
+
+def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_the_import_job():
+    # Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / RUNPOD_ENTRY_POINT)
+
+    # Assert
+    assert sorted(name for name in reachable if _in_package(name, IMPORT_PACKAGE)) == []
+
+
+def test_import_entry_point_when_its_imports_are_followed_should_reach_the_import_job_and_its_contract():
+    # Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
+
+    # Assert
+    assert {"core.drive_import.job", "core.drive_import.contract", "core.drive_import.input_check"} <= reachable
+
+
+def test_import_entry_point_when_its_imports_are_followed_should_never_reach_the_transcode_or_a_v1_module():
+    # Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
+
+    # Assert
+    transcode = [name for name in reachable if _in_package(name, PROTOCOL_PACKAGE) or _in_package(name, JOB_PACKAGE)]
+    assert sorted(transcode) == []
+    assert sorted(name for name in reachable if name in V1_MODULES) == []
+
+
+def test_import_entry_point_when_its_imports_are_followed_should_reach_only_what_its_image_ships():
+    # Act: the import image copies core/__init__.py, core/drive_import/ and the entry point, nothing else of core/
+    reachable = _reachable_modules(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
+
+    # Assert
+    shipped = ("core", "wrappers.runpod_import_handler")
+    outside = [name for name in reachable if name not in shipped and not _in_package(name, IMPORT_PACKAGE)]
+    assert sorted(outside) == []
+
+
+def _third_party_imports(entry: Path) -> set[str]:
+    """The top-level names of what the repository modules that `entry` can run import from outside the repository
+    and outside the standard library."""
+    names: set[str] = set()
+    for module in _reachable_modules(entry):
+        path = _module_path(module)
+        if path is None:
+            continue
+        for imported in _imported_names(path):
+            top = imported.split(".")[0]
+            if top and top != "__future__" and top not in sys.stdlib_module_names and _module_path(top) is None:
+                names.add(top)
+    return names
+
+
+def _requirements(name: str) -> set[str]:
+    names: set[str] = set()
+    for line in (REPOSITORY_ROOT / name).read_text(encoding="utf-8").splitlines():
+        match = REQUIREMENT_NAME.match(line.split("#")[0])
+        if match is not None:
+            names.add(match.group(1).lower().replace("-", "_"))
+    return names
+
+
+def test_import_entry_point_when_its_imports_are_followed_should_need_only_what_its_image_installs():
+    # Act: every distribution of these happens to be named as its import is
+    imported = _third_party_imports(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
+
+    # Assert
+    assert {"requests", "jsonschema", "referencing", "runpod"} <= imported
+    assert sorted(imported - _requirements(IMPORT_REQUIREMENTS)) == []

@@ -1,0 +1,82 @@
+{
+  "contract": "import/v1",
+  "job": "0199f1a0-2222-7000-8000-000000000002",
+  "file_id": "1AbCdEfGhIjKlMnOpQrStUvWxYz012xyz",
+  "resource_key": null,
+  "expected": {
+    "size": 0,
+    "md5": "9e107d9d372bb6826bd81d3542a419d6",
+    "sha1": null,
+    "sha256": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
+    "head_revision_id": "0B1aBcDeFgHiJkLmNoPqRsTuVwXyZ"
+  },
+  "plan": {
+    "part_size": 67108864,
+    "parts_total": 15
+  },
+  "parts": [
+    {
+      "n": 1,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=1&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-001"
+    },
+    {
+      "n": 2,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=2&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-002"
+    },
+    {
+      "n": 3,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=3&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-003"
+    },
+    {
+      "n": 4,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=4&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-004"
+    },
+    {
+      "n": 5,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=5&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-005"
+    },
+    {
+      "n": 6,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=6&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-006"
+    },
+    {
+      "n": 7,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=7&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-007"
+    },
+    {
+      "n": 8,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=8&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-008"
+    },
+    {
+      "n": 9,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=9&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-009"
+    },
+    {
+      "n": 10,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=10&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-010"
+    },
+    {
+      "n": 11,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=11&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-011"
+    },
+    {
+      "n": 12,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=12&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-012"
+    },
+    {
+      "n": 13,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=13&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-013"
+    },
+    {
+      "n": 14,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=14&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-014"
+    },
+    {
+      "n": 15,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=15&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-015"
+    }
+  ],
+  "receipt_url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/import-receipt-0199f1a0-2222-7000-8000-000000000002.json?X-Amz-Expires=1013&X-Amz-Signature=test-signature-receipt",
+  "writes_end_at": "2026-10-17T09:16:53Z",
+  "mac": "aeca00c5b10022a60d4472183fec611058fd6b65ad139615d49607984ef30a93"
+}

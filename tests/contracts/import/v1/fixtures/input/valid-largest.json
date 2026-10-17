@@ -1,0 +1,662 @@
+{
+  "contract": "import/v1",
+  "job": "0199f1a0-2222-7000-8000-000000000002",
+  "file_id": "1AbCdEfGhIjKlMnOpQrStUvWxYz012xyz",
+  "resource_key": null,
+  "expected": {
+    "size": 10737418240,
+    "md5": "9e107d9d372bb6826bd81d3542a419d6",
+    "sha1": null,
+    "sha256": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
+    "head_revision_id": "0B1aBcDeFgHiJkLmNoPqRsTuVwXyZ"
+  },
+  "plan": {
+    "part_size": 67108864,
+    "parts_total": 160
+  },
+  "parts": [
+    {
+      "n": 1,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=1&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-001"
+    },
+    {
+      "n": 2,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=2&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-002"
+    },
+    {
+      "n": 3,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=3&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-003"
+    },
+    {
+      "n": 4,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=4&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-004"
+    },
+    {
+      "n": 5,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=5&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-005"
+    },
+    {
+      "n": 6,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=6&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-006"
+    },
+    {
+      "n": 7,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=7&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-007"
+    },
+    {
+      "n": 8,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=8&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-008"
+    },
+    {
+      "n": 9,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=9&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-009"
+    },
+    {
+      "n": 10,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=10&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-010"
+    },
+    {
+      "n": 11,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=11&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-011"
+    },
+    {
+      "n": 12,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=12&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-012"
+    },
+    {
+      "n": 13,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=13&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-013"
+    },
+    {
+      "n": 14,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=14&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-014"
+    },
+    {
+      "n": 15,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=15&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-015"
+    },
+    {
+      "n": 16,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=16&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-016"
+    },
+    {
+      "n": 17,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=17&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-017"
+    },
+    {
+      "n": 18,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=18&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-018"
+    },
+    {
+      "n": 19,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=19&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-019"
+    },
+    {
+      "n": 20,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=20&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-020"
+    },
+    {
+      "n": 21,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=21&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-021"
+    },
+    {
+      "n": 22,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=22&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-022"
+    },
+    {
+      "n": 23,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=23&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-023"
+    },
+    {
+      "n": 24,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=24&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-024"
+    },
+    {
+      "n": 25,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=25&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-025"
+    },
+    {
+      "n": 26,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=26&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-026"
+    },
+    {
+      "n": 27,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=27&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-027"
+    },
+    {
+      "n": 28,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=28&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-028"
+    },
+    {
+      "n": 29,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=29&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-029"
+    },
+    {
+      "n": 30,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=30&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-030"
+    },
+    {
+      "n": 31,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=31&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-031"
+    },
+    {
+      "n": 32,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=32&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-032"
+    },
+    {
+      "n": 33,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=33&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-033"
+    },
+    {
+      "n": 34,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=34&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-034"
+    },
+    {
+      "n": 35,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=35&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-035"
+    },
+    {
+      "n": 36,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=36&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-036"
+    },
+    {
+      "n": 37,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=37&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-037"
+    },
+    {
+      "n": 38,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=38&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-038"
+    },
+    {
+      "n": 39,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=39&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-039"
+    },
+    {
+      "n": 40,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=40&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-040"
+    },
+    {
+      "n": 41,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=41&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-041"
+    },
+    {
+      "n": 42,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=42&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-042"
+    },
+    {
+      "n": 43,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=43&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-043"
+    },
+    {
+      "n": 44,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=44&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-044"
+    },
+    {
+      "n": 45,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=45&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-045"
+    },
+    {
+      "n": 46,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=46&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-046"
+    },
+    {
+      "n": 47,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=47&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-047"
+    },
+    {
+      "n": 48,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=48&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-048"
+    },
+    {
+      "n": 49,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=49&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-049"
+    },
+    {
+      "n": 50,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=50&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-050"
+    },
+    {
+      "n": 51,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=51&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-051"
+    },
+    {
+      "n": 52,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=52&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-052"
+    },
+    {
+      "n": 53,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=53&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-053"
+    },
+    {
+      "n": 54,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=54&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-054"
+    },
+    {
+      "n": 55,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=55&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-055"
+    },
+    {
+      "n": 56,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=56&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-056"
+    },
+    {
+      "n": 57,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=57&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-057"
+    },
+    {
+      "n": 58,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=58&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-058"
+    },
+    {
+      "n": 59,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=59&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-059"
+    },
+    {
+      "n": 60,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=60&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-060"
+    },
+    {
+      "n": 61,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=61&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-061"
+    },
+    {
+      "n": 62,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=62&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-062"
+    },
+    {
+      "n": 63,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=63&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-063"
+    },
+    {
+      "n": 64,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=64&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-064"
+    },
+    {
+      "n": 65,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=65&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-065"
+    },
+    {
+      "n": 66,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=66&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-066"
+    },
+    {
+      "n": 67,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=67&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-067"
+    },
+    {
+      "n": 68,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=68&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-068"
+    },
+    {
+      "n": 69,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=69&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-069"
+    },
+    {
+      "n": 70,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=70&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-070"
+    },
+    {
+      "n": 71,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=71&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-071"
+    },
+    {
+      "n": 72,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=72&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-072"
+    },
+    {
+      "n": 73,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=73&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-073"
+    },
+    {
+      "n": 74,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=74&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-074"
+    },
+    {
+      "n": 75,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=75&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-075"
+    },
+    {
+      "n": 76,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=76&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-076"
+    },
+    {
+      "n": 77,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=77&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-077"
+    },
+    {
+      "n": 78,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=78&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-078"
+    },
+    {
+      "n": 79,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=79&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-079"
+    },
+    {
+      "n": 80,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=80&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-080"
+    },
+    {
+      "n": 81,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=81&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-081"
+    },
+    {
+      "n": 82,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=82&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-082"
+    },
+    {
+      "n": 83,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=83&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-083"
+    },
+    {
+      "n": 84,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=84&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-084"
+    },
+    {
+      "n": 85,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=85&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-085"
+    },
+    {
+      "n": 86,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=86&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-086"
+    },
+    {
+      "n": 87,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=87&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-087"
+    },
+    {
+      "n": 88,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=88&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-088"
+    },
+    {
+      "n": 89,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=89&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-089"
+    },
+    {
+      "n": 90,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=90&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-090"
+    },
+    {
+      "n": 91,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=91&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-091"
+    },
+    {
+      "n": 92,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=92&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-092"
+    },
+    {
+      "n": 93,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=93&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-093"
+    },
+    {
+      "n": 94,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=94&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-094"
+    },
+    {
+      "n": 95,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=95&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-095"
+    },
+    {
+      "n": 96,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=96&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-096"
+    },
+    {
+      "n": 97,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=97&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-097"
+    },
+    {
+      "n": 98,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=98&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-098"
+    },
+    {
+      "n": 99,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=99&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-099"
+    },
+    {
+      "n": 100,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=100&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-100"
+    },
+    {
+      "n": 101,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=101&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-101"
+    },
+    {
+      "n": 102,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=102&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-102"
+    },
+    {
+      "n": 103,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=103&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-103"
+    },
+    {
+      "n": 104,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=104&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-104"
+    },
+    {
+      "n": 105,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=105&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-105"
+    },
+    {
+      "n": 106,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=106&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-106"
+    },
+    {
+      "n": 107,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=107&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-107"
+    },
+    {
+      "n": 108,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=108&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-108"
+    },
+    {
+      "n": 109,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=109&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-109"
+    },
+    {
+      "n": 110,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=110&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-110"
+    },
+    {
+      "n": 111,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=111&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-111"
+    },
+    {
+      "n": 112,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=112&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-112"
+    },
+    {
+      "n": 113,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=113&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-113"
+    },
+    {
+      "n": 114,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=114&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-114"
+    },
+    {
+      "n": 115,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=115&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-115"
+    },
+    {
+      "n": 116,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=116&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-116"
+    },
+    {
+      "n": 117,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=117&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-117"
+    },
+    {
+      "n": 118,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=118&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-118"
+    },
+    {
+      "n": 119,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=119&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-119"
+    },
+    {
+      "n": 120,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=120&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-120"
+    },
+    {
+      "n": 121,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=121&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-121"
+    },
+    {
+      "n": 122,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=122&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-122"
+    },
+    {
+      "n": 123,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=123&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-123"
+    },
+    {
+      "n": 124,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=124&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-124"
+    },
+    {
+      "n": 125,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=125&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-125"
+    },
+    {
+      "n": 126,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=126&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-126"
+    },
+    {
+      "n": 127,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=127&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-127"
+    },
+    {
+      "n": 128,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=128&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-128"
+    },
+    {
+      "n": 129,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=129&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-129"
+    },
+    {
+      "n": 130,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=130&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-130"
+    },
+    {
+      "n": 131,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=131&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-131"
+    },
+    {
+      "n": 132,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=132&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-132"
+    },
+    {
+      "n": 133,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=133&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-133"
+    },
+    {
+      "n": 134,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=134&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-134"
+    },
+    {
+      "n": 135,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=135&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-135"
+    },
+    {
+      "n": 136,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=136&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-136"
+    },
+    {
+      "n": 137,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=137&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-137"
+    },
+    {
+      "n": 138,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=138&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-138"
+    },
+    {
+      "n": 139,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=139&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-139"
+    },
+    {
+      "n": 140,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=140&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-140"
+    },
+    {
+      "n": 141,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=141&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-141"
+    },
+    {
+      "n": 142,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=142&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-142"
+    },
+    {
+      "n": 143,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=143&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-143"
+    },
+    {
+      "n": 144,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=144&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-144"
+    },
+    {
+      "n": 145,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=145&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-145"
+    },
+    {
+      "n": 146,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=146&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-146"
+    },
+    {
+      "n": 147,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=147&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-147"
+    },
+    {
+      "n": 148,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=148&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-148"
+    },
+    {
+      "n": 149,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=149&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-149"
+    },
+    {
+      "n": 150,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=150&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-150"
+    },
+    {
+      "n": 151,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=151&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-151"
+    },
+    {
+      "n": 152,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=152&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-152"
+    },
+    {
+      "n": 153,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=153&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-153"
+    },
+    {
+      "n": 154,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=154&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-154"
+    },
+    {
+      "n": 155,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=155&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-155"
+    },
+    {
+      "n": 156,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=156&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-156"
+    },
+    {
+      "n": 157,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=157&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-157"
+    },
+    {
+      "n": 158,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=158&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-158"
+    },
+    {
+      "n": 159,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=159&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-159"
+    },
+    {
+      "n": 160,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=160&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-160"
+    }
+  ],
+  "receipt_url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/import-receipt-0199f1a0-2222-7000-8000-000000000002.json?X-Amz-Expires=1013&X-Amz-Signature=test-signature-receipt",
+  "writes_end_at": "2026-10-17T09:56:53.123456Z",
+  "mac": "68bb9beb19a466af498466c4f3f72c0e957294db4ff60c642fc7b33a420fc028"
+}

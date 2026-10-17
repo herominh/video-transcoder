@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/import/v1/output.schema.json",
+  "title": "Import contract v1: the output of one import job, as RunPod keeps it",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "status",
+    "code"
+  ],
+  "properties": {
+    "contract": {
+      "const": "import/v1"
+    },
+    "status": {
+      "enum": [
+        "imported",
+        "failed"
+      ]
+    },
+    "code": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "enum": [
+            "file_removed",
+            "link_not_shared",
+            "provider_quota",
+            "provider_refused",
+            "not_configured",
+            "size_exceeded",
+            "size_short",
+            "integrity_failed",
+            "source_changed_at_provider",
+            "deadline",
+            "download_failed",
+            "upload_failed",
+            "input_refused"
+          ]
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "const": "imported"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "code": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}
