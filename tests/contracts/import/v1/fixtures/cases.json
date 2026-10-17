@@ -1,0 +1,429 @@
+{
+  "catalog_version": 1,
+  "cases": [
+    {
+      "id": "I01",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/valid-running-example.json",
+      "purpose": "Bài 1: 900 MiB in 15 parts of 64 MiB, an MD5, a SHA-256 and a head revision, no resource key",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "I02",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/valid-one-part-with-resource-key.json",
+      "purpose": "One part, a resource key, no checksum and no head revision",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "I03",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/valid-largest.json",
+      "purpose": "10 GiB in 160 parts, a deadline with microseconds",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "I04",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-contract.json",
+      "purpose": "Another contract",
+      "verdict": "reject",
+      "instance_path": "/contract"
+    },
+    {
+      "id": "I05",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-job-not-a-uuid.json",
+      "purpose": "The job is not a UUID",
+      "verdict": "reject",
+      "instance_path": "/job"
+    },
+    {
+      "id": "I06",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-job-upper-case.json",
+      "purpose": "The job's UUID in upper case",
+      "verdict": "reject",
+      "instance_path": "/job"
+    },
+    {
+      "id": "I07",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-file-id-short.json",
+      "purpose": "A file id of 9 characters",
+      "verdict": "reject",
+      "instance_path": "/file_id"
+    },
+    {
+      "id": "I08",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-file-id-trailing-line-break.json",
+      "purpose": "A file id followed by a line break",
+      "verdict": "reject",
+      "instance_path": "/file_id"
+    },
+    {
+      "id": "I09",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-file-id-slash.json",
+      "purpose": "A file id with a slash",
+      "verdict": "reject",
+      "instance_path": "/file_id"
+    },
+    {
+      "id": "I10",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-resource-key-empty.json",
+      "purpose": "An empty resource key",
+      "verdict": "reject",
+      "instance_path": "/resource_key"
+    },
+    {
+      "id": "I11",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-size-zero.json",
+      "purpose": "A size of zero",
+      "verdict": "reject",
+      "instance_path": "/expected/size"
+    },
+    {
+      "id": "I12",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-size-over-10-gib.json",
+      "purpose": "A size one byte over 10 GiB",
+      "verdict": "reject",
+      "instance_path": "/expected/size"
+    },
+    {
+      "id": "I13",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-md5-upper-case.json",
+      "purpose": "An MD5 in upper case",
+      "verdict": "reject",
+      "instance_path": "/expected/md5"
+    },
+    {
+      "id": "I14",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-sha1-short.json",
+      "purpose": "A SHA-1 of 39 characters",
+      "verdict": "reject",
+      "instance_path": "/expected/sha1"
+    },
+    {
+      "id": "I15",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-sha256-not-hex.json",
+      "purpose": "A SHA-256 that is not hexadecimal",
+      "verdict": "reject",
+      "instance_path": "/expected/sha256"
+    },
+    {
+      "id": "I16",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-head-revision-with-space.json",
+      "purpose": "A head revision with a space",
+      "verdict": "reject",
+      "instance_path": "/expected/head_revision_id"
+    },
+    {
+      "id": "I17",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-expected-missing-sha1.json",
+      "purpose": "An expectation without its SHA-1 member",
+      "verdict": "reject",
+      "instance_path": "/expected"
+    },
+    {
+      "id": "I18",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-part-size.json",
+      "purpose": "Parts of 100 MiB",
+      "verdict": "reject",
+      "instance_path": "/plan/part_size"
+    },
+    {
+      "id": "I19",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-parts-total-over-160.json",
+      "purpose": "A plan of 161 parts",
+      "verdict": "reject",
+      "instance_path": "/plan/parts_total"
+    },
+    {
+      "id": "I20",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-no-parts.json",
+      "purpose": "No part URL",
+      "verdict": "reject",
+      "instance_path": "/parts"
+    },
+    {
+      "id": "I21",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-part-number-zero.json",
+      "purpose": "A part numbered 0",
+      "verdict": "reject",
+      "instance_path": "/parts/0/n"
+    },
+    {
+      "id": "I22",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-part-url-http.json",
+      "purpose": "A part URL over plain HTTP",
+      "verdict": "reject",
+      "instance_path": "/parts/0/url"
+    },
+    {
+      "id": "I23",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-part-url-with-space.json",
+      "purpose": "A part URL with a space",
+      "verdict": "reject",
+      "instance_path": "/parts/0/url"
+    },
+    {
+      "id": "I24",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-part-url-too-long.json",
+      "purpose": "A part URL of 4097 characters",
+      "verdict": "reject",
+      "instance_path": "/parts/0/url"
+    },
+    {
+      "id": "I25",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-receipt-url-missing.json",
+      "purpose": "No receipt URL",
+      "verdict": "reject",
+      "instance_path": ""
+    },
+    {
+      "id": "I26",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-writes-end-at-offset.json",
+      "purpose": "A deadline with an offset, not UTC",
+      "verdict": "reject",
+      "instance_path": "/writes_end_at"
+    },
+    {
+      "id": "I27",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-writes-end-at-no-zone.json",
+      "purpose": "A deadline with no zone",
+      "verdict": "reject",
+      "instance_path": "/writes_end_at"
+    },
+    {
+      "id": "I28",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-key-in-input.json",
+      "purpose": "A key in the input: no member outside the contract",
+      "verdict": "reject",
+      "instance_path": ""
+    },
+    {
+      "id": "I29",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-mac-not-hex.json",
+      "purpose": "A MAC that is not lowercase hexadecimal",
+      "verdict": "reject",
+      "instance_path": "/mac"
+    },
+    {
+      "id": "I30",
+      "schema": "input.schema.json",
+      "fixture": "fixtures/input/invalid-mac-missing.json",
+      "purpose": "No MAC",
+      "verdict": "reject",
+      "instance_path": ""
+    },
+    {
+      "id": "O01",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/valid-imported.json",
+      "purpose": "The worker imported the file",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "O02",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/valid-failed-not-configured.json",
+      "purpose": "The worker has no Google key or no receipt key",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "O03",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/valid-failed-size-exceeded.json",
+      "purpose": "The download went past the declared size",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "O04",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/invalid-hub-code.json",
+      "purpose": "A code of the Hub's, not the worker's",
+      "verdict": "reject",
+      "instance_path": "/code"
+    },
+    {
+      "id": "O05",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/invalid-failed-without-code.json",
+      "purpose": "A failure with no code",
+      "verdict": "reject",
+      "instance_path": "/code"
+    },
+    {
+      "id": "O06",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/invalid-imported-with-code.json",
+      "purpose": "An import with a code",
+      "verdict": "reject",
+      "instance_path": "/code"
+    },
+    {
+      "id": "O07",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/invalid-status.json",
+      "purpose": "A status off the list",
+      "verdict": "reject",
+      "instance_path": "/status"
+    },
+    {
+      "id": "O08",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/invalid-code-missing.json",
+      "purpose": "No code member",
+      "verdict": "reject",
+      "instance_path": ""
+    },
+    {
+      "id": "O09",
+      "schema": "output.schema.json",
+      "fixture": "fixtures/output/invalid-provider-text.json",
+      "purpose": "Google's text in the output",
+      "verdict": "reject",
+      "instance_path": ""
+    },
+    {
+      "id": "R01",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/valid-running-example.json",
+      "purpose": "Bài 1: 15 parts verified against Google's SHA-256",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "R02",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/valid-one-part-no-checksum.json",
+      "purpose": "One part, no checksum Google gave",
+      "verdict": "accept",
+      "instance_path": null
+    },
+    {
+      "id": "R03",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-contract.json",
+      "purpose": "Another contract",
+      "verdict": "reject",
+      "instance_path": "/contract"
+    },
+    {
+      "id": "R04",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-bytes-zero.json",
+      "purpose": "No byte",
+      "verdict": "reject",
+      "instance_path": "/bytes"
+    },
+    {
+      "id": "R05",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-bytes-over-10-gib.json",
+      "purpose": "One byte over 10 GiB",
+      "verdict": "reject",
+      "instance_path": "/bytes"
+    },
+    {
+      "id": "R06",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-checksum-off-the-list.json",
+      "purpose": "A checksum off the list",
+      "verdict": "reject",
+      "instance_path": "/checksum_verified"
+    },
+    {
+      "id": "R07",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-etag-quoted.json",
+      "purpose": "An ETag with its quotes",
+      "verdict": "reject",
+      "instance_path": "/parts/0/etag"
+    },
+    {
+      "id": "R08",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-etag-with-space.json",
+      "purpose": "An ETag with a space",
+      "verdict": "reject",
+      "instance_path": "/parts/0/etag"
+    },
+    {
+      "id": "R09",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-etag-empty.json",
+      "purpose": "An empty ETag",
+      "verdict": "reject",
+      "instance_path": "/parts/0/etag"
+    },
+    {
+      "id": "R10",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-part-number-over-160.json",
+      "purpose": "A part numbered 161",
+      "verdict": "reject",
+      "instance_path": "/parts/0/n"
+    },
+    {
+      "id": "R11",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-no-parts.json",
+      "purpose": "No part",
+      "verdict": "reject",
+      "instance_path": "/parts"
+    },
+    {
+      "id": "R12",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-mac-missing.json",
+      "purpose": "No MAC",
+      "verdict": "reject",
+      "instance_path": ""
+    },
+    {
+      "id": "R13",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-mac-upper-case.json",
+      "purpose": "A MAC in upper case",
+      "verdict": "reject",
+      "instance_path": "/mac"
+    },
+    {
+      "id": "R14",
+      "schema": "receipt.schema.json",
+      "fixture": "fixtures/receipt/invalid-extra-url.json",
+      "purpose": "A URL in the receipt: no member outside the contract",
+      "verdict": "reject",
+      "instance_path": ""
+    }
+  ]
+}

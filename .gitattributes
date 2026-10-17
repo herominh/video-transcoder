@@ -1,2 +1,3 @@
-# The transcode contract copy is compared byte for byte (SHA256SUMS, fixtures of exact bytes): never normalize it.
+# The contract copies (transcode v2, import v1) are compared byte for byte (SHA256SUMS, fixtures of exact bytes):
+# never normalize them.
 tests/contracts/** -text

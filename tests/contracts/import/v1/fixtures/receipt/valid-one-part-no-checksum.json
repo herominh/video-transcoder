@@ -1,0 +1,13 @@
+{
+  "contract": "import/v1",
+  "job": "0199f1a0-2222-7000-8000-000000000002",
+  "bytes": 1048576,
+  "checksum_verified": "none",
+  "parts": [
+    {
+      "n": 1,
+      "etag": "0cc175b9c0f1b6a831c399e269772661"
+    }
+  ],
+  "mac": "8a18c68312b101cdb6106f2910cf7bd3814210736bee6ed70311165d3b1560d9"
+}

@@ -1,0 +1,34 @@
+# RunPod Serverless CPU worker of the Google Drive import (contract import/v1; core/drive_import/).
+# No GPU, no FFmpeg: the job downloads one Drive file and writes it through presigned URLs.
+# Build with BuildKit (the default builder since Docker Engine 23): the build context is the one
+# Dockerfile.import.dockerignore leaves, a file the legacy builder does not read.
+# Build: docker build --platform linux/amd64 -f Dockerfile.import -t yourdockerhub/video-transcoder-import .
+# Push:  docker push yourdockerhub/video-transcoder-import:latest
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV TZ=UTC
+
+# A user of its own: the job needs no privilege and writes no file (a home directory, for whatever the SDK may keep).
+RUN groupadd --system importer \
+    && useradd --system --gid importer --create-home --home-dir /home/importer --shell /usr/sbin/nologin importer
+
+WORKDIR /app
+
+COPY requirements-import.txt .
+RUN pip install --no-cache-dir -r requirements-import.txt
+
+COPY core/__init__.py core/__init__.py
+COPY core/drive_import/ core/drive_import/
+# The import contract tree core/drive_import/contract.py reads, at the same path relative to /app as in the
+# repository.
+COPY tests/contracts/import/v1/ tests/contracts/import/v1/
+COPY wrappers/runpod_import_handler.py wrappers/runpod_import_handler.py
+
+USER importer
+# The process's working directory is the user's own, where the SDK may keep its state; the code stays in /app.
+WORKDIR /home/importer
+
+CMD ["python3", "/app/wrappers/runpod_import_handler.py"]

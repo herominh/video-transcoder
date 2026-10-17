@@ -1,0 +1,21 @@
+# The build context of Dockerfile.runpod, which BuildKit reads in place of .dockerignore for that Dockerfile: the
+# shared .dockerignore, and the Drive import's files out. Never let secrets or repo noise into any image build context.
+.env
+.env.*
+.git
+.gitignore
+__pycache__
+**/__pycache__
+*.pyc
+tests/
+# ...except the contract v2 tree, which Dockerfile.runpod ships for core/protocol/.
+!tests/contracts/transcode/v2/
+.pytest_cache
+*.mp4
+*.ts
+*.m3u8
+README.md
+CLAUDE.md
+# Dockerfile.runpod copies core/ and wrappers/ whole: the Drive import's files (Dockerfile.import's) stay out.
+core/drive_import/
+wrappers/runpod_import_handler.py

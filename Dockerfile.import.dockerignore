@@ -1,0 +1,10 @@
+# The build context of Dockerfile.import, which BuildKit reads in place of .dockerignore for that Dockerfile: only
+# what the import image copies. Never let secrets or repo noise into it.
+*
+!requirements-import.txt
+!core/__init__.py
+!core/drive_import/
+!wrappers/runpod_import_handler.py
+!tests/contracts/import/v1/
+**/__pycache__
+**/*.pyc

@@ -1,0 +1,6 @@
+{
+  "contract": "import/v1",
+  "status": "failed",
+  "code": "size_exceeded",
+  "error": "Google said: the download quota for this file has been exceeded"
+}
