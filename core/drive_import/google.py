@@ -4,12 +4,13 @@ design, G-10), and the file's bytes (G-17).
 Both requests go to one host of this module's own, built from the input's file id alone (valid by the schema:
 letters, digits, `-` and `_`), the key in the `X-Goog-Api-Key` header and never in a URL, the link's resource key in
 `X-Goog-Drive-Resource-Keys` when there is one, and the bytes asked as they are stored (`Accept-Encoding: identity`;
-an answer in a content coding is refused); no redirect is followed (transport.RequestsSession). Every answer maps to
-the metadata, the opened stream, a try to make again, or one code of the contract, as the Hub's own client maps
-Google's answers (laravel/app/Services/Intake/Drive/HttpGoogleDriveFiles.php) with one addition of the worker's own:
-the reasons of a 400 or a 403 that say the file is not there for the link (NOT_SHARED_REASONS, `link_not_shared`),
-which the Hub's client, asking only for the metadata, answers as `provider_refused`. Nothing of Google's text is kept,
-logged or returned, only the reasons this module compares with its own lists.
+a 200 or a 206 in a content coding is refused, and an error document in one is never read); no redirect is followed
+(transport.RequestsSession). Every answer maps to the metadata, the opened stream, a try to make again, or one code
+of the contract, as the Hub's own client maps Google's answers
+(laravel/app/Services/Intake/Drive/HttpGoogleDriveFiles.php) with one addition of the worker's own: the reasons of a
+400 or a 403 that say the file is not there for the link (NOT_SHARED_REASONS, `link_not_shared`), which the Hub's
+client, asking only for the metadata, answers as `provider_refused`. Nothing of Google's text is kept, logged or
+returned, only the reasons this module compares with its own lists.
 """
 
 from __future__ import annotations
@@ -276,8 +277,9 @@ def media_headers(api_key: str, job: ImportInput, offset: int) -> dict[str, str]
 
 def media_answer(response: HttpResponse, offset: int) -> HttpResponse | Code | Retry:
     """What one answer of the download says: the stream to read (a 200 from the start; a 206 whose range starts at
-    `offset` for a resumed download), a try to make again, or a code. A 200 or a 206 of another shape, and a body
-    in a content coding, are `download_failed`. The caller closes the answer unless it is returned as the stream."""
+    `offset` for a resumed download), a try to make again, or a code. A 200 or a 206 of another shape, and one
+    whose body is in a content coding, are `download_failed`. The caller closes the answer unless it is returned as
+    the stream."""
     status = response.status_code
     starts_where_asked = (offset == 0 and status == HTTP_OK) or (
         offset > 0 and status == HTTP_PARTIAL_CONTENT and _range_start(response.headers) == offset
@@ -298,5 +300,10 @@ def _range_start(headers: Mapping[str, str]) -> int | None:
 
 
 def _error_body(status: int, response: HttpResponse) -> bytes | None:
-    """The error document of a 400 or a 403, read whole within its limit; nothing is read of any other answer."""
+    """The error document of a 400 or a 403, read whole within its limit; nothing is read of any other answer, nor
+    of one in a content coding, which the HTTP library would decode whole before the limit counts it (a stacked
+    `gzip, gzip` of a few kilobytes can come to gigabytes): its reasons go unread, as a body that is no error
+    document's."""
+    if _in_content_coding(response.headers):
+        return None
     return read_small_answer(response) if status in (HTTP_BAD_REQUEST, HTTP_FORBIDDEN) else None

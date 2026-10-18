@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 from datetime import timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import pytest
 import requests
@@ -373,6 +373,44 @@ def test_run_import_when_google_refuses_a_resumed_download_should_end_with_its_c
     # Assert
     assert output == failed("provider_quota")
     assert [put.url for put in session.part_puts] == [part_url(1)]
+
+
+class _BodyNeverToRead:
+    """An answer's body the job must never read: each read is counted and raises, so a job that reads it fails as
+    on a bug. The HTTP library would decode a body in a content coding whole before any limit counted it (a stacked
+    `gzip, gzip` of a few kilobytes can come to gigabytes)."""
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def __call__(self, chunk_size: int) -> Iterator[bytes]:
+        return self
+
+    def __iter__(self) -> Iterator[bytes]:
+        return self
+
+    def __next__(self) -> bytes:
+        self.reads += 1
+        raise AssertionError("the body of an answer in a content coding was read")
+
+
+@pytest.mark.parametrize("coding", ["gzip", "gzip, gzip"])
+@pytest.mark.parametrize("status", [400, 403])
+@pytest.mark.parametrize("request_kind", ["metadata", "media"])
+def test_run_import_when_google_refuses_in_a_content_coding_should_end_provider_refused_without_reading_the_body(
+    request_kind, status, coding
+):
+    # Arrange: Google's refusal comes in a content coding, though the job asked for none
+    body = _BodyNeverToRead()
+    refusal = FakeResponse(status, {"Content-Type": "application/json", "Content-Encoding": coding}, chunks=body)
+
+    # Act
+    output, session, _ = _run(ONE, script=lambda session: getattr(session, request_kind).append(refusal))
+
+    # Assert: the code of a refusal whose reasons went unread, its body never read, nothing written
+    assert output == failed("provider_refused")
+    assert body.reads == 0
+    assert session.of("PUT") == []
 
 
 # --- the metadata again before the first write (G-10) --------------------------------------------------------------

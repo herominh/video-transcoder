@@ -397,7 +397,8 @@ class BoundedBody:
 
 def read_small_answer(response: HttpResponse) -> bytes | None:
     """The whole body of an answer the job reads in full, or None when it is longer than SMALL_ANSWER_MAX_BYTES or
-    its transfer failed. It reads at most one chunk past the limit."""
+    its transfer failed. It reads at most one chunk past the limit. The limit counts the bytes as the HTTP library
+    gives them, decoded, so an answer in a content coding is never handed to it (google.py)."""
     body = bytearray()
     failed = False
     try:
