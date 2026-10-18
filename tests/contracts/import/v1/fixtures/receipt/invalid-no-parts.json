@@ -1,0 +1,8 @@
+{
+  "contract": "import/v1",
+  "job": "0199f1a0-2222-7000-8000-000000000002",
+  "bytes": 943718400,
+  "checksum_verified": "sha256",
+  "parts": [],
+  "mac": "f1f461b4c291be0e7ef19a04823f5097eec246010be97dd6f2981f95d6fb3daa"
+}

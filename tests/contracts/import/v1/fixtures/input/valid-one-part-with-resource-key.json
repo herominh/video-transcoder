@@ -1,0 +1,26 @@
+{
+  "contract": "import/v1",
+  "job": "0199f1a0-2222-7000-8000-000000000002",
+  "file_id": "1AbCdEfGhIjKlMnOpQrStUvWxYz012xyz",
+  "resource_key": "0-AbCdEfGhIjKlMnOpQrSt",
+  "expected": {
+    "size": 1048576,
+    "md5": null,
+    "sha1": null,
+    "sha256": null,
+    "head_revision_id": null
+  },
+  "plan": {
+    "part_size": 67108864,
+    "parts_total": 1
+  },
+  "parts": [
+    {
+      "n": 1,
+      "url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/original.mp4?partNumber=1&uploadId=upload-1&X-Amz-Expires=1013&X-Amz-Signature=test-signature-001"
+    }
+  ],
+  "receipt_url": "https://storage.example.invalid/videohub-school-a/original-videos/0199f1a0-1111-7000-8000-000000000001/import-receipt-0199f1a0-2222-7000-8000-000000000002.json?X-Amz-Expires=1013&X-Amz-Signature=test-signature-receipt",
+  "writes_end_at": "2026-10-17T09:16:53Z",
+  "mac": "4d7973ab02ee9b98d3c7459742d615118376451806e05d52c7c1be34092e1633"
+}

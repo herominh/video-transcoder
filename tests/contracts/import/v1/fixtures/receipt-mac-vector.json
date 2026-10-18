@@ -1,0 +1,75 @@
+{
+  "purpose": "The receipt's MAC: HMAC-SHA256 under the key, as UTF-8 bytes, of the canonical form of the receipt without its mac (README section 5)",
+  "key": "test-import-receipt-key-0123456789abcdefABCDEF",
+  "receipt": {
+    "contract": "import/v1",
+    "job": "0199f1a0-2222-7000-8000-000000000002",
+    "bytes": 943718400,
+    "checksum_verified": "sha256",
+    "parts": [
+      {
+        "n": 1,
+        "etag": "107fd78a5a38f0bb8191c7080e78e858"
+      },
+      {
+        "n": 2,
+        "etag": "76399dc082122753add27337646546c4"
+      },
+      {
+        "n": 3,
+        "etag": "4a774fda10bd71b83639f45cdf80f96f"
+      },
+      {
+        "n": 4,
+        "etag": "5db72d989cdaa046683a8b5fab9d62b6"
+      },
+      {
+        "n": 5,
+        "etag": "da072870a83774de75b28e56708a491b"
+      },
+      {
+        "n": 6,
+        "etag": "a9f173824d73f0cc376c3747024239f9"
+      },
+      {
+        "n": 7,
+        "etag": "862169a79b25d6b3fb7adc474cd24238"
+      },
+      {
+        "n": 8,
+        "etag": "5d7312956b34f23a85160e3bff7a915c"
+      },
+      {
+        "n": 9,
+        "etag": "f27cc8761ccd64dc9a90aaa71ff776e7"
+      },
+      {
+        "n": 10,
+        "etag": "61d33e54477cdbd655f9bd898acadb45"
+      },
+      {
+        "n": 11,
+        "etag": "3a030b48807fe17522e368c07872a61e"
+      },
+      {
+        "n": 12,
+        "etag": "8995063c23f9e726535a343c98ad2ba5"
+      },
+      {
+        "n": 13,
+        "etag": "17b4ea3ca933ae5db3d9fb8b6d6d0e4c"
+      },
+      {
+        "n": 14,
+        "etag": "9df4afa9c858b7cc8025caa0f6beb484"
+      },
+      {
+        "n": 15,
+        "etag": "537e0015686b4bdeb8aff174cd81eed7"
+      }
+    ],
+    "mac": "4e640e713edf0a308112c0ee6131018b64d5cb9f97c126e4c85507b76eccb2f6"
+  },
+  "canonical": "{\"bytes\":943718400,\"checksum_verified\":\"sha256\",\"contract\":\"import/v1\",\"job\":\"0199f1a0-2222-7000-8000-000000000002\",\"parts\":[{\"etag\":\"107fd78a5a38f0bb8191c7080e78e858\",\"n\":1},{\"etag\":\"76399dc082122753add27337646546c4\",\"n\":2},{\"etag\":\"4a774fda10bd71b83639f45cdf80f96f\",\"n\":3},{\"etag\":\"5db72d989cdaa046683a8b5fab9d62b6\",\"n\":4},{\"etag\":\"da072870a83774de75b28e56708a491b\",\"n\":5},{\"etag\":\"a9f173824d73f0cc376c3747024239f9\",\"n\":6},{\"etag\":\"862169a79b25d6b3fb7adc474cd24238\",\"n\":7},{\"etag\":\"5d7312956b34f23a85160e3bff7a915c\",\"n\":8},{\"etag\":\"f27cc8761ccd64dc9a90aaa71ff776e7\",\"n\":9},{\"etag\":\"61d33e54477cdbd655f9bd898acadb45\",\"n\":10},{\"etag\":\"3a030b48807fe17522e368c07872a61e\",\"n\":11},{\"etag\":\"8995063c23f9e726535a343c98ad2ba5\",\"n\":12},{\"etag\":\"17b4ea3ca933ae5db3d9fb8b6d6d0e4c\",\"n\":13},{\"etag\":\"9df4afa9c858b7cc8025caa0f6beb484\",\"n\":14},{\"etag\":\"537e0015686b4bdeb8aff174cd81eed7\",\"n\":15}]}",
+  "mac": "4e640e713edf0a308112c0ee6131018b64d5cb9f97c126e4c85507b76eccb2f6"
+}
