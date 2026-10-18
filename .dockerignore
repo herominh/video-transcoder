@@ -1,4 +1,5 @@
 # Never let secrets or repo noise into any image build context.
+# Dockerfile.runpod.dockerignore repeats these lines and adds the Drive import's: the two change together.
 .env
 .env.*
 .git

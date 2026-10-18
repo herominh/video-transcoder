@@ -12,6 +12,10 @@ none of the v1 worker's modules.
 The import endpoint's entry point (wrappers/runpod_import_handler.py; its image ships core/drive_import/ and
 core/__init__.py alone) reaches the import job (core.drive_import) and nothing of the transcode: no core.protocol,
 no core.job, no v1 module. The transcode's RunPod entry point reaches nothing of the import.
+
+The transcode image's build context leaves out what the shared one does and the import's files too: BuildKit reads
+Dockerfile.runpod.dockerignore in place of .dockerignore for Dockerfile.runpod, so its patterns are the shared
+file's, in their order, followed by the Drive import's exclusions.
 """
 
 import ast
@@ -32,6 +36,10 @@ IMPORT_REQUIREMENTS = "requirements-import.txt"
 REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 JOB_PACKAGE = "core.job"
 V1_MODULES = ["core.api", "core.config", "core.transcoder", "core.storage", "core.callback", "core.signing"]
+SHARED_DOCKERIGNORE = ".dockerignore"
+RUNPOD_DOCKERIGNORE = "Dockerfile.runpod.dockerignore"
+# What the transcode image's build context leaves out beyond the shared one: the files of the import's own image.
+IMPORT_BUILD_EXCLUSIONS = ["core/drive_import/", IMPORT_ENTRY_POINT]
 
 
 def _in_package(name: str, package: str) -> bool:
@@ -196,3 +204,19 @@ def test_import_entry_point_when_its_imports_are_followed_should_need_only_what_
     # Assert
     assert {"requests", "jsonschema", "referencing", "runpod"} <= imported
     assert sorted(imported - _requirements(IMPORT_REQUIREMENTS)) == []
+
+
+def _ignore_patterns(name: str) -> list[str]:
+    """An ignore file's patterns in their order, as BuildKit reads them: a line starting with `#` is a comment, every
+    other line is trimmed, and an empty one is skipped."""
+    lines = (REPOSITORY_ROOT / name).read_text(encoding="utf-8").splitlines()
+    return [line.strip() for line in lines if not line.startswith("#") and line.strip()]
+
+
+def test_runpod_dockerignore_when_read_beside_the_shared_one_should_hold_its_patterns_and_the_import_exclusions_only():
+    # Act
+    shared = _ignore_patterns(SHARED_DOCKERIGNORE)
+    runpod = _ignore_patterns(RUNPOD_DOCKERIGNORE)
+
+    # Assert: a pattern added to one file alone shows here (their order matters, `!` patterns among them)
+    assert runpod == shared + IMPORT_BUILD_EXCLUSIONS

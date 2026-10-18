@@ -25,8 +25,8 @@ from core.drive_import.failure import Code, ImportFailed, Stage
 from core.drive_import.transport import TRANSFER_ERRORS, BoundedBody, HttpResponse, HttpSession, close_quietly
 
 CONNECT_TIMEOUT_S = 10.0
-# A PUT's read time-out (the wait for the store's answer) grows with its body: at least a minute, and one second
-# per MiB at most beyond it (64 s for a whole part).
+# A PUT's read time-out (the wait for the store's answer) grows with its body: one second per MiB of the body, at
+# least a minute (64 s for a whole part).
 MIN_READ_TIMEOUT_S = 60.0
 READ_TIMEOUT_BYTES_PER_SECOND = 1_048_576
 RETRY_WAITS_S = (0.5, 2.0, 8.0)
