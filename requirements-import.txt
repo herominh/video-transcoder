@@ -1,10 +1,11 @@
-# The Google Drive import image (Dockerfile.import) installs only these: what core/drive_import/ and
-# wrappers/runpod_import_handler.py import, at the pins of requirements.txt. requests and urllib3 are pinned exactly,
-# at the versions the import's tests ran against (tests/drive_import/test_transport.py drives the real session):
-# the watchdog's connection classes and the redirect rule rest on their internals, and urllib3 2 refuses a body
-# cut short (enforce_content_length), where 1.26 reads it as a clean end.
-requests==2.32.4
-urllib3==2.0.6
+# Direct requirements of the Google Drive import. Dockerfile.import installs requirements-import.lock compiled
+# from this input, never this file. requests and urllib3 stay pinned exactly: the watchdog's connection classes
+# and the redirect rule rest on their internals, and urllib3 2 refuses a body cut short (enforce_content_length),
+# where 1.26 reads it as a clean end. tests/drive_import/test_transport.py drives the real session at these pins.
+# Regenerate the lock from the repository root, then re-add its generated-file header:
+# docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 sh -c 'pip install pip-tools==7.5.2 && pip-compile --generate-hashes --allow-unsafe --strip-extras --no-header --output-file requirements-import.lock requirements-import.txt'
+requests==2.34.2
+urllib3==2.8.0
 certifi>=2023.7.22
 jsonschema==4.26.0
 referencing>=0.37.0,<0.38
