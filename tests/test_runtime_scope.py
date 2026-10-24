@@ -31,7 +31,7 @@ ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py", "wrappers/docker_server.
 RUNPOD_ENTRY_POINT = "wrappers/runpod_handler.py"
 IMPORT_ENTRY_POINT = "wrappers/runpod_import_handler.py"
 IMPORT_PACKAGE = "core.drive_import"
-IMPORT_REQUIREMENTS = "requirements-import.txt"
+IMPORT_REQUIREMENTS = "requirements-import.lock"
 # A requirement line's distribution name: what comes before a version specifier, an extra or a marker.
 REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 JOB_PACKAGE = "core.job"
@@ -206,11 +206,44 @@ def test_import_entry_point_when_its_imports_are_followed_should_need_only_what_
     assert sorted(imported - _requirements(IMPORT_REQUIREMENTS)) == []
 
 
+def test_import_image_when_installing_requirements_should_use_only_the_hashed_lock():
+    # Arrange
+    dockerfile = REPOSITORY_ROOT / "Dockerfile.import"
+
+    # Act
+    instructions = dockerfile.read_text(encoding="utf-8").splitlines()
+
+    # Assert
+    assert f"COPY {IMPORT_REQUIREMENTS} ." in instructions
+    assert f"RUN pip install --no-cache-dir --require-hashes --no-deps -r {IMPORT_REQUIREMENTS}" in instructions
+    assert not any("requirements-import.txt" in line for line in instructions if not line.startswith("#"))
+
+
 def _ignore_patterns(name: str) -> list[str]:
     """An ignore file's patterns in their order, as BuildKit reads them: a line starting with `#` is a comment, every
     other line is trimmed, and an empty one is skipped."""
     lines = (REPOSITORY_ROOT / name).read_text(encoding="utf-8").splitlines()
     return [line.strip() for line in lines if not line.startswith("#") and line.strip()]
+
+
+def test_import_dockerignore_when_read_should_include_only_the_lock_and_the_files_the_image_copies():
+    # Arrange
+    expected = [
+        "*",
+        f"!{IMPORT_REQUIREMENTS}",
+        "!core/__init__.py",
+        "!core/drive_import/",
+        f"!{IMPORT_ENTRY_POINT}",
+        "!tests/contracts/import/v1/",
+        "**/__pycache__",
+        "**/*.pyc",
+    ]
+
+    # Act
+    patterns = _ignore_patterns("Dockerfile.import.dockerignore")
+
+    # Assert
+    assert patterns == expected
 
 
 def test_runpod_dockerignore_when_read_beside_the_shared_one_should_hold_its_patterns_and_the_import_exclusions_only():

@@ -495,7 +495,7 @@ def test_entry_point_when_imported_by_a_fresh_interpreter_should_load_no_sdk_nor
     assert imported.stdout.splitlines() == ["[]", "[]", "True"]
 
 
-def test_entry_point_when_imported_with_a_tls_key_log_named_should_drop_it_before_requests_makes_its_context(
+def test_entry_point_when_imported_with_a_tls_key_log_named_should_drop_it_before_an_https_context_is_made(
     tmp_path,
 ):
     # Arrange: a process of its own whose environment names a file for the TLS session keys
@@ -503,9 +503,9 @@ def test_entry_point_when_imported_with_a_tls_key_log_named_should_drop_it_befor
     code = (
         "import os\n"
         "import wrappers.runpod_import_handler\n"
-        "import requests.adapters\n"
+        "from urllib3.util.ssl_ import create_urllib3_context\n"
         "print('SSLKEYLOGFILE' in os.environ)\n"
-        "print(requests.adapters._preloaded_ssl_context.keylog_filename)\n"
+        "print(create_urllib3_context().keylog_filename)\n"
     )
     env = {name: value for name, value in os.environ.items() if name not in _whole_env()}
     env["SSLKEYLOGFILE"] = str(key_log)
@@ -517,7 +517,7 @@ def test_entry_point_when_imported_with_a_tls_key_log_named_should_drop_it_befor
         cwd=REPOSITORY_ROOT, env=env, capture_output=True, text=True, timeout=PROGRAM_TIMEOUT_S, check=False,
     )
 
-    # Assert: the variable is gone, the context requests made on import logs no key, and no file was made
+    # Assert: the variable is gone, urllib3's HTTPS context factory logs no key, and no file was made
     assert imported.returncode == 0, imported.stderr
     assert imported.stdout.splitlines() == ["False", "None"]
     assert not key_log.exists()

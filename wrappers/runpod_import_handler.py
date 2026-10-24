@@ -26,8 +26,8 @@ would be the bug with its own text (wrappers/runpod_handler.py does the same for
 
 Importing this module builds and configures nothing, with one exception made before anything else is imported: it
 takes SSLKEYLOGFILE out of the process's environment. The HTTP library writes every TLS session's keys to the file
-that variable names (urllib3's create_urllib3_context() reads it, and requests makes one such context when it is
-imported), and with those keys a capture of the job's traffic would show the Google key and every presigned URL.
+that variable names (urllib3's create_urllib3_context() reads it when an HTTPS connection creates its context;
+requests 2.34.2 does not create a context on import).
 What the file does when it is run as the program is main(), which the `__main__` block calls and nothing else: it
 sets up the process's logging (configure_logging) before it imports the SDK and before it builds the handler, and
 starts the SDK's serverless loop with that handler.
