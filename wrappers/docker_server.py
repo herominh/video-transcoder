@@ -1,4 +1,4 @@
-"""Docker/GCR/self-hosted entry point — runs the FastAPI app with uvicorn."""
+"""Development-only container entry point; core.api checks execution admission."""
 
 import logging
 import os

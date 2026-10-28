@@ -4,7 +4,6 @@ import logging
 import os
 
 import boto3
-import requests
 
 from core.config import Settings
 
@@ -23,20 +22,6 @@ CONTENT_TYPES = {
 SKIP_SUFFIXES = (".keyinfo", "enc.key")
 
 
-def download_source(url: str, dest_path: str) -> None:
-    """Download source video from a URL (presigned or plain) using requests streaming."""
-    logger.info("Downloading source to %s", dest_path)
-
-    with requests.get(url, stream=True, timeout=(30, 3600)) as response:
-        response.raise_for_status()
-        with open(dest_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-
-    size_mb = os.path.getsize(dest_path) / (1024 * 1024)
-    logger.info("Download complete: %.1f MB", size_mb)
-
-
 def download_from_s3(settings: Settings, bucket: str, key: str, dest_path: str) -> None:
     """Download source video directly from S3 using transcoder's own credentials."""
     logger.info("Downloading from S3: %s/%s", bucket, key)
@@ -46,28 +31,6 @@ def download_from_s3(settings: Settings, bucket: str, key: str, dest_path: str) 
 
     size_mb = os.path.getsize(dest_path) / (1024 * 1024)
     logger.info("S3 download complete: %.1f MB", size_mb)
-
-
-def upload_original(
-    settings: Settings,
-    local_path: str,
-    bucket: str,
-    s3_path: str,
-) -> None:
-    """Upload the original source file to S3."""
-    client = _create_s3_client(settings)
-    content_type = _get_content_type(os.path.basename(local_path))
-
-    logger.info("Uploading original to %s/%s", bucket, s3_path)
-    client.upload_file(
-        local_path,
-        bucket,
-        s3_path,
-        ExtraArgs={"ContentType": content_type},
-    )
-
-    size_mb = os.path.getsize(local_path) / (1024 * 1024)
-    logger.info("Original uploaded: %.1f MB", size_mb)
 
 
 def upload_results(

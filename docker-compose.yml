@@ -8,6 +8,8 @@ services:
     container_name: video-transcoder
     restart: unless-stopped
     env_file: .env
+    environment:
+      VH_DEVELOPMENT_ADAPTER: "1"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.transcoder.rule=Host(`${TRANSCODER_DOMAIN:-transcoder.lms}`)"
