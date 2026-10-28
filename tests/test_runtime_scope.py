@@ -35,7 +35,10 @@ IMPORT_REQUIREMENTS = "requirements-import.lock"
 # A requirement line's distribution name: what comes before a version specifier, an extra or a marker.
 REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 JOB_PACKAGE = "core.job"
-V1_MODULES = ["core.api", "core.config", "core.transcoder", "core.storage", "core.callback", "core.signing"]
+V1_MODULES = [
+    "core.api", "core.config", "core.transcoder", "core.storage", "core.callback", "core.signing",
+    "core.v1_admission",
+]
 SHARED_DOCKERIGNORE = ".dockerignore"
 RUNPOD_DOCKERIGNORE = "Dockerfile.runpod.dockerignore"
 # What the transcode image's build context leaves out beyond the shared one: the files of the import's own image.
@@ -113,12 +116,56 @@ def test_entry_point_when_its_imports_are_followed_should_never_reach_core_proto
     assert sorted(name for name in reachable if name == PROTOCOL_PACKAGE or name.startswith(PROTOCOL_PACKAGE + ".")) == []
 
 
-def test_reachable_modules_when_following_the_modal_app_should_find_what_it_imports_through_core_api():
-    # Act: the Modal app imports core.api inside a function; only core.api imports core.storage and the others.
+def test_reachable_modules_when_following_the_modal_app_should_find_admission_without_the_pipeline():
+    # Arrange
+    pipeline = {"core.api", "core.callback", "core.storage", "core.transcoder"}
+
+    # Act
     reachable = _reachable_modules(REPOSITORY_ROOT / "wrappers/modal_app.py")
 
     # Assert
-    assert {"core", "core.api", "core.callback", "core.storage", "core.transcoder"} <= reachable
+    assert {"core", "core.v1_admission"} <= reachable
+    assert not pipeline & reachable
+
+
+def test_runtime_modules_when_searched_should_have_no_v1_url_acquisition():
+    # Arrange
+    modules = [path for directory in ("core", "wrappers") for path in (REPOSITORY_ROOT / directory).rglob("*.py")]
+
+    # Act
+    sources = {path.relative_to(REPOSITORY_ROOT).as_posix(): path.read_text(encoding="utf-8") for path in modules}
+
+    # Assert: the v2 job's separate exact-source downloader is retained.
+    for name, source in sources.items():
+        assert "source_url" not in source, name
+        assert "upload_original" not in source, name
+        if not name.startswith("core/job/"):
+            assert "download_source" not in source, name
+
+
+def test_v1_entry_points_when_traced_should_reach_only_the_guarded_pipeline():
+    # Arrange
+    modules = [path for directory in ("core", "wrappers") for path in (REPOSITORY_ROOT / directory).rglob("*.py")]
+
+    # Act
+    references = [path.relative_to(REPOSITORY_ROOT).as_posix() for path in modules if "_process_transcode" in path.read_text()]
+    tree = ast.parse((REPOSITORY_ROOT / "core/api.py").read_text())
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    # Assert: every pipeline reference is in the guarded API; the dev launcher serves that API.
+    assert references == ["core/api.py"]
+    for name in ("transcode", "_process_transcode"):
+        statements = functions[name].body
+        if ast.get_docstring(functions[name]) is not None:
+            statements = statements[1:]
+        first = statements[0]
+        if isinstance(first, ast.Try):
+            first = first.body[0]
+        assert isinstance(first, ast.Expr)
+        assert isinstance(first.value, ast.Call)
+        assert isinstance(first.value.func, ast.Name)
+        assert first.value.func.id == "require_v1_execution"
+    assert 'uvicorn.run("core.api:app"' in (REPOSITORY_ROOT / "wrappers/docker_server.py").read_text()
 
 
 def test_runpod_entry_point_when_its_imports_are_followed_should_reach_the_v2_start_and_the_job_runner():
