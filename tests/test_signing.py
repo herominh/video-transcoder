@@ -62,6 +62,23 @@ class TestVerifyRequest:
 
         assert result is False
 
+    @mock.patch("core.signing.time")
+    def test_verify_when_secret_empty_should_return_false(self, mock_time):
+        # Arrange: a request signed under the empty key, as anyone can sign it.
+        mock_time.time.return_value = TEST_TIMESTAMP
+        headers = sign_request(TEST_BODY, "")
+
+        # Act
+        result = verify_request(
+            body=TEST_BODY,
+            signature_header=headers["X-Signature"],
+            timestamp_header=headers["X-Timestamp"],
+            secret="",
+        )
+
+        # Assert
+        assert result is False
+
     def test_verify_when_missing_headers_should_return_false(self):
         assert verify_request(TEST_BODY, None, None, TEST_SECRET) is False
         assert verify_request(TEST_BODY, EXPECTED_SIGNATURE, None, TEST_SECRET) is False

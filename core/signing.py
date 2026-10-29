@@ -29,9 +29,13 @@ def verify_request(
 ) -> bool:
     """Verify an incoming request's HMAC-SHA256 signature.
 
-    Returns False if headers are missing, timestamp is stale, or signature
-    doesn't match.
+    Returns False if the secret is empty, headers are missing, timestamp is
+    stale, or signature doesn't match. Anyone can compute an HMAC under an
+    empty key, so an unset secret refuses every request.
     """
+    if not secret:
+        return False
+
     if not signature_header or not timestamp_header:
         return False
 
