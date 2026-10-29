@@ -107,6 +107,25 @@ def test_transcode_when_admitted_with_bad_signature_should_refuse_without_schedu
     schedule.assert_not_called()
 
 
+def test_transcode_when_admitted_with_empty_secret_should_refuse_without_scheduling(monkeypatch):
+    # Arrange: WEBHOOK_SECRET unset, and a request signed under the same empty key.
+    _set_admission(monkeypatch, "1")
+    settings = Settings(ffmpeg_encoder="libx264", ffmpeg_preset="fast", webhook_secret="")
+    monkeypatch.setattr(api.Settings, "from_env", Mock(return_value=settings))
+    schedule = Mock()
+    monkeypatch.setattr(BackgroundTasks, "add_task", schedule)
+    body = json.dumps(VALID_REQUEST).encode()
+
+    # Act
+    with TestClient(api.app) as client:
+        response = client.post("/transcode", content=body, headers=sign_request(body, ""))
+
+    # Assert
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid signature"}
+    schedule.assert_not_called()
+
+
 @pytest.mark.parametrize("value", DISABLED_VALUES)
 def test_process_when_development_not_admitted_should_raise_without_side_effects(monkeypatch, settings, value):
     # Arrange: admission is read again when the task starts, even if previously enabled.

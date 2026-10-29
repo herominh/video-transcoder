@@ -54,7 +54,7 @@ The image and function definitions remain in `wrappers/modal_app.py`, but `/tran
 
 The v1 pipeline below is retained only for the development adapter (`wrappers/docker_server.py`, also served directly as `core.api:app`); RunPod speaks contract v2 only and Modal stays staged. `core/v1_admission.py` admits v1 execution only when `VH_DEVELOPMENT_ADAPTER` is exactly `1`: `/transcode` otherwise returns 503 before reading the body, and `_process_transcode` checks again before doing any work. `/health` remains available. The development compose file explicitly opts in; the Docker image starts disabled without the variable.
 
-POST /transcode with JSON body (see core/api.py for schema). Source acquisition uses only the existing S3 object: nonempty `s3_bucket` and `s3_original_path` are required (422 on validation failure). Auth: HMAC-SHA256 over `"{timestamp}.{raw_body}"` with the shared `WEBHOOK_SECRET` — headers `X-Signature: sha256=<hex>` + `X-Timestamp: <epoch>` (5-min tolerance).
+POST /transcode with JSON body (see core/api.py for schema). Source acquisition uses only the existing S3 object: nonempty `s3_bucket` and `s3_original_path` are required (422 on validation failure). Auth: HMAC-SHA256 over `"{timestamp}.{raw_body}"` with the shared `WEBHOOK_SECRET` — headers `X-Signature: sha256=<hex>` + `X-Timestamp: <epoch>` (5-min tolerance). An empty `WEBHOOK_SECRET` refuses every request with 401 (`core/signing.py` `verify_request()`).
 
 `_process_transcode` returns the result payload (status `ready`|`failed`); callback delivery is attempted but non-fatal.
 
