@@ -77,6 +77,8 @@ from __future__ import annotations
 import errno
 import functools
 import hashlib
+import io
+import json
 import logging
 import os
 import random
@@ -98,6 +100,8 @@ from core.failure import Failure, WorkerFailure, make_detail
 from core.package import ManifestOutput
 from core.profile import KIB, MIB
 from core.protocol import schema
+from core.protocol.outbox import SealedMessage, runpod_output
+from core.protocol.registry import MessageKind
 from core.protocol.settings import StorageProfile
 from core.source_reader import (
     S3_CONNECT_TIMEOUT_S,
@@ -138,6 +142,7 @@ ARTIFACT_OPEN_FLAGS = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0
 DISK_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
 UNKNOWN_ERRNO_NAME = "unknown"
 KEY_SEPARATOR = "/"
+RESULT_NAME = "result.json"
 # How the upload client signs, addresses and retries: as the source reader's client does (core/source_reader.py).
 SIGNATURE_VERSION = "s3v4"
 ADDRESSING_STYLE = "path"
@@ -747,15 +752,51 @@ def _remove_partial(path: Path) -> None:
 
 
 @dataclass(frozen=True)
-class _Upload:
-    """One object to store: its key, the local file it is read from and what the manifest records of it."""
+class _Object:
+    """One object's key and the bytes its PUT must carry."""
 
     relative_path: str
     key: str
-    local_path: Path
     size_bytes: int
     sha256: str
     content_type: str
+
+
+@dataclass(frozen=True)
+class _Upload(_Object):
+    """An object read from a local file, with the size and hash recorded by the manifest."""
+
+    local_path: Path
+
+
+def upload_result(
+    client: Any, *, bucket: str, prefix: str, result: SealedMessage, deadline: Deadline
+) -> None:
+    """Attempt one bounded PUT of the terminal result's RunPod carrier (README 15.1, rule 9).
+
+    The carrier lives in memory, so even a failure before scratch setup can be stored. It is no
+    artifact and contributes to no inventory or byte count. The caller keeps the sealed result
+    whatever this attempt raises; there is no retry delaying its report.
+    """
+    if result.kind not in {MessageKind.TRANSCODE_RESULT_COMPLETED, MessageKind.TRANSCODE_RESULT_FAILED}:
+        raise ValueError("only a terminal result may be stored")
+    if not callable(getattr(client, "put_object", None)):
+        raise TypeError("client must be an S3 client")
+    if not isinstance(bucket, str) or schema.error_pointers_for_schema({"$ref": _BUCKET_DEFINITION}, bucket):
+        raise ValueError("bucket must be a contract bucket")
+    if not isinstance(prefix, str) or schema.error_pointers_for_schema({"$ref": _OBJECT_KEY_DEFINITION}, prefix):
+        raise ValueError("prefix must be a contract object key")
+    if not isinstance(deadline, Deadline):
+        raise TypeError("deadline must be a Deadline")
+    carrier = json.dumps(runpod_output(result), ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    upload = _Object(
+        relative_path=RESULT_NAME,
+        key=f"{prefix}{KEY_SEPARATOR}{RESULT_NAME}",
+        size_bytes=len(carrier),
+        sha256=hashlib.sha256(carrier).hexdigest(),
+        content_type=CONTENT_TYPES[".json"],
+    )
+    _send_body(client, bucket, upload, io.BytesIO(carrier), deadline)
 
 
 def upload_generation(
@@ -961,17 +1002,22 @@ def _send(client: Any, bucket: str, upload: _Upload, deadline: Deadline) -> None
     removed meanwhile. Closing waits for a local read of the file that request has under way, never for
     the storage.
     """
-    with _CheckedBody(_opened_artifact(upload), deadline, upload.size_bytes, upload.sha256) as body:
+    _send_body(client, bucket, upload, _opened_artifact(upload), deadline)
+
+
+def _send_body(client: Any, bucket: str, upload: _Object, source: BinaryIO, deadline: Deadline) -> None:
+    """Send a file or an in-memory carrier with the same deadline, body checks and request ceiling."""
+    with _CheckedBody(source, deadline, upload.size_bytes, upload.sha256) as body:
         _within(
             deadline,
-            functools.partial(_put, client, bucket, upload, body),
+            functools.partial(_put, client, bucket, upload, body, deadline),
             expired=UPLOAD_DEADLINE_EXCEEDED,
             stalled=UPLOAD_STALLED,
             ceiling_s=_request_ceiling_s(upload.size_bytes),
         )
 
 
-def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
+def _put(client: Any, bucket: str, upload: _Object, body: _CheckedBody, deadline: Deadline) -> None:
     """One PutObject of `body`. It counts only when the bytes the client read of the file are the
     recorded ones.
 
@@ -985,6 +1031,9 @@ def _put(client: Any, bucket: str, upload: _Upload, body: _CheckedBody) -> None:
     its ceiling, its outcome is dropped either way, and _within's own
     note of that already makes it the deadline failure.)
     """
+    # The helper thread may have waited to run after _within checked the deadline.
+    if deadline.remaining_s() <= 0:
+        raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
     try:
         client.put_object(
             Bucket=bucket,
@@ -1224,7 +1273,7 @@ def _difference_from_the_record(body: BinaryIO, upload: _Upload) -> str | None:
     return None
 
 
-def _artifact_changed(upload: _Upload, what: str) -> WorkerFailure:
+def _artifact_changed(upload: _Object, what: str) -> WorkerFailure:
     return WorkerFailure(
         Failure(
             "internal_error", "artifact_changed_before_upload", True,

@@ -3,7 +3,8 @@
 claim_execution() sends `transcode.claim` to the configured claim address and returns a Grant only for a
 `200` whose body verifies under a Hub-to-worker key and is an accepted `transcode.claim.granted` for this
 dispatch, this runtime and this encryption. Every other ending is Unclaimed: `refused` (a `hub.error`),
-`unreachable` (no answer from the Hub) or `invalid_answer` (anything else, never retried). A gateway's
+`unreachable` (no answer from the Hub), `expired` (expiry prevented the first claim), or
+`invalid_answer` (anything else, never retried). A gateway's
 502, 503 or 504 that carries no accepted `hub.error` is no answer from the Hub. It claims again only after
 a transport failure, such a gateway failure or a retryable `hub.error`, never at or after the dispatch's
 `claim.expires_at`, never for longer than its patience, and never at or after the instant its start's
@@ -72,6 +73,7 @@ SKEW_S = SETTINGS.clock_skew_s
 CAUSE_REFUSED = "refused"
 CAUSE_UNREACHABLE = "unreachable"
 CAUSE_INVALID_ANSWER = "invalid_answer"
+CAUSE_EXPIRED = "expired"
 CLAIM_KIND = "transcode.claim"
 GRANT_MAX_BYTES = load_registry().max_bytes(MessageKind.TRANSCODE_CLAIM_GRANTED)
 HUB_ERROR_MAX_BYTES = load_registry().max_bytes(MessageKind.HUB_ERROR)
@@ -123,7 +125,7 @@ NO_ANSWER = TransportFailed("ConnectTimeout")
 RETRYABLE_REFUSAL_CODE = "service_unavailable"
 OTHER_RETRYABLE_REFUSAL_CODE = "internal_error"
 FINAL_REFUSAL_CODE = "claim_conflict"
-# What the log says of a claiming that ends unreachable: no claim was sent (and for which of two reasons),
+# What the log says when claiming ends without a grant: no claim was sent (and for which of two reasons),
 # or so many were.
 NOTHING_WAS_SENT = "nothing was sent"
 BOOTSTRAP_HAD_EXPIRED = "bootstrap had expired"
@@ -774,7 +776,9 @@ def test_claim_execution_when_the_bootstrap_expires_in_five_seconds_should_never
     assert [call.at for call in transport.calls if call.at >= dispatch.claim_expires_at] == []
 
 
-@pytest.mark.parametrize("expired_s", [EXPIRED_ALREADY_S, 0], ids=["ten-seconds-ago", "this-very-instant"])
+@pytest.mark.parametrize(
+    "expired_s", [-SKEW_S, EXPIRED_ALREADY_S, 0], ids=["at-skew-boundary", "ten-seconds-ago", "this-very-instant"]
+)
 def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_not_claim_at_all(expired_s):
     # Arrange: S6 accepts a request whose claim expired no more than the skew ago.
     dispatch, clock = _dispatch(**{"/claim/expires_at": seconds_from_now(expired_s)}), FakeClock()
@@ -785,7 +789,7 @@ def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_not_cl
     outcome = _claim(dispatch, transport, clock)
 
     # Assert
-    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert outcome == Unclaimed(CAUSE_EXPIRED)
     assert transport.calls == []
     assert clock.waits == []
 
@@ -1079,7 +1083,8 @@ def test_claim_execution_when_an_end_is_reached_while_the_first_claim_is_sealed_
     logged = _claim_log(caplog)
 
     # Assert: nothing is posted at or after the end, and the log names the end, not a network fault
-    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    cause = CAUSE_EXPIRED if end == THE_BOOTSTRAPS_EXPIRY else CAUSE_UNREACHABLE
+    assert outcome == Unclaimed(cause)
     assert transport.calls == []
     assert clock.waits == []
     assert NOTHING_WAS_SENT in logged and ENDED_UNREACHABLE not in logged
@@ -1162,7 +1167,9 @@ def _claim_log(caplog: pytest.LogCaptureFixture) -> str:
     return "\n".join(record.getMessage() for record in caplog.records if record.name == claim_module.__name__)
 
 
-@pytest.mark.parametrize("expired_s", [EXPIRED_ALREADY_S, 0], ids=["ten-seconds-ago", "this-very-instant"])
+@pytest.mark.parametrize(
+    "expired_s", [-SKEW_S, EXPIRED_ALREADY_S, 0], ids=["at-skew-boundary", "ten-seconds-ago", "this-very-instant"]
+)
 def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_log_that_nothing_was_sent(caplog, expired_s):
     # Arrange
     caplog.set_level(logging.INFO, logger=claim_module.__name__)
@@ -1174,7 +1181,7 @@ def test_claim_execution_when_the_bootstrap_has_expired_on_arrival_should_log_th
     logged = _claim_log(caplog)
 
     # Assert: the cause is the contract's, and the log tells a late start from a Hub that did not answer.
-    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert outcome == Unclaimed(CAUSE_EXPIRED)
     assert transport.calls == []
     assert NOTHING_WAS_SENT in logged
     assert ENDED_UNREACHABLE not in logged

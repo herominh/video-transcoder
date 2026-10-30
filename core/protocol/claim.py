@@ -8,6 +8,7 @@ and the runtime does no work:
 
     refused         a `hub.error` that is not retryable, or still retryable when the claiming ends
     unreachable     no answer from the Hub until the claiming ends
+    expired         no claim sent because the bootstrap had expired by this runtime's clock
     invalid_answer  any other answer: a grant that does not verify or is not accepted, a `200` that is
                     not a grant, a redirect, a body that is no `hub.error` of this version
 
@@ -59,6 +60,7 @@ HTTP_OK = 200
 CAUSE_REFUSED = "refused"
 CAUSE_UNREACHABLE = "unreachable"
 CAUSE_INVALID_ANSWER = "invalid_answer"
+CAUSE_EXPIRED = "expired"
 # How long one runtime keeps claiming, the request's own time-out, and the waits between attempts (the last repeats).
 CLAIM_PATIENCE_S = 120
 CLAIM_REQUEST_TIMEOUT_S = 15.0
@@ -169,12 +171,13 @@ def claim_execution(
     if last_refusal_code is not None:
         logger.info("claim of dispatch %s ended refused: %s", dispatch_id, last_refusal_code)
         return Unclaimed(CAUSE_REFUSED, last_refusal_code)
-    # The contract has one cause for all three; the log tells a late start, and a start whose own time
-    # was spent before it could claim, from a network fault.
+    # Expired means no claim was sent (rule 7). An unanswered claim stays unreachable even when
+    # the expiry ends its retries; skew extends dispatch acceptance, never the claiming window.
     if attempt > 0:
         logger.info("claim of dispatch %s ended unreachable after %d claims", dispatch_id, attempt)
     elif dispatch.claim_expires_at <= now:
         logger.info("claim of dispatch %s: its bootstrap had expired before the first claim, nothing was sent", dispatch_id)
+        return Unclaimed(CAUSE_EXPIRED)
     else:
         logger.info(
             "claim of dispatch %s: the start's wall time was spent before the first claim, nothing was sent",

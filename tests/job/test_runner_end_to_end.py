@@ -193,7 +193,7 @@ def test_job_when_run_end_to_end_should_return_a_completed_result_the_hub_accept
     assert "diagnostics" not in result
 
 
-def test_job_when_run_end_to_end_should_put_every_object_under_the_granted_prefix_and_the_manifest_last(
+def test_job_when_run_end_to_end_should_put_every_object_under_the_granted_prefix_then_the_manifest_and_result(
     run: _Run,
 ) -> None:
     # Arrange
@@ -206,7 +206,7 @@ def test_job_when_run_end_to_end_should_put_every_object_under_the_granted_prefi
     assert len(keys) > 1
     assert all(key.startswith(f"{prefix}/") for key in keys)
     assert {call.bucket for call in run.s3.put_calls} == {OUTPUT_BUCKET}
-    assert keys[-1] == f"{prefix}/{MANIFEST_NAME}"
+    assert keys[-2:] == [f"{prefix}/{MANIFEST_NAME}", f"{prefix}/result.json"]
     assert all(not call.failed for call in run.s3.put_calls)
 
 
@@ -227,7 +227,7 @@ def test_job_when_run_end_to_end_should_store_a_manifest_the_hub_accepts_and_the
     assert located["artifact_count"] == len(run.manifest["artifacts"])
 
 
-def test_job_when_run_end_to_end_should_store_exactly_the_manifests_artifacts_and_the_manifest(run: _Run) -> None:
+def test_job_when_run_end_to_end_should_store_the_artifacts_manifest_and_result(run: _Run) -> None:
     # Arrange
     listed = {artifact["path"]: artifact for artifact in run.manifest["artifacts"]}
 
@@ -235,8 +235,11 @@ def test_job_when_run_end_to_end_should_store_exactly_the_manifests_artifacts_an
     uploaded = run.uploaded
 
     # Assert
-    assert set(uploaded) == set(listed) | {MANIFEST_NAME}
-    assert len(run.s3.put_calls) == len(listed) + 1
+    assert set(uploaded) == set(listed) | {MANIFEST_NAME, "result.json"}
+    assert len(run.s3.put_calls) == len(listed) + 2
+    assert json.loads(uploaded["result.json"]) == {
+        "vh_message": run.sealed.body.decode("ascii"), "vh_signature": run.sealed.signature,
+    }
     for path, artifact in listed.items():
         assert artifact["size_bytes"] == len(uploaded[path])
         assert artifact["sha256"] == hashlib.sha256(uploaded[path]).hexdigest()
@@ -358,7 +361,7 @@ def test_job_when_the_dispatch_is_unencrypted_should_store_plain_segments_that_p
     assert b"#EXT-X-KEY" not in plain_run.uploaded["360p/playlist.m3u8"]
 
 
-def test_job_when_the_stored_source_has_another_etag_than_the_dispatch_should_fail_and_upload_nothing(
+def test_job_when_the_stored_source_has_another_etag_than_the_dispatch_should_fail_and_store_only_its_result(
     source_media: Path, tmp_path: Path
 ) -> None:
     # Arrange: the object was replaced after the Hub recorded its ETag
@@ -371,7 +374,8 @@ def test_job_when_the_stored_source_has_another_etag_than_the_dispatch_should_fa
     assert (error["class"], error["code"], error["retryable"], error["stage"]) == (
         "source_integrity_mismatch", "source_changed", False, "probing"
     )
-    assert run.s3.put_calls == []
+    assert set(run.uploaded) == {"result.json"}
+    assert json.loads(json.loads(run.uploaded["result.json"])["vh_message"]) == run.result
     assert "source" not in run.result
     assert list(run.scratch_root.iterdir()) == []
 

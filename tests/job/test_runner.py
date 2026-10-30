@@ -53,7 +53,7 @@ from core.profile import GIB, PILOT_PROFILE, MediaProfile, profile_digest
 from core.protocol import files, pipeline
 from core.protocol.handler import Runtime, handle
 from core.protocol.messages import ExecutionIdentity
-from core.protocol.outbox import SealedMessage, SelfCheckFailed
+from core.protocol.outbox import SealedMessage, SelfCheckFailed, runpod_output
 from core.protocol.settings import StorageProfile, WorkerSettings
 from core.protocol.transport import HttpAnswer, TransportFailed
 from core.renditions import RenditionPlan
@@ -159,6 +159,7 @@ WALL_TIME_A_SLOW_HUB_WOULD_OUTLAST_S = 35
 CLIENT_CANARY = "CANARYendpointInAClientError.example.invalid/bucket?X-Amz-Signature=0123"
 WALL_TIME_POINTER = "/limits/max_wall_time_ms"
 HTTP_UNAVAILABLE = 503
+RESULT_NAME = "result.json"
 PROGRESS_KIND = "transcode.progress"
 # The factor every wait between two attempts is multiplied by where a test states the waits, in place of
 # the jitter's draw: the nominal 0.5, 2 and 8 s times it are 0.375, 1.5 and 6 s, each exact in binary.
@@ -580,6 +581,15 @@ def _error_of(result: Mapping[str, Any]) -> tuple[str, str, bool, str | None]:
     return error["class"], error["code"], error["retryable"], error["stage"]
 
 
+def _assert_only_result_stored(harness: Harness, result: Mapping[str, Any]) -> None:
+    """A failed execution stored its report, with no artifact or manifest PUT, even a failed one."""
+    (call,) = harness.output_s3.put_calls
+    assert not call.failed
+    assert call.bucket == OUTPUT_BUCKET
+    assert call.key == f"{harness.claimed.grant.output_prefix}/{RESULT_NAME}"
+    assert json.loads(json.loads(call.body)["vh_message"]) == result
+
+
 def _raising(error: BaseException) -> Callable[..., Any]:
     def stand_in(*arguments: Any, **named_arguments: Any) -> Any:
         raise error
@@ -593,6 +603,195 @@ def a_stage_with_a_bug(*arguments: Any, **named_arguments: Any) -> Any:
         raise KeyError(CAUSE_CANARY)
     except KeyError as cause:
         raise RuntimeError(CANARY) from cause
+
+
+# --- the stored terminal result -------------------------------------------------------------------
+
+
+def _handle_harness(harness: Harness) -> dict[str, str]:
+    """Run the real handler and runner against the harness's source, storage and clock."""
+    request = modified_fixture(
+        REQUEST_ENCRYPTED, {"/source/size_bytes": len(SOURCE_OBJECT), "/profile": dict(PILOT_TRIPLE)}
+    )
+    harness.transport.route(CLAIM_URL, signed_answer(files.read_bytes(GRANT_ENCRYPTED), HUB_KEY))
+    harness.transport.route(CALLBACK_URL, then=DELIVERED)
+    runtime = dataclasses.replace(harness.runtime, new_uuid=uuid_source(first=RUNTIME_ID))
+    return handle(signed_carrier(request, HUB_KEY), runtime=runtime, run_job=harness.runner.run)
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["completed", "failed"])
+@pytest.mark.parametrize("storage_fails", [False, True], ids=["stored", "storage-failed"])
+def test_handle_when_granted_should_attempt_the_exact_result_carrier_before_reporting(
+    harness, monkeypatch, failed, storage_fails
+):
+    # Arrange: a failure before scratch setup must still attempt the result PUT.
+    if failed:
+        monkeypatch.setattr(runner_module, "run_preflight", _raising(WorkerFailure(STAGE_FAILURE)))
+    attempts: list[bytes] = []
+    terminal_posts: list[bytes] = []
+    put, post = harness.s3.put_object, harness.transport.post
+
+    def put_result(**arguments):
+        if arguments["Key"].endswith("/" + RESULT_NAME):
+            assert terminal_posts == []
+            body = arguments["Body"].read()
+            arguments["Body"].seek(0)
+            attempts.append(body)
+            assert arguments["ContentType"] == "application/json"
+            assert arguments["ContentLength"] == len(body)
+            assert arguments["Bucket"] == OUTPUT_BUCKET
+            assert arguments["Key"] == f"{harness.claimed.grant.output_prefix}/{RESULT_NAME}"
+            if storage_fails:
+                raise client_error("AccessDenied", HTTP_FORBIDDEN, "PutObject", CLIENT_CANARY)
+        return put(**arguments)
+
+    def post_report(url, body, signature, **arguments):
+        if json.loads(body)["message_kind"] in {COMPLETED_KIND, FAILED_KIND}:
+            assert len(attempts) == 1
+            assert json.loads(attempts[0]) == {"vh_message": body.decode("ascii"), "vh_signature": signature}
+            terminal_posts.append(body)
+        return post(url, body, signature, **arguments)
+
+    monkeypatch.setattr(harness.s3, "put_object", put_result)
+    monkeypatch.setattr(harness.transport, "post", post_report)
+
+    # Act
+    output = _handle_harness(harness)
+
+    # Assert: one terminal message, byte for byte, even if its storage refused it.
+    assert json.loads(attempts[0]) == output
+    assert terminal_posts == [output["vh_message"].encode("ascii")]
+    result = accepted_bytes_by_the_hub(terminal_posts[0], output["vh_signature"], harness.claimed, now=harness.clock())
+    assert result["message_kind"] == (FAILED_KIND if failed else COMPLETED_KIND)
+    assert (RESULT_NAME in harness.uploaded) is not storage_fails
+    if not failed:
+        manifest = json.loads(harness.uploaded[MANIFEST_NAME])
+        assert RESULT_NAME not in {artifact["path"] for artifact in manifest["artifacts"]}
+        assert result["manifest"]["artifact_count"] == len(manifest["artifacts"])
+        assert result["manifest"]["total_bytes"] == sum(artifact["size_bytes"] for artifact in manifest["artifacts"])
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["completed", "failed"])
+def test_handle_when_the_deadline_passes_after_sealing_should_return_the_same_result_without_a_write_or_callback(
+    harness, monkeypatch, failed
+):
+    # Arrange: a sealed terminal result is immutable even if time runs out before its storage attempt.
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    if failed:
+        monkeypatch.setattr(runner_module, "run_preflight", _raising(WorkerFailure(STAGE_FAILURE)))
+    sealed: list[SealedMessage] = []
+    puts_before_expiry: list[int] = []
+    store = runner_module._Execution._store_result
+
+    def too_late(execution, result):
+        sealed.append(result)
+        puts_before_expiry.append(len(harness.s3.put_calls))
+        harness.clock.advance(harness.claimed.dispatch.limits.max_wall_time_ms / 1000)
+        store(execution, result)
+
+    monkeypatch.setattr(runner_module._Execution, "_store_result", too_late)
+
+    # Act
+    output = _handle_harness(harness)
+
+    # Assert: progress may already have gone out, but no terminal callback starts after the deadline.
+    assert output == runpod_output(sealed[0])
+    assert json.loads(output["vh_message"])["message_kind"] == (FAILED_KIND if failed else COMPLETED_KIND)
+    assert len(harness.s3.put_calls) == puts_before_expiry[0]
+    assert RESULT_NAME not in harness.uploaded
+    assert all(json.loads(call.body)["message_kind"] == PROGRESS_KIND for call in harness.transport.calls_to(CALLBACK_URL))
+
+
+def test_handle_when_the_result_put_spends_the_deadline_should_keep_its_sealed_result(harness, monkeypatch):
+    # Arrange: the PUT started in time, but the body is first requested at the deadline.
+    harness.count_wall_time_on_the_fake_clock(monkeypatch)
+    put = harness.s3.put_object
+    sealed: list[SealedMessage] = []
+    store = runner_module._Execution._store_result
+    attempted: list[str] = []
+
+    def remember(execution, result):
+        sealed.append(result)
+        store(execution, result)
+
+    def put_at_the_deadline(**arguments):
+        if arguments["Key"].endswith("/" + RESULT_NAME):
+            attempted.append(arguments["Key"])
+            harness.clock.advance(harness.claimed.dispatch.limits.max_wall_time_ms / 1000)
+        return put(**arguments)
+
+    monkeypatch.setattr(runner_module._Execution, "_store_result", remember)
+    monkeypatch.setattr(harness.s3, "put_object", put_at_the_deadline)
+
+    # Act
+    output = _handle_harness(harness)
+
+    # Assert: the result PUT gets no body after expiry; its failure cannot turn completion into failure.
+    assert len(attempted) == 1
+    assert output == runpod_output(sealed[0])
+    assert json.loads(output["vh_message"])["message_kind"] == COMPLETED_KIND
+    assert RESULT_NAME not in harness.uploaded
+    assert all(json.loads(call.body)["message_kind"] == PROGRESS_KIND for call in harness.transport.calls_to(CALLBACK_URL))
+
+
+def test_run_when_a_log_handler_fails_on_the_result_put_failure_should_keep_the_storage_error_out(
+    harness, monkeypatch, failing_log, capsys
+):
+    # Arrange: a client error with sensitive text, and a log handler that fails while reporting it.
+    put = harness.s3.put_object
+
+    def fail_result(**arguments):
+        if arguments["Key"].endswith("/" + RESULT_NAME):
+            raise RuntimeError(CLIENT_CANARY)
+        return put(**arguments)
+
+    monkeypatch.setattr(harness.s3, "put_object", fail_result)
+
+    # Act
+    result = harness.result()
+    written = reported_log_failures(capsys, "the terminal result could not be stored")
+
+    # Assert
+    assert result["message_kind"] == COMPLETED_KIND
+    assert CLIENT_CANARY not in written
+
+
+def test_handle_when_the_result_put_never_answers_should_close_its_body_and_still_report(
+    harness, monkeypatch, never_answered, no_request_abandoned
+):
+    # Arrange: only the result PUT is held; its usual 30-second ceiling is shortened for this test.
+    arrived = threading.Event()
+    settle_requests_first(monkeypatch, arrived)
+    put = harness.s3.put_object
+    store = runner_module._Execution._store_result
+    held_bodies: list[Any] = []
+    sealed: list[SealedMessage] = []
+
+    def hold_result(**arguments):
+        if arguments["Key"].endswith("/" + RESULT_NAME):
+            held_bodies.append(arguments["Body"])
+            arrived.set()
+            never_answered.wait(HANG_RELEASE_S)
+        return put(**arguments)
+
+    def store_with_a_short_ceiling(execution, result):
+        sealed.append(result)
+        monkeypatch.setattr(storage_module, "_request_ceiling_s", lambda size: SHORT_CEILING_S)
+        store(execution, result)
+
+    monkeypatch.setattr(harness.s3, "put_object", hold_result)
+    monkeypatch.setattr(runner_module._Execution, "_store_result", store_with_a_short_ceiling)
+
+    # Act
+    output = _handle_harness(harness)
+
+    # Assert: the normal storage abandonment accounting applies and no retry delays the callback.
+    assert output == runpod_output(sealed[0])
+    assert len(held_bodies) == 1
+    with pytest.raises(storage_module._BodyCutAtDeadline):
+        held_bodies[0].read()
+    assert storage_module.abandoned_requests() == 1
+    assert harness.transport.calls_to(CALLBACK_URL)[-1].body == sealed[0].body
 
 
 # --- a completed execution ------------------------------------------------------------------------
@@ -663,7 +862,7 @@ def test_run_when_every_stage_succeeds_should_state_the_media_as_the_stored_mani
     }
 
 
-def test_run_when_every_stage_succeeds_should_store_exactly_the_manifests_files_under_the_granted_prefix(harness):
+def test_run_when_every_stage_succeeds_should_store_the_manifests_files_then_the_result_under_the_granted_prefix(harness):
     # Act
     harness.run()
 
@@ -671,10 +870,10 @@ def test_run_when_every_stage_succeeds_should_store_exactly_the_manifests_files_
     prefix = harness.claimed.grant.output_prefix
     manifest = json.loads(harness.uploaded[MANIFEST_NAME])
     listed = {artifact["path"]: artifact for artifact in manifest["artifacts"]}
-    assert [call.key for call in harness.s3.put_calls][-1] == f"{prefix}/{MANIFEST_NAME}"
+    assert [call.key for call in harness.s3.put_calls][-2:] == [f"{prefix}/{MANIFEST_NAME}", f"{prefix}/{RESULT_NAME}"]
     assert all(call.key.startswith(f"{prefix}/") and call.bucket == OUTPUT_BUCKET for call in harness.s3.put_calls)
-    assert set(harness.uploaded) == set(listed) | {MANIFEST_NAME}
-    assert len(harness.s3.put_calls) == len(listed) + 1
+    assert set(harness.uploaded) == set(listed) | {MANIFEST_NAME, RESULT_NAME}
+    assert len(harness.s3.put_calls) == len(listed) + 2
     for path, artifact in listed.items():
         assert artifact["sha256"] == hashlib.sha256(harness.uploaded[path]).hexdigest()
 
@@ -964,7 +1163,7 @@ def test_run_when_the_output_limit_holds_one_rendition_only_should_fail_at_the_s
     assert _error_of(result) == ("input_limits_exceeded", "output_too_large", False, "transcoding")
     assert [call.name for call in harness.stages.encodes] == ["720p", "480p"]
     assert harness.stages.outputs[0].total_bytes == rendition_bytes
-    assert harness.s3.put_calls == []
+    _assert_only_result_stored(harness, result)
 
 
 def test_run_when_it_runs_should_hold_every_stage_to_the_dispatchs_wall_time_from_its_start(tmp_path, monkeypatch):
@@ -1411,7 +1610,7 @@ def test_run_when_a_deadline_failures_detail_leaves_no_room_for_the_numbers_shou
 
 
 @pytest.mark.parametrize("location", ["source", "output"])
-def test_run_when_a_credential_ref_is_unknown_should_fail_before_any_storage_request(tmp_path, monkeypatch, location):
+def test_run_when_a_credential_ref_is_unknown_should_fail_before_reading_and_attempt_its_result(tmp_path, monkeypatch, location):
     # Arrange: the worker holds the profile `default` only
     harness = Harness(tmp_path, monkeypatch, request_changes={f"/{location}/credential_ref": UNKNOWN_CREDENTIAL_REF})
 
@@ -1421,8 +1620,13 @@ def test_run_when_a_credential_ref_is_unknown_should_fail_before_any_storage_req
     # Assert
     assert result["message_kind"] == FAILED_KIND
     assert _error_of(result) == ("configuration_error", "unknown_credential_ref", False, None)
-    assert harness.s3.request_count == 0
-    assert harness.access_profiles == []
+    if location == "source":
+        assert harness.s3.get_calls == []
+        _assert_only_result_stored(harness, result)
+    else:
+        assert harness.s3.request_count == 0
+    assert harness.source_access == []
+    assert len(harness.output_access) == (1 if location == "source" else 0)
     assert harness.stages.preflight_deadlines == []
     assert "source" not in result
     assert harness.progress == []
@@ -1436,7 +1640,7 @@ def test_run_when_a_credential_ref_is_unknown_should_fail_before_any_storage_req
         pytest.param({**PILOT_TRIPLE, "id": "test-h264-sdr"}, id="another-id"),
     ],
 )
-def test_run_when_the_dispatch_names_a_profile_revision_the_worker_does_not_hold_should_fail_before_any_request(
+def test_run_when_the_dispatch_names_a_profile_revision_the_worker_does_not_hold_should_fail_before_reading_and_store_only_its_result(
     tmp_path, monkeypatch, named
 ):
     # Arrange
@@ -1447,7 +1651,8 @@ def test_run_when_the_dispatch_names_a_profile_revision_the_worker_does_not_hold
 
     # Assert
     assert _error_of(result) == ("configuration_error", "unsupported_profile", False, None)
-    assert harness.s3.request_count == 0
+    assert harness.s3.get_calls == []
+    _assert_only_result_stored(harness, result)
     assert harness.stages.preflight_deadlines == []
 
 
@@ -1461,7 +1666,7 @@ def test_run_when_the_dispatch_names_a_profile_revision_the_worker_does_not_hold
         pytest.param({"media_key_id": OTHER_UUID}, id="another-key-id"),
     ],
 )
-def test_run_when_the_grants_key_does_not_fit_an_encrypted_dispatch_should_fail_before_any_request(
+def test_run_when_the_grants_key_does_not_fit_an_encrypted_dispatch_should_fail_before_reading_and_store_only_its_result(
     harness, grant_changes
 ):
     # Arrange
@@ -1473,11 +1678,12 @@ def test_run_when_the_grants_key_does_not_fit_an_encrypted_dispatch_should_fail_
     # Assert
     result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
     assert _error_of(result) == ("internal_error", "grant_key_mismatch", False, None)
-    assert harness.s3.request_count == 0
+    assert harness.s3.get_calls == []
+    _assert_only_result_stored(harness, result)
     assert MEDIA_KEY_HEX.encode("ascii") not in sealed.body
 
 
-def test_run_when_the_grant_carries_a_key_for_an_unencrypted_dispatch_should_fail_before_any_request(
+def test_run_when_the_grant_carries_a_key_for_an_unencrypted_dispatch_should_fail_before_reading_and_store_only_its_result(
     tmp_path, monkeypatch
 ):
     # Arrange
@@ -1489,12 +1695,13 @@ def test_run_when_the_grant_carries_a_key_for_an_unencrypted_dispatch_should_fai
 
     # Assert
     assert _error_of(result) == ("internal_error", "grant_key_mismatch", False, None)
-    assert harness.s3.request_count == 0
+    assert harness.s3.get_calls == []
+    _assert_only_result_stored(harness, result)
     assert harness.stages.encodes == []
 
 
 @pytest.mark.parametrize("side", ["source", "output"])
-def test_run_when_a_storage_client_cannot_be_made_should_fail_before_any_storage_request(harness, caplog, side):
+def test_run_when_a_storage_client_cannot_be_made_should_fail_before_reading_and_attempt_its_result(harness, caplog, side):
     # Arrange: the factory of one side refuses its access profile, in words that quote the endpoint
     caplog.set_level(logging.DEBUG)
     setattr(harness, f"{side}_client_error", ValueError(CLIENT_CANARY))
@@ -1502,11 +1709,15 @@ def test_run_when_a_storage_client_cannot_be_made_should_fail_before_any_storage
     # Act
     sealed = harness.run()
 
-    # Assert: typed and final, at no stage, before a read, a put, a scratch directory or an encode
+    # Assert: typed and final, at no stage, before a read, a scratch directory or an encode; only its result may be put
     result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
     assert _error_of(result) == ("configuration_error", "storage_client_unavailable", False, None)
     assert result["error"]["detail"] == f"the {side} storage client could not be made: ValueError"
-    assert harness.s3.request_count == 0
+    if side == "source":
+        assert harness.s3.get_calls == []
+        _assert_only_result_stored(harness, result)
+    else:
+        assert harness.s3.request_count == 0
     assert harness.stages.preflight_deadlines == [] and harness.stages.encodes == []
     assert harness.left_in_scratch == []
     assert harness.progress == []
@@ -1552,7 +1763,7 @@ def test_run_when_a_storage_client_cannot_be_made_should_tell_the_errors_class_a
         ),
     ],
 )
-def test_run_when_a_storage_client_start_meets_a_passing_shortage_should_fail_retryable_before_any_request(
+def test_run_when_a_storage_client_start_meets_a_passing_shortage_should_fail_retryable_before_reading_and_attempt_its_result(
     harness, side, shortage, named
 ):
     # Arrange: the factory of one side runs out of something of the worker's own, as boto3 does when no
@@ -1562,11 +1773,15 @@ def test_run_when_a_storage_client_start_meets_a_passing_shortage_should_fail_re
     # Act
     sealed = harness.run()
 
-    # Assert: worth another start, at no stage, before a read, a put, a scratch directory or an encode
+    # Assert: worth another start, at no stage, before a read, a scratch directory or an encode; only its result may be put
     result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
     assert _error_of(result) == ("resource_exhausted", "storage_client_start_failed", True, None)
     assert result["error"]["detail"] == f"the {side} storage client could not be made: {named}"
-    assert harness.s3.request_count == 0
+    if side == "source":
+        assert harness.s3.get_calls == []
+        _assert_only_result_stored(harness, result)
+    else:
+        assert harness.s3.request_count == 0
     assert harness.stages.preflight_deadlines == [] and harness.stages.encodes == []
     assert harness.left_in_scratch == []
     assert harness.progress == []
@@ -1632,7 +1847,7 @@ def test_run_when_both_storage_clients_can_be_made_should_make_each_once_before_
     assert (len(harness.source_access), len(harness.output_access)) == (1, 1)
 
 
-def test_run_when_the_ffmpeg_version_cannot_be_determined_should_fail_before_any_request(tmp_path, monkeypatch):
+def test_run_when_the_ffmpeg_version_cannot_be_determined_should_fail_before_reading_and_store_only_its_result(tmp_path, monkeypatch):
     # Arrange
     unavailable = WorkerFailure(Failure("configuration_error", "ffmpeg_unavailable", False, "ffmpeg is not installed"))
     harness = Harness(tmp_path, monkeypatch, ffmpeg_version=_raising(unavailable))
@@ -1642,11 +1857,12 @@ def test_run_when_the_ffmpeg_version_cannot_be_determined_should_fail_before_any
 
     # Assert
     assert _error_of(result) == ("configuration_error", "ffmpeg_unavailable", False, None)
-    assert harness.s3.request_count == 0
+    assert harness.s3.get_calls == []
+    _assert_only_result_stored(harness, result)
     assert "encoder" not in result
 
 
-def test_run_when_the_ffmpeg_version_cannot_be_determined_should_make_no_storage_client(tmp_path, monkeypatch):
+def test_run_when_the_ffmpeg_version_cannot_be_determined_should_make_only_the_output_client_for_its_result(tmp_path, monkeypatch):
     # Arrange
     unavailable = WorkerFailure(Failure("configuration_error", "ffmpeg_unavailable", False, "ffmpeg is not installed"))
     harness = Harness(tmp_path, monkeypatch, ffmpeg_version=_raising(unavailable))
@@ -1654,9 +1870,11 @@ def test_run_when_the_ffmpeg_version_cannot_be_determined_should_make_no_storage
     # Act
     result = harness.result()
 
-    # Assert: the version is asked for before either client is made
+    # Assert: generation setup stops before either client; reporting needs only the output client
     assert _error_of(result) == ("configuration_error", "ffmpeg_unavailable", False, None)
-    assert harness.access_profiles == []
+    assert harness.source_access == []
+    assert len(harness.output_access) == 1
+    _assert_only_result_stored(harness, result)
 
 
 # --- the source -----------------------------------------------------------------------------------
@@ -1681,7 +1899,7 @@ def test_run_when_the_source_is_inadmissible_should_fail_with_the_first_refusal_
     assert "wmv3" in result["diagnostics"][1]["detail"]
 
 
-def test_run_when_the_source_is_inadmissible_should_download_and_store_nothing(tmp_path, monkeypatch):
+def test_run_when_the_source_is_inadmissible_should_download_nothing_and_store_only_its_result(tmp_path, monkeypatch):
     # Arrange
     harness = Harness(tmp_path, monkeypatch, facts=_facts(videos=(_video(codec_name="wmv3"),)))
 
@@ -1691,7 +1909,7 @@ def test_run_when_the_source_is_inadmissible_should_download_and_store_nothing(t
     # Assert: the one read is the preflight's
     assert _error_of(result) == ("input_invalid", "unsupported_video_codec", False, "probing")
     assert len(harness.s3.get_calls) == 1
-    assert harness.s3.put_calls == []
+    _assert_only_result_stored(harness, result)
     assert harness.stages.encodes == []
     assert harness.left_in_scratch == []
 
@@ -1789,7 +2007,7 @@ def test_run_when_the_dispatchs_output_limits_cannot_hold_the_package_should_fai
     assert harness.left_in_scratch == []
 
 
-def test_run_when_the_stored_object_has_another_etag_than_the_dispatch_should_fail_and_store_nothing(harness):
+def test_run_when_the_stored_object_has_another_etag_than_the_dispatch_should_fail_and_store_only_its_result(harness):
     # Arrange: the object was replaced after the Hub recorded it
     harness.s3.hold(SOURCE_BUCKET, SOURCE_KEY, SOURCE_OBJECT, OTHER_ETAG)
 
@@ -1799,11 +2017,11 @@ def test_run_when_the_stored_object_has_another_etag_than_the_dispatch_should_fa
     # Assert
     assert _error_of(result) == ("source_integrity_mismatch", "source_changed", False, "probing")
     assert "source" not in result
-    assert harness.s3.put_calls == []
+    _assert_only_result_stored(harness, result)
     assert harness.stages.encodes == []
 
 
-def test_run_when_the_object_changes_after_the_preflight_should_fail_the_download_and_store_nothing(harness):
+def test_run_when_the_object_changes_after_the_preflight_should_fail_the_download_and_store_only_its_result(harness):
     # Arrange
     harness.stages.after_preflight = lambda: harness.s3.hold(SOURCE_BUCKET, SOURCE_KEY, SOURCE_OBJECT, OTHER_ETAG)
 
@@ -1812,7 +2030,7 @@ def test_run_when_the_object_changes_after_the_preflight_should_fail_the_downloa
 
     # Assert
     assert _error_of(result) == ("source_integrity_mismatch", "source_changed", False, "downloading")
-    assert harness.s3.put_calls == []
+    _assert_only_result_stored(harness, result)
     assert harness.stages.encodes == []
     assert harness.left_in_scratch == []
 
@@ -1974,7 +2192,8 @@ def test_run_when_its_scratch_directory_cannot_be_made_should_fail_retryable_at_
     assert _error_of(result) == ("resource_exhausted", code, True, "downloading")
     assert result["error"]["detail"] == detail
     assert harness.left_in_scratch == []
-    assert harness.stages.encodes == [] and harness.s3.put_calls == []
+    assert harness.stages.encodes == []
+    _assert_only_result_stored(harness, result)
 
 
 @pytest.mark.parametrize("place", [THE_SCRATCH_ROOT, INSIDE_THE_SCRATCH_ROOT])
@@ -2329,7 +2548,8 @@ def test_run_when_an_unexpected_error_comes_before_any_stage_should_still_return
     # Assert
     assert _error_of(result) == ("internal_error", "unexpected_error", True, None)
     assert result["error"]["detail"] == "ValueError"
-    assert harness.s3.request_count == 0
+    assert harness.s3.get_calls == []
+    _assert_only_result_stored(harness, result)
     assert "encoder" not in result
 
 
@@ -2343,7 +2563,7 @@ def test_run_when_the_storage_refuses_the_generation_should_fail_at_uploading_wi
     # Assert: final, so that the Hub does not dispatch an encode again for a write that is never allowed,
     # and the refused object was sent once
     assert _error_of(result) == ("output_write_failed", "upload_refused", False, "uploading")
-    assert len(harness.s3.put_calls) == 1
+    assert [call.key.rsplit("/", 1)[-1] for call in harness.s3.put_calls] == ["master.m3u8", RESULT_NAME]
     assert harness.s3.stored == []
     assert result["source"]["bytes_read"] == len(SOURCE_OBJECT)
 
@@ -2453,7 +2673,8 @@ def test_run_when_the_preflights_read_stalls_should_fail_retryable_as_stalled_at
     assert result["error"]["detail"] == "a read of the source did not end within the time a read of its size may take"
     assert read_started.wait(HANG_RELEASE_S)
     assert time.monotonic() - started < HANG_RELEASE_S
-    assert harness.stages.encodes == [] and harness.s3.stored == []
+    assert harness.stages.encodes == []
+    _assert_only_result_stored(harness, result)
 
 
 def test_run_when_the_preflight_runs_out_of_its_time_on_a_slow_storage_should_fail_retryable_at_probing(
@@ -2476,7 +2697,8 @@ def test_run_when_the_preflight_runs_out_of_its_time_on_a_slow_storage_should_fa
         "stage": "probing",
         "detail": "the preflight ran out of time while the storage was slow",
     }
-    assert harness.stages.encodes == [] and harness.s3.stored == []
+    assert harness.stages.encodes == []
+    _assert_only_result_stored(harness, result)
     assert harness.left_in_scratch == []
 
 
@@ -2507,7 +2729,7 @@ def test_run_when_a_read_of_the_preflight_never_returns_should_fail_at_probing_o
     assert harness.stages.encodes == [] and harness.s3.stored == []
 
 
-def test_run_when_the_manifest_it_wrote_fails_its_self_check_should_fail_and_upload_nothing(harness, monkeypatch):
+def test_run_when_the_manifest_it_wrote_fails_its_self_check_should_fail_and_store_only_its_result(harness, monkeypatch):
     # Arrange: the manifest on disk names another source than the dispatch's
     real_write_manifest = runner_module.write_manifest
 
@@ -2526,10 +2748,10 @@ def test_run_when_the_manifest_it_wrote_fails_its_self_check_should_fail_and_upl
     assert _error_of(result) == ("internal_error", "manifest_self_check_failed", False, "finalizing")
     assert "semantic/source_mismatch" in result["error"]["detail"]
     assert OTHER_UUID not in result["error"]["detail"]
-    assert harness.s3.put_calls == []
+    _assert_only_result_stored(harness, result)
 
 
-def test_run_when_the_completed_result_would_fail_its_self_check_should_fail_at_finalizing_and_upload_nothing(
+def test_run_when_the_completed_result_would_fail_its_self_check_should_fail_at_finalizing_and_store_only_its_result(
     harness,
 ):
     # Arrange: a grant whose generation is not its execution, which no accepted grant is
@@ -2542,7 +2764,7 @@ def test_run_when_the_completed_result_would_fail_its_self_check_should_fail_at_
     assert result["message_kind"] == FAILED_KIND
     assert _error_of(result) == ("internal_error", "result_self_check_failed", False, "finalizing")
     assert "generation_execution_mismatch" in result["error"]["detail"]
-    assert harness.s3.put_calls == []
+    _assert_only_result_stored(harness, result)
     assert [message["stage"] for message in harness.progress][-1] == "finalizing"
 
 
@@ -3279,7 +3501,7 @@ def test_progress_when_the_generation_is_uploaded_should_report_its_bytes_up_to_
     percents = [message["stage_progress_pct"] for message in uploading]
     assert percents == sorted(percents) and percents[0] == 0 and percents[-1] == 100
     assert len(percents) <= 1 + PERCENT_STEPS_PER_STAGE
-    assert uploading[-1]["counters"]["bytes_uploaded"] == sum(len(body) for body in harness.uploaded.values())
+    assert uploading[-1]["counters"]["bytes_uploaded"] == sum(len(body) for path, body in harness.uploaded.items() if path != RESULT_NAME)
 
 
 @pytest.mark.parametrize(
