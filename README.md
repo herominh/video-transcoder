@@ -10,6 +10,8 @@ Video processing worker for Video Hub. Supported processing runs through an exte
 - `wrappers/modal_app.py` — staged second candidate. Both its HTTP endpoint and worker function refuse execution until Modal implements the provider adapter contract.
 - Stateless — no database; job tracking lives in Video Hub.
 
+Contract v2 stores `generation-manifest.json` and attempts `result.json` under the granted output prefix. The latter holds the exact signed result carrier returned as the RunPod output; neither object is an artifact. A failed result write never prevents reporting, and no write starts after the runtime deadline. A dispatch accepted within clock skew after claim expiry reports `unclaimed` with cause `expired` without sending a claim.
+
 ## Local Development
 
 Requires Python 3.12+ and FFmpeg (NVENC for GPU, or a standard build for CPU).

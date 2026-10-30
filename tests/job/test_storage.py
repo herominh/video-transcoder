@@ -3668,8 +3668,15 @@ def test_upload_when_the_deadline_passes_under_a_put_that_outlasts_its_ceiling_s
     # minute left when the put starts and none by the time the ceiling is reached
     client = _PausingS3(hold.keep, f"{PREFIX}/master.m3u8")
 
+    class PassedWhenHeld(Deadline):
+        def remaining_s(self) -> float:
+            return 0.0 if hold.entered.is_set() else GENEROUS_MS / 1000
+
+        def expired(self) -> bool:
+            return hold.entered.is_set()
+
     # Act
-    failure = _failure_of(lambda: generation.upload(client, deadline=_PassedOnceAsked()))
+    failure = _failure_of(lambda: generation.upload(client, deadline=PassedWhenHeld(NEVER_S)))
     assert hold.entered.wait(PROMPT_S)
     hold.release()
 

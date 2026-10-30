@@ -3,7 +3,10 @@
 JobRunner.run() is the job runner core.protocol.handler.handle() hands a claimed execution to. It
 returns the execution's one ending, sealed: `transcode.result.completed` once the generation and its
 manifest are stored under the granted prefix, `transcode.result.failed` for every other ending, with
-the typed failure and the stage it ended in.
+the typed failure and the stage it ended in. Before returning either result to the handler for its
+callback and job output, it attempts to store that same sealed result's carrier at `result.json`
+(rule 9). This best-effort PUT uses the generation writer's deadline and request ceiling, needs no
+scratch directory, and never changes the terminal result, even if the deadline passes during it.
 
 The stages, in order (the `stage` of a progress message and of a failed result; null before the first):
 
@@ -122,6 +125,7 @@ from .storage import (
     storage_client,
     upload_client,
     upload_generation,
+    upload_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -409,18 +413,46 @@ class _Execution:
         self._refusal_diagnostics: tuple[Diagnostic, ...] = ()
         # The storage clients this execution made, closed when it ends.
         self._clients: list[Any] = []
+        self._output_client: Any = None
         self._scratch_root: Path | None = None
         # The descriptor the lock on the scratch directory lives on, while the execution holds it.
         self._scratch_lock: int | None = None
 
     def run(self) -> SealedMessage:
         try:
-            return self._ending()
+            result = self._ending()
+            self._grant.drop_media_key()
+            self._store_result(result)
+            return result
         finally:
-            # An execution that never came to its transcoding stage held the key until here.
+            # Drop the key even when building the terminal result raised.
             self._grant.drop_media_key()
             self._close_clients()
             self._remove_scratch()
+
+    def _store_result(self, result: SealedMessage) -> None:
+        """Best effort before the handler reports: never replace or reseal a terminal message."""
+        try:
+            if self._deadline.expired():
+                return
+            # A failed execution may have ended before either client was made. Only the output's
+            # profile is needed here; failure of the source or the scratch disk must not prevent this.
+            if self._output_client is None:
+                access = self._runtime.settings.storage_profile(self._dispatch.output.credential_ref)
+                self._output_client = self._client(SIDE_OUTPUT, self._output_client_factory, access)
+            upload_result(
+                self._output_client,
+                bucket=self._dispatch.output.bucket,
+                prefix=self._grant.output_prefix,
+                result=result,
+                deadline=self._deadline,
+            )
+        except Exception as error:  # noqa: BLE001 - a stored result never costs the terminal report
+            error_class = type(error).__name__
+        else:
+            return
+        # Outside the handler: even a failing log must not expose the storage error's own text.
+        logger.warning("the terminal result could not be stored: %s", error_class)
 
     def _ending(self) -> SealedMessage:
         execution_id = self._grant.identity.execution_id
@@ -478,14 +510,14 @@ class _Execution:
         self._require_grant_key_fits()
         encoder = self._identified_encoder(profile)
         source = self._source(self._client(SIDE_SOURCE, self._source_client_factory, source_access))
-        output_client = self._client(SIDE_OUTPUT, self._output_client_factory, output_access)
+        self._output_client = self._client(SIDE_OUTPUT, self._output_client_factory, output_access)
         # The preflight makes its own reads of the source: this holds each of them to the execution's
         # deadline while it is in flight, as the download and the upload hold theirs.
         plan = self._probe(DeadlineSource(source, self._deadline), profile)
         scratch = self._download(source)
         encoded = self._transcode(scratch, plan, profile)
         generation = self._finalize(scratch, encoded, profile, encoder)
-        self._upload(output_client, scratch, generation)
+        self._upload(self._output_client, scratch, generation)
         return generation
 
     def _enter(self, stage: str) -> None:

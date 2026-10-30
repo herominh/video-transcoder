@@ -70,6 +70,7 @@ from tests.contract.v2_support import (
     signed_answer,
     signed_carrier,
     slices_shown,
+    timestamp_text,
     uuid_source,
     worker_env,
     worker_settings,
@@ -309,6 +310,32 @@ def test_handle_when_the_claim_is_not_granted_should_do_no_work_and_report_uncla
     assert signing.verify(body, WORKER_KEY, output["vh_signature"])
     assert [(call.body, call.signature) for call in transport.calls_to(CALLBACK_URL)] == [(body, output["vh_signature"])]
     assert transport.calls[-1].url == CALLBACK_URL
+
+
+@pytest.mark.parametrize("expired_s", [0, 10, SETTINGS.clock_skew_s])
+def test_handle_when_expiry_prevents_the_first_claim_should_report_expired_without_work(expired_s):
+    # Arrange: S6 accepts through expiry plus skew, but rule 6 allows no claim in that interval.
+    clock = FakeClock()
+    request = modified_fixture(
+        REQUEST_ENCRYPTED,
+        {"/claim/expires_at": timestamp_text(clock() - timedelta(seconds=expired_s))},
+    )
+    transport = _transport(clock)
+    job = StandInJob()
+
+    # Act
+    output = handle(signed_carrier(request, HUB_KEY), runtime=_runtime(transport, clock), run_job=job)
+
+    # Assert: the report has the same signed bytes on both channels and carries no Hub error code.
+    body = output["vh_message"].encode("ascii")
+    report = json.loads(body)
+    context = catalog_context(HUB_UNCLAIMED_POLL_CONTEXT, now=clock(), known_key_ids=[WORKER_KEY_ID])
+    assert pipeline.validate(body, context).accepted
+    assert signing.verify(body, WORKER_KEY, output["vh_signature"])
+    assert (report["message_kind"], report["cause"]) == (UNCLAIMED_KIND, "expired")
+    assert HUB_ERROR_CODE_MEMBER not in report
+    assert transport.calls_to(CLAIM_URL) == [] and job.calls == []
+    assert [(call.body, call.signature) for call in transport.calls_to(CALLBACK_URL)] == [(body, output["vh_signature"])]
 
 
 # --- a claiming that ends as neither a grant nor unclaimed --------------------------------------
