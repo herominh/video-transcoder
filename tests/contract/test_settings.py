@@ -31,7 +31,7 @@ CANARY_PREFIX_LENGTH = 16
 MIN_LOOKED_FOR_VALUE_LENGTH = 8
 
 VALID_ENV = {
-    "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0-draft",
+    "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0",
     "VH_WORKER_AUDIENCE": "worker:runpod-test",
     "VH_HUB_TO_WORKER_KEYS": f"test-hub2wk-k1={HUB_KEY_HEX},test-hub2wk-k2={SECOND_HUB_KEY_HEX}",
     "VH_WORKER_TO_HUB_KEY_ID": "test-wk2hub-k1",
@@ -203,7 +203,7 @@ def test_from_env_when_every_variable_is_valid_should_hold_the_parsed_values():
     settings = WorkerSettings.from_env(VALID_ENV)
 
     # Assert
-    assert settings.accepted_protocol_versions == ("2.0.0-draft",)
+    assert settings.accepted_protocol_versions == ("2.0.0",)
     assert settings.worker_audience == "worker:runpod-test"
     assert dict(settings.hub_to_worker_keys) == {
         "test-hub2wk-k1": bytes.fromhex(HUB_KEY_HEX),
@@ -288,7 +288,7 @@ def test_from_env_when_a_value_is_not_printable_ascii_should_refuse(variable, va
     assert "printable ASCII" in refusal.rule
 
 
-@pytest.mark.parametrize("value", [" 2.0.0-draft", "2.0.0-draft "], ids=["leading-space", "trailing-space"])
+@pytest.mark.parametrize("value", [" 2.0.0", "2.0.0 "], ids=["leading-space", "trailing-space"])
 def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
     # Act
     refusal = _refusal(_env(VH_ACCEPTED_PROTOCOL_VERSIONS=value))
@@ -305,14 +305,14 @@ def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
     ("value", "rule"),
     [
         ("3.0.0-draft", "versions.json"),
-        ("2.0.0", "versions.json"),
-        ("2.0.0-draft,2.0.0-draft", "twice"),
-        ("2.0.0-draft , 2.0.0-draft", "twice"),
-        ("2.0.0-draft,", "empty entry"),
+        ("2.1.0", "versions.json"),
+        ("2.0.0,2.0.0", "twice"),
+        ("2.0.0 , 2.0.0", "twice"),
+        ("2.0.0,", "empty entry"),
     ],
     ids=[
         "another-major",
-        "the-release-versions-json-does-not-define",
+        "a-minor-version-the-contract-does-not-define",
         "listed-twice",
         "listed-twice-with-spaces-around-the-comma",
         "empty-entry",

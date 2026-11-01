@@ -154,7 +154,7 @@ def _worker_sender_context(arguments: dict[str, Any]) -> TrustedContext:
             "context_version": 1,
             "role": "worker_sender",
             "channel": "storage",
-            "accepted_manifest_versions": ["1.0.0-draft"],
+            "accepted_manifest_versions": ["1.0.0"],
             "accepted_message_kinds": ["generation.manifest"],
             "expect": {
                 "org_uuid": identity.org_uuid,

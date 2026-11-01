@@ -1,6 +1,6 @@
 {
   "manifest_versions": {
-    "1.0.0-draft": {
+    "1.0.0": {
       "active": [
         "hls_master_playlist",
         "hls_media_playlist",

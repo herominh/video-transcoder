@@ -303,11 +303,11 @@ def test_context_when_expect_is_an_empty_object_for_a_hub_receiver_should_raise_
     ("field", "versions"),
     [
         ("accepted_protocol_versions", ["3.0.0-draft"]),
-        ("accepted_protocol_versions", ["2.0.0-draft", "2.1.0-draft"]),
-        ("accepted_protocol_versions", ["2.0.0"]),
+        ("accepted_protocol_versions", ["2.0.0", "2.1.0-draft"]),
+        ("accepted_protocol_versions", ["2.1.0"]),
         ("accepted_manifest_versions", ["2.0.0"]),
     ],
-    ids=["another-major", "an-undefined-minor-beside-the-draft", "the-release", "another-manifest-major"],
+    ids=["another-major", "an-undefined-minor-beside-the-release", "an-undefined-minor", "another-manifest-major"],
 )
 def test_context_when_an_accepted_version_is_not_defined_by_versions_json_should_raise_context_invalid(
     field, versions
@@ -320,7 +320,7 @@ def test_context_when_an_accepted_version_is_not_defined_by_versions_json_should
         TrustedContext.from_dict(context)
 
 
-def test_context_when_accepted_versions_are_the_empty_live_lists_should_load():
+def test_context_when_accepted_version_lists_are_empty_should_load():
     # Arrange
     context = {
         **_complete_context("hub_receiver", PROGRESS, "push"),
@@ -340,7 +340,7 @@ def test_context_when_accepted_versions_are_the_empty_live_lists_should_load():
     [
         {"accepted_message_kinds": {"0": PROGRESS}},
         {"known_key_ids": {"0": "test-wk2hub-k1"}},
-        {"accepted_protocol_versions": {"0": "2.0.0-draft"}},
+        {"accepted_protocol_versions": {"0": "2.0.0"}},
     ],
     ids=["kinds-as-a-map", "key-ids-as-a-map", "versions-as-a-map"],
 )

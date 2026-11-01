@@ -67,10 +67,10 @@ FAILURE_UNFRAMED_BODY = "UnframedBody"
 FAILURE_INCOMPLETE_BODY = "IncompleteBody"
 FIRST_FINAL_STATUS = 200
 # For the callers that read an answer (the claim, a delivery). A `hub.error` is read only under an error
-# status. A gateway in front of the Hub answers with one of the three below while it cannot reach the
-# Hub: such an answer, when it carries no `hub.error`, is no answer from the Hub.
+# status. Without a valid `hub.error`, README section 12 judges a temporary or permanent refusal by status.
 HTTP_ERROR_STATUSES = range(400, 600)
-GATEWAY_FAILURE_STATUSES = frozenset({502, 503, 504})
+TEMPORARY_REFUSAL_STATUSES = frozenset({429, 502, 503, 504})
+HTTP_PAYLOAD_TOO_LARGE = 413
 # Statuses whose answer has no body by definition (RFC 9110): such an answer announces no chunks.
 _BODILESS_STATUSES = frozenset({204, 304})
 # What this transport puts in a request line or a header: visible ASCII, so no space, line break or fold.
@@ -83,6 +83,7 @@ _HEADER_NAME = re.compile(rb"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
 _HEADER_VALUE = re.compile(rb"[\x09\x20-\x7e\x80-\xff]*")
 _HEADER_WHITE_SPACE = b"\t "
 _PLAIN_LENGTH = re.compile(r"[0-9]{1,18}")
+_WHOLE_SECONDS = re.compile(r"[0-9]+")
 # A chunk size in plain hexadecimal: no sign, no prefix, no extension; 8 digits hold any body this reads.
 _CHUNK_SIZE = re.compile(rb"[0-9A-Fa-f]{1,8}")
 _CHUNK_SIZE_LINE_BYTES = 8 + len(LINE_END)
@@ -95,11 +96,15 @@ class TransportFailed(Exception):
 
 @dataclass(frozen=True)
 class HttpAnswer:
-    """What came back: the status, the body's bytes (at most `max_body_bytes` plus one) and the signature header."""
+    """The status, bounded body, signature and optional Retry-After in whole seconds.
+
+    The delay uses clock units (float); an unrepresentably large delay is infinity, so no bounded retry fits.
+    """
 
     status: int
     body: bytes = field(repr=False)
     signature: str | None = field(repr=False)
+    retry_after_s: float | None = None
 
 
 class Transport(Protocol):
@@ -363,7 +368,16 @@ def _read_answer(reader: BinaryIO, max_body_bytes: int) -> HttpAnswer:
         body=_read_body(reader, status, headers, max_body_bytes),
         # Two signature headers name no signature: the verification then fails on its own.
         signature=signatures[0] if len(signatures) == 1 else None,
+        retry_after_s=_retry_after_seconds(headers),
     )
+
+
+def _retry_after_seconds(headers: Mapping[str, list[str]]) -> float | None:
+    """Read one delay in ASCII digits only; dates, fractions and ambiguous repeated fields are ignored."""
+    values = headers.get("retry-after", [])
+    if len(values) != 1 or _WHOLE_SECONDS.fullmatch(values[0]) is None:
+        return None
+    return float(values[0])
 
 
 def _read_headers(reader: BinaryIO, head: _Head) -> dict[str, list[str]]:

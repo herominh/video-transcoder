@@ -1,5 +1,5 @@
 {
-  "protocol_version": "2.0.0-draft",
+  "protocol_version": "2.0.0",
   "message_kind": "transcode.result.completed",
   "message_id": "99999999-9999-7999-8999-000000000146",
   "sent_at": "2029-12-31T23:59:55.000Z",
@@ -20,8 +20,8 @@
   "manifest": {
     "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
     "path": "generation-manifest.json",
-    "sha256": "6f380599ad097e2c0013d96b398116142c7c0b25d1d8d2dd6097d71d7b913a4d",
-    "size_bytes": 4144,
+    "sha256": "13cc0e2614d02048138874dc3106d89c7a3edf896e99040910163e4a41f8d0a0",
+    "size_bytes": 4138,
     "artifact_count": 11,
     "total_bytes": 6391664
   },

@@ -78,7 +78,7 @@ ARTIFACT_KIND_PLAYLIST = "hls_media_playlist"
 ARTIFACT_KIND_SEGMENT = "hls_segment"
 ARTIFACT_KIND_MASTER = "hls_master_playlist"
 ARTIFACT_KIND_THUMBNAIL = "thumbnail"
-# The active artifact kinds of contract v2's manifest 1.0.0-draft.
+# The active artifact kinds of contract v2's manifest 1.0.0.
 ARTIFACT_KINDS = frozenset(
     {ARTIFACT_KIND_MASTER, ARTIFACT_KIND_PLAYLIST, ARTIFACT_KIND_SEGMENT, ARTIFACT_KIND_THUMBNAIL}
 )

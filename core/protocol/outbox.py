@@ -29,7 +29,7 @@ from .context import TrustedContext
 from .inbound import accept_hub_error
 from .registry import MessageKind, load_registry
 from .settings import WorkerSettings
-from .transport import GATEWAY_FAILURE_STATUSES, HTTP_ERROR_STATUSES, Transport, TransportFailed
+from .transport import HTTP_ERROR_STATUSES, HTTP_PAYLOAD_TOO_LARGE, TEMPORARY_REFUSAL_STATUSES, Transport, TransportFailed
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +110,12 @@ def deliver(
     """POST the message to the callback address; True when the Hub answered 2xx. It never raises for a failed delivery.
 
     Sent again, as a claim is, only after a failure in transport or a `hub.error` the Hub called
-    retryable. A `hub.error` is read only under a 4xx or 5xx status, and a gateway's 502, 503 or 504 that
-    carries none is no answer from the Hub (transport.GATEWAY_FAILURE_STATUSES), so it counts as a failure
-    in transport: sending the same bytes again is safe, because the Hub's receiver takes a message it
-    already holds as a duplicate. Any other answer that is not a 2xx ends the delivery. `attempts` is how
-    many POSTs the delivery may make, a whole number of 1 or more, and `timeout_s` each POST's time-out, a
+    retryable, or a temporary refusal under README section 12. A `hub.error` is read only under a 4xx or
+    5xx status; without one, 429, 502, 503 and 504 are temporary, honouring a whole-seconds Retry-After,
+    and 413 is a permanent payload_too_large refusal. Sending the same bytes again is safe, because the
+    Hub's receiver takes a message it already holds as a duplicate. Any other answer that is not a 2xx
+    ends the delivery. `attempts` is how many POSTs the delivery may make, a whole number of 1 or more,
+    and `timeout_s` each POST's time-out, a
     positive finite number of seconds (ValueError for either otherwise, before any POST).
 
     `give_up_at` and `monotonic` come together or not at all (ValueError otherwise, before any POST):
@@ -123,7 +124,8 @@ def deliver(
     included: then nothing is sent), no wait between attempts is started that would end at or after it,
     and each POST's time-out is the smaller of `timeout_s` and the time left, where less time left than
     CALLBACK_MIN_TIMEOUT_S counts as that much: an attempt that started before the end gets that long,
-    never more than `timeout_s`. Without them nothing bounds the delivery but its attempts.
+    never more than `timeout_s`. Without them, a temporary refusal's Retry-After is honoured only up to
+    the largest value of CALLBACK_BACKOFF_S; each wait is still at least the attempt's own backoff.
     """
     if sealed.kind not in _CALLBACK_KINDS:
         raise ValueError(f"a {sealed.kind.value} never goes to the callback address")
@@ -133,12 +135,14 @@ def deliver(
         raise ValueError("timeout_s must be a positive finite number of seconds")
     time_left_s = _time_left(give_up_at, monotonic)
     hub_error_context = messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
+    retry_after_s = 0.0
     for attempt in range(attempts):
         if attempt > 0:
-            wait_s = float(CALLBACK_BACKOFF_S[min(attempt, len(CALLBACK_BACKOFF_S)) - 1])
-            if time_left_s is not None and wait_s >= time_left_s():
+            wait_s = max(float(CALLBACK_BACKOFF_S[min(attempt, len(CALLBACK_BACKOFF_S)) - 1]), retry_after_s)
+            if not math.isfinite(wait_s) or (time_left_s is not None and wait_s >= time_left_s()):
                 return _stopped_for_want_of_time(sealed)
             sleep(wait_s)
+        retry_after_s = 0.0
         post_timeout_s = timeout_s
         if time_left_s is not None:
             left_s = time_left_s()
@@ -161,11 +165,16 @@ def deliver(
         error = None
         if answer.status in HTTP_ERROR_STATUSES:
             error = accept_hub_error(answer.body, context=hub_error_context)
-        if error is None and answer.status in GATEWAY_FAILURE_STATUSES:
-            logger.info("callback of a %s did not reach the Hub: status %d", sealed.kind.value, answer.status)
+        if error is None and answer.status in TEMPORARY_REFUSAL_STATUSES:
+            logger.info("callback of a %s refused for now: status %d", sealed.kind.value, answer.status)
+            retry_after_s = answer.retry_after_s or 0.0
+            if give_up_at is None:
+                retry_after_s = min(retry_after_s, max(CALLBACK_BACKOFF_S))
             continue
         if error is None or not error["retryable"]:
-            code = "none" if error is None else error["code"]
+            code = error["code"] if error is not None else (
+                "payload_too_large" if answer.status == HTTP_PAYLOAD_TOO_LARGE else "invalid_answer"
+            )
             logger.info("callback of a %s refused: status %d, code %s", sealed.kind.value, answer.status, code)
             return False
         logger.info("callback of a %s refused for now: %s", sealed.kind.value, error["code"])
@@ -176,7 +185,7 @@ def _time_left(
     give_up_at: float | None, monotonic: Callable[[], float] | None
 ) -> Callable[[], float] | None:
     """How many seconds a delivery has until `give_up_at`, to be asked whenever it matters; None when
-    nothing bounds the delivery. ValueError unless both are given or neither, and unless `give_up_at` is
+    no deadline was given. ValueError unless both are given or neither, and unless `give_up_at` is
     a finite number, which an integer too large to be a float is not."""
     if give_up_at is None and monotonic is None:
         return None

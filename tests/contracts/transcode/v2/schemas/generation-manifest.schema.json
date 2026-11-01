@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/generation-manifest.schema.json",
-  "title": "Transcode contract v2: generation.manifest 1.0.0-draft (worker-written candidate)",
+  "title": "Transcode contract v2: generation.manifest 1.0.0 (worker-written candidate)",
   "type": "object",
   "additionalProperties": false,
   "required": [

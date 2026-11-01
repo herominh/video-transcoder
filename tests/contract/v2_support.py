@@ -24,7 +24,7 @@ from core.protocol.transport import HttpAnswer
 # --- the fixtures' synthetic values (README section 14) -----------------------------------------
 
 FIXTURE_NOW: Final = datetime(2030, 1, 1, tzinfo=timezone.utc)
-PROTOCOL_VERSION: Final = "2.0.0-draft"
+PROTOCOL_VERSION: Final = "2.0.0"
 WORKER_AUDIENCE: Final = "worker:runpod-test"
 HUB_KEY_ID: Final = "test-hub2wk-k1"
 WORKER_KEY_ID: Final = "test-wk2hub-k1"

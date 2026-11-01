@@ -4,7 +4,7 @@ seal_message() encodes a built message, validates those exact bytes under the se
 them: a message its own validator refuses raises SelfCheckFailed and is never sealed, and a SealedMessage
 is made in no other way. runpod_output() is the job's output carrier of a result or an unclaimed report;
 deliver() posts the same bytes to the configured callback address, sends again only after a transport
-failure, a gateway's 502, 503 or 504 that carries no accepted `hub.error`, or a retryable `hub.error`
+failure, a 429, 502, 503 or 504 that carries no accepted `hub.error`, or a retryable `hub.error`
 (read only under a 4xx or 5xx status), and never raises for a delivery that failed. A claim travels
 neither way. Given the instant it must give up at, deliver() starts neither an attempt nor a wait that
 would reach it, and shortens each POST's time-out to the time left; given none, it behaves as it always
@@ -80,6 +80,8 @@ HTTP_LAST_SUCCESS = 299
 HTTP_FOUND = 302
 HTTP_NOT_MODIFIED = 304
 HTTP_CONFLICT = 409
+HTTP_PAYLOAD_TOO_LARGE = 413
+HTTP_TOO_MANY_REQUESTS = 429
 HTTP_INTERNAL_ERROR = 500
 HTTP_NOT_IMPLEMENTED = 501
 HTTP_BAD_GATEWAY = 502
@@ -94,8 +96,8 @@ HTTP_LAST_ERROR = 599
 # The first status after the error statuses, and the last one a status line can hold.
 HTTP_FIRST_AFTER_THE_ERRORS = 600
 HTTP_LAST_STATUS = 999
-# What a gateway in front of the Hub answers while it cannot reach it.
-GATEWAY_STATUSES = [HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
+# The temporary non-envelope refusals of README section 12.
+TEMPORARY_STATUSES = [HTTP_TOO_MANY_REQUESTS, HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
 HTML_BODY = b"<html><body><h1>502 Bad Gateway</h1></body></html>"
 RETRYABLE_CODE = "service_unavailable"
 FINAL_CODE = "conflicting_terminal_result"
@@ -106,9 +108,15 @@ DELIVERED = HttpAnswer(HTTP_OK, b"", None)
 RETRY_LATER = hub_error_answer(HTTP_UNAVAILABLE, RETRYABLE_CODE, retryable=True)
 FINAL_REFUSAL = hub_error_answer(HTTP_CONFLICT, FINAL_CODE, retryable=False)
 GATEWAY_FAILURE = HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None)
-# What a gateway answers while it cannot reach the Hub: one of its own statuses, and no accepted `hub.error`
+# A temporary status with no accepted hub.error, including an edge's own body
 # (a body that says it is one and is not accepted, whatever it says of sending again, is none).
-GATEWAY_FAILURES = [
+TEMPORARY_REFUSALS = [
+    pytest.param(HttpAnswer(HTTP_TOO_MANY_REQUESTS, HTML_BODY, None), id="an-html-429"),
+    pytest.param(HttpAnswer(HTTP_TOO_MANY_REQUESTS, b"", None), id="an-empty-429"),
+    pytest.param(
+        hub_error_answer(HTTP_TOO_MANY_REQUESTS, UNKNOWN_HUB_ERROR_CODE, retryable=False),
+        id="a-429-hub-error-with-an-unknown-code",
+    ),
     pytest.param(GATEWAY_FAILURE, id="an-html-502"),
     pytest.param(HttpAnswer(HTTP_UNAVAILABLE, HTML_BODY, None), id="an-html-503"),
     pytest.param(HttpAnswer(HTTP_GATEWAY_TIMEOUT, HTML_BODY, None), id="an-html-504"),
@@ -458,11 +466,11 @@ def test_deliver_when_a_retryable_hub_error_comes_under_a_status_that_is_no_erro
     assert clock.waits == []
 
 
-# --- a gateway's 502, 503 or 504 ----------------------------------------------------------------
+# --- a gateway's 429, 502, 503 or 504 ----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("gateway_failure", GATEWAY_FAILURES)
-def test_deliver_when_a_gateway_failure_precedes_the_hubs_2xx_should_wait_the_first_back_off_then_send_again(
+@pytest.mark.parametrize("gateway_failure", TEMPORARY_REFUSALS)
+def test_deliver_when_a_temporary_refusal_precedes_the_hubs_2xx_should_wait_the_first_back_off_then_send_again(
     gateway_failure,
 ):
     # Arrange
@@ -489,8 +497,8 @@ def test_deliver_when_a_gateway_failure_precedes_the_hubs_2xx_should_wait_the_fi
     ],
     ids=["two-attempts", "three-attempts", "four-attempts"],
 )
-@pytest.mark.parametrize("status", GATEWAY_STATUSES)
-def test_deliver_when_a_gateway_answers_every_attempt_should_post_exactly_the_allowed_attempts_and_return_false(
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+def test_deliver_when_every_attempt_meets_a_temporary_refusal_should_post_exactly_the_allowed_attempts_and_return_false(
     status, attempts, waits
 ):
     # Arrange
@@ -506,8 +514,8 @@ def test_deliver_when_a_gateway_answers_every_attempt_should_post_exactly_the_al
     assert clock.waits == waits
 
 
-@pytest.mark.parametrize("status", GATEWAY_STATUSES)
-def test_deliver_when_a_gateway_status_carries_a_final_hub_error_should_stop_at_once_and_return_false(status):
+@pytest.mark.parametrize("status", [*TEMPORARY_STATUSES, HTTP_PAYLOAD_TOO_LARGE])
+def test_deliver_when_a_status_refusal_carries_a_final_hub_error_should_stop_at_once_and_return_false(status):
     # Arrange: the Hub itself answered, whatever the status: its refusal counts, not the status
     clock = FakeClock()
     transport = FakeTransport(hub_error_answer(status, FINAL_CODE, retryable=False), then=DELIVERED, clock=clock)
@@ -521,8 +529,8 @@ def test_deliver_when_a_gateway_status_carries_a_final_hub_error_should_stop_at_
     assert clock.waits == []
 
 
-@pytest.mark.parametrize("status", GATEWAY_STATUSES)
-def test_deliver_when_a_gateway_status_carries_a_retryable_hub_error_should_send_again_and_return_true(status):
+@pytest.mark.parametrize("status", [*TEMPORARY_STATUSES, HTTP_PAYLOAD_TOO_LARGE])
+def test_deliver_when_a_status_refusal_carries_a_retryable_hub_error_should_send_again_and_return_true(status):
     # Arrange
     clock = FakeClock()
     transport = FakeTransport(hub_error_answer(status, RETRYABLE_CODE, retryable=True), DELIVERED, clock=clock)
@@ -534,6 +542,107 @@ def test_deliver_when_a_gateway_status_carries_a_retryable_hub_error_should_send
     assert delivered is True
     assert len(transport.calls) == 2
     assert clock.waits == [FIRST_WAIT_S]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        HttpAnswer(HTTP_PAYLOAD_TOO_LARGE, b"", None, retry_after_s=7),
+        HttpAnswer(HTTP_PAYLOAD_TOO_LARGE, HTML_BODY, None, retry_after_s=7),
+        hub_error_answer(HTTP_PAYLOAD_TOO_LARGE, UNKNOWN_HUB_ERROR_CODE, retryable=True),
+    ],
+    ids=["empty", "html", "invalid-hub-error"],
+)
+def test_deliver_when_a_413_carries_no_valid_hub_error_should_end_as_payload_too_large(caplog, answer):
+    # Arrange
+    caplog.set_level(logging.INFO, logger=outbox_module.__name__)
+    clock = FakeClock()
+    transport = FakeTransport(answer, then=DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_failed_result(), transport, clock)
+
+    # Assert
+    assert delivered is False
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+    assert "payload_too_large" in caplog.text
+    assert HTML_BODY.decode("ascii") not in caplog.text
+
+
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+@pytest.mark.parametrize("retry_after_s", [None, 0, 1, 7])
+def test_deliver_when_a_temporary_refusal_has_retry_after_should_honour_it_and_the_backoff(status, retry_after_s):
+    # Arrange
+    clock = FakeClock()
+    message = _sealed_failed_result()
+    refusal = HttpAnswer(status, HTML_BODY, None, retry_after_s=retry_after_s)
+    transport = FakeTransport(refusal, DELIVERED, clock=clock, seconds_per_post=1)
+    expected_wait = max(FIRST_WAIT_S, retry_after_s or 0)
+
+    # Act
+    delivered = _deliver_within(message, transport, clock, 30)
+
+    # Assert
+    assert delivered is True
+    assert clock.waits == [expected_wait]
+    assert transport.calls[1].at - transport.calls[0].at == timedelta(seconds=1 + expected_wait)
+    assert [(call.body, call.signature) for call in transport.calls] == [(message.body, message.signature)] * 2
+
+
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+@pytest.mark.parametrize("retry_after_s", [4, 5, float("inf")], ids=["at-deadline", "past-deadline", "unrepresentably-large"])
+def test_deliver_when_retry_after_reaches_the_write_deadline_should_stop_without_waiting(status, retry_after_s):
+    # Arrange: five seconds left at the first attempt; four once its response comes back.
+    clock = FakeClock()
+    refusal = HttpAnswer(status, HTML_BODY, None, retry_after_s=retry_after_s)
+    transport = FakeTransport(refusal, then=DELIVERED, clock=clock, seconds_per_post=1)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, 5)
+
+    # Assert
+    assert delivered is False
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize(
+    ("retry_after_s", "waits"),
+    [
+        pytest.param(99999999999, [max(CALLBACK_BACKOFF_S)] * 2, id="above-the-sleep-limit"),
+        pytest.param(1, [FIRST_WAIT_S, SECOND_WAIT_S], id="below-the-cap"),
+    ],
+)
+def test_deliver_when_given_no_deadline_should_cap_retry_after_and_keep_each_attempts_backoff(retry_after_s, waits):
+    # Arrange
+    clock = FakeClock()
+    refusal = HttpAnswer(HTTP_TOO_MANY_REQUESTS, HTML_BODY, None, retry_after_s=retry_after_s)
+    transport = FakeTransport(refusal, refusal, DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_on(_sealed_failed_result(), transport, clock)
+
+    # Assert
+    assert delivered is True
+    assert len(transport.calls) == 3
+    assert clock.waits == waits
+
+
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+def test_deliver_when_the_next_attempt_gets_no_answer_should_not_reuse_an_earlier_retry_after(status):
+    # Arrange
+    clock = FakeClock()
+    refusal = HttpAnswer(status, HTML_BODY, None, retry_after_s=7)
+    transport = FakeTransport(refusal, NO_ANSWER, DELIVERED, clock=clock)
+
+    # Act
+    delivered = _deliver_within(_sealed_failed_result(), transport, clock, 30)
+
+    # Assert
+    assert delivered is True
+    assert len(transport.calls) == 3
+    assert clock.waits == [7, SECOND_WAIT_S]
 
 
 # --- the attempts and each POST -----------------------------------------------------------------
@@ -914,10 +1023,10 @@ def test_deliver_when_given_no_end_should_post_with_a_time_out_below_one_second_
         pytest.param(FINAL_REFUSAL, f"refused: status {HTTP_CONFLICT}, code {FINAL_CODE}", id="a-final-hub-error"),
         pytest.param(
             HttpAnswer(HTTP_INTERNAL_ERROR, HTML_BODY, None),
-            f"refused: status {HTTP_INTERNAL_ERROR}, code none",
+            f"refused: status {HTTP_INTERNAL_ERROR}, code invalid_answer",
             id="an-html-500",
         ),
-        pytest.param(GATEWAY_FAILURE, f"did not reach the Hub: status {HTTP_BAD_GATEWAY}", id="a-gateway-failure"),
+        pytest.param(GATEWAY_FAILURE, f"refused for now: status {HTTP_BAD_GATEWAY}", id="a-gateway-failure"),
     ],
 )
 def test_deliver_when_an_attempt_is_not_delivered_should_log_one_line_naming_the_kind_and_the_outcome(

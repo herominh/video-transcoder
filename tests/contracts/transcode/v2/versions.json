@@ -1,14 +1,14 @@
 {
   "protocol": {
-    "draft": [
-      "2.0.0-draft"
-    ],
-    "live": []
+    "draft": [],
+    "live": [
+      "2.0.0"
+    ]
   },
   "manifest": {
-    "draft": [
-      "1.0.0-draft"
-    ],
-    "live": []
+    "draft": [],
+    "live": [
+      "1.0.0"
+    ]
   }
 }

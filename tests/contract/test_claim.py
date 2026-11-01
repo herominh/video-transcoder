@@ -2,11 +2,11 @@
 
 claim_execution() sends `transcode.claim` to the configured claim address and returns a Grant only for a
 `200` whose body verifies under a Hub-to-worker key and is an accepted `transcode.claim.granted` for this
-dispatch, this runtime and this encryption. Every other ending is Unclaimed: `refused` (a `hub.error`),
-`unreachable` (no answer from the Hub), `expired` (expiry prevented the first claim), or
-`invalid_answer` (anything else, never retried). A gateway's
-502, 503 or 504 that carries no accepted `hub.error` is no answer from the Hub. It claims again only after
-a transport failure, such a gateway failure or a retryable `hub.error`, never at or after the dispatch's
+dispatch, this runtime and this encryption. Every other ending is Unclaimed: `refused` (a `hub.error`
+or a non-envelope 413), `unreachable` (no answer or only temporary non-envelope refusals), `expired`
+(expiry prevented the first claim), or `invalid_answer` (anything else, never retried). A 429, 502, 503
+or 504 that carries no accepted `hub.error` is temporary (README section 12). It claims again only after
+a transport failure, such a temporary refusal or a retryable `hub.error`, never at or after the dispatch's
 `claim.expires_at`, never for longer than its patience, and never at or after the instant its start's
 wall time ends; sealing a claim takes time, so those ends are judged again once it is sealed, and a
 claim whose time ran out meanwhile is neither sent nor counted. Nothing of a claim or of an answer is
@@ -112,14 +112,16 @@ HTTP_BAD_REQUEST = 400
 HTTP_UNAUTHORIZED = 401
 HTTP_NOT_FOUND = 404
 HTTP_CONFLICT = 409
+HTTP_PAYLOAD_TOO_LARGE = 413
+HTTP_TOO_MANY_REQUESTS = 429
 HTTP_INTERNAL_ERROR = 500
 HTTP_NOT_IMPLEMENTED = 501
 HTTP_BAD_GATEWAY = 502
 HTTP_UNAVAILABLE = 503
 HTTP_GATEWAY_TIMEOUT = 504
 HTTP_VERSION_NOT_SUPPORTED = 505
-# What a gateway in front of the Hub answers while it cannot reach it.
-GATEWAY_STATUSES = [HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
+# The temporary non-envelope refusals of README section 12.
+TEMPORARY_STATUSES = [HTTP_TOO_MANY_REQUESTS, HTTP_BAD_GATEWAY, HTTP_UNAVAILABLE, HTTP_GATEWAY_TIMEOUT]
 GATEWAY_FAILURE = HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None)
 NO_ANSWER = TransportFailed("ConnectTimeout")
 RETRYABLE_REFUSAL_CODE = "service_unavailable"
@@ -488,8 +490,8 @@ def test_claim_execution_when_the_hub_refuses_for_good_should_end_refused_with_i
     assert clock.waits == []
 
 
-@pytest.mark.parametrize("status", GATEWAY_STATUSES)
-def test_claim_execution_when_a_gateway_status_carries_a_final_hub_error_should_end_refused_after_one_post(status):
+@pytest.mark.parametrize("status", [*TEMPORARY_STATUSES, HTTP_PAYLOAD_TOO_LARGE])
+def test_claim_execution_when_a_status_refusal_carries_a_final_hub_error_should_end_refused_after_one_post(status):
     # Arrange: the Hub itself answered, whatever the status: its refusal counts, not the status.
     dispatch, clock = _dispatch(), FakeClock()
     transport = FakeTransport(hub_error_answer(status, FINAL_REFUSAL_CODE, retryable=False), clock=clock)
@@ -566,8 +568,14 @@ def test_claim_execution_when_a_transport_failure_precedes_the_grant_should_clai
     assert all(signing.verify(call.body, WORKER_KEY, call.signature) for call in transport.calls)
 
 
-# What a gateway answers while it cannot reach the Hub: one of its own statuses, and no accepted `hub.error`.
-GATEWAY_FAILURES = [
+# A temporary status with no accepted hub.error, including an edge's own body.
+TEMPORARY_REFUSALS = [
+    pytest.param(HttpAnswer(HTTP_TOO_MANY_REQUESTS, HTML_BODY, None), id="an-html-429"),
+    pytest.param(HttpAnswer(HTTP_TOO_MANY_REQUESTS, b"", None), id="an-empty-429"),
+    pytest.param(
+        hub_error_answer(HTTP_TOO_MANY_REQUESTS, UNKNOWN_HUB_ERROR_CODE, retryable=False),
+        id="a-429-hub-error-with-an-unknown-code",
+    ),
     pytest.param(HttpAnswer(HTTP_BAD_GATEWAY, HTML_BODY, None), id="an-html-502"),
     pytest.param(HttpAnswer(HTTP_UNAVAILABLE, HTML_BODY, None), id="an-html-503"),
     pytest.param(HttpAnswer(HTTP_GATEWAY_TIMEOUT, HTML_BODY, None), id="an-html-504"),
@@ -579,8 +587,8 @@ GATEWAY_FAILURES = [
 ]
 
 
-@pytest.mark.parametrize("gateway_failure", GATEWAY_FAILURES)
-def test_claim_execution_when_a_gateway_failure_precedes_the_grant_should_wait_the_first_back_off_then_claim_again(
+@pytest.mark.parametrize("gateway_failure", TEMPORARY_REFUSALS)
+def test_claim_execution_when_a_temporary_refusal_precedes_the_grant_should_wait_the_first_back_off_then_claim_again(
     gateway_failure,
 ):
     # Arrange
@@ -600,8 +608,8 @@ def test_claim_execution_when_a_gateway_failure_precedes_the_grant_should_wait_t
     assert clock.waits == [FIRST_BACKOFF_S]
 
 
-@pytest.mark.parametrize("status", GATEWAY_STATUSES)
-def test_claim_execution_when_a_gateway_status_carries_a_retryable_hub_error_should_wait_as_the_hub_asks_then_claim_again(
+@pytest.mark.parametrize("status", [*TEMPORARY_STATUSES, HTTP_PAYLOAD_TOO_LARGE])
+def test_claim_execution_when_a_status_refusal_carries_a_retryable_hub_error_should_wait_as_the_hub_asks_then_claim_again(
     status,
 ):
     # Arrange: the Hub asks for a longer wait than a failure in transport is given.
@@ -618,6 +626,90 @@ def test_claim_execution_when_a_gateway_status_carries_a_retryable_hub_error_sho
     assert isinstance(outcome, Grant)
     assert len(transport.calls) == 2
     assert clock.waits == [RETRY_AFTER_LONGER_THAN_THE_BACKOFF_S]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [b"", HTML_BODY, hub_error_body(UNKNOWN_HUB_ERROR_CODE, retryable=True)],
+    ids=["empty", "html", "invalid-hub-error"],
+)
+def test_claim_execution_when_a_413_carries_no_valid_hub_error_should_end_refused_as_payload_too_large(body):
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    transport = FakeTransport(HttpAnswer(HTTP_PAYLOAD_TOO_LARGE, body, None, retry_after_s=7), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_REFUSED, "payload_too_large")
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+@pytest.mark.parametrize("retry_after_s", [None, 0, 1, 7])
+def test_claim_execution_when_a_temporary_refusal_has_retry_after_should_honour_it_and_the_backoff(
+    status, retry_after_s
+):
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    refusal = HttpAnswer(status, HTML_BODY, None, retry_after_s=retry_after_s)
+    transport = FakeTransport(refusal, _granted(), clock=clock, seconds_per_post=1)
+    expected_wait = max(FIRST_BACKOFF_S, retry_after_s or 0)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert: the delay starts after the response, and the same runtime claims with a new signed message.
+    first, second = _sent(transport)
+    assert isinstance(outcome, Grant)
+    assert clock.waits == [expected_wait]
+    assert transport.calls[1].at - transport.calls[0].at == timedelta(seconds=1 + expected_wait)
+    assert first["message_id"] != second["message_id"]
+    assert first["claim"] == second["claim"]
+    assert all(signing.verify(call.body, WORKER_KEY, call.signature) for call in transport.calls)
+
+
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+@pytest.mark.parametrize("bound", ["expiry", "patience", "wall-time"])
+@pytest.mark.parametrize("past_bound_s", [0, 1, float("inf")], ids=["at-bound", "past-bound", "unrepresentably-large"])
+def test_claim_execution_when_retry_after_reaches_a_claiming_bound_should_end_unreachable_without_waiting(
+    status, bound, past_bound_s
+):
+    # Arrange
+    dispatch, clock = _dispatch(), FakeClock()
+    left_s = {"expiry": EXPIRES_SOON_S, "patience": PATIENCE_S, "wall-time": 30}[bound]
+    if bound == "expiry":
+        dispatch = _dispatch(**{"/claim/expires_at": seconds_from_now(left_s)})
+    wall_time_left_s = left_s if bound == "wall-time" else 3600
+    # The first response itself spends a second of the bound.
+    refusal = HttpAnswer(status, HTML_BODY, None, retry_after_s=left_s - 1 + past_bound_s)
+    transport = FakeTransport(refusal, then=_granted(), clock=clock, seconds_per_post=1)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock, wall_time_left_s=wall_time_left_s)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) == 1
+    assert clock.waits == []
+
+
+@pytest.mark.parametrize("status", TEMPORARY_STATUSES)
+def test_claim_execution_when_only_temporary_refusals_last_until_expiry_should_end_unreachable(status):
+    # Arrange
+    dispatch, clock = _dispatch(**{"/claim/expires_at": seconds_from_now(EXPIRES_SOON_S)}), FakeClock()
+    transport = FakeTransport(then=HttpAnswer(status, HTML_BODY, None, retry_after_s=1), clock=clock)
+
+    # Act
+    outcome = _claim(dispatch, transport, clock)
+
+    # Assert
+    assert outcome == Unclaimed(CAUSE_UNREACHABLE)
+    assert len(transport.calls) > 1
+    assert clock.waits == [1, 2]
+    assert all(call.at < dispatch.claim_expires_at for call in transport.calls)
 
 
 # --- giving up ----------------------------------------------------------------------------------
@@ -640,8 +732,8 @@ def test_claim_execution_when_no_claim_is_ever_answered_should_end_unreachable_w
     assert sum(clock.waits) < PATIENCE_S
 
 
-@pytest.mark.parametrize("gateway_failure", GATEWAY_FAILURES)
-def test_claim_execution_when_every_claim_meets_a_gateway_failure_should_end_unreachable_within_its_patience(
+@pytest.mark.parametrize("gateway_failure", TEMPORARY_REFUSALS)
+def test_claim_execution_when_every_claim_meets_a_temporary_refusal_should_end_unreachable_within_its_patience(
     gateway_failure,
 ):
     # Arrange: the bootstrap itself lasts far longer than the patience.
@@ -659,7 +751,7 @@ def test_claim_execution_when_every_claim_meets_a_gateway_failure_should_end_unr
     assert sum(clock.waits) < PATIENCE_S
 
 
-def test_claim_execution_when_every_claim_meets_a_gateway_failure_should_wait_and_claim_as_after_transport_failures():
+def test_claim_execution_when_every_claim_meets_a_temporary_refusal_should_wait_and_claim_as_after_transport_failures():
     # Arrange: what claims that get no answer at all give.
     unanswered_clock = FakeClock()
     unanswered = FakeTransport(then=NO_ANSWER, clock=unanswered_clock)

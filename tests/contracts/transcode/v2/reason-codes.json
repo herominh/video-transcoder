@@ -317,7 +317,7 @@
       "code": "duplicate_message",
       "layer": "dedupe",
       "http_status": 200,
-      "retryable": null,
+      "retryable": false,
       "reserved": true,
       "first_unit": "B07"
     },

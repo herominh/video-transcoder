@@ -27,6 +27,7 @@ from __future__ import annotations
 import enum
 import errno
 import gzip
+import io
 import hashlib
 import http
 import ipaddress
@@ -846,6 +847,45 @@ def test_post_when_the_answer_has_no_signature_header_should_return_none_for_the
     # Assert
     assert (answer.status, answer.body) == (HTTP_OK, ANSWER_BODY)
     assert answer.signature is None
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({}, None),
+        ({"Retry-After": "0"}, 0),
+        ({"Retry-After": "7"}, 7),
+        ({"retry-after": "007"}, 7),
+        ({"RETRY-AFTER": " \t7\t "}, 7),
+        ({"Retry-After": ""}, None),
+        ({"Retry-After": "Tue, 01 Jan 2030 00:00:07 GMT"}, None),
+        ({"Retry-After": "1.5"}, None),
+        ({"Retry-After": "7.0"}, None),
+        ({"Retry-After": "-1"}, None),
+        ({"Retry-After": "+7"}, None),
+        ({"Retry-After": "1e2"}, None),
+        ({"Retry-After": "7, 8"}, None),
+        ({"Retry-After": "7 8"}, None),
+        ({"Retry-After": "\u00b2"}, None),
+        (_twice("Retry-After", "7", "7"), None),
+        (_twice("Retry-After", "7", "8"), None),
+        ({"Retry-After": "9" * 5000}, float("inf")),
+    ],
+    ids=["absent", "zero", "seconds", "lower-case-name", "white-space", "empty", "http-date", "fraction",
+         "whole-float", "negative", "plus-sign", "exponent", "comma-list", "internal-space", "non-ascii-digit",
+         "repeated", "conflicting", "unrepresentably-large"],
+)
+def test_read_answer_when_retry_after_is_present_should_read_only_one_whole_seconds_value(headers, expected):
+    # Arrange
+    reply = Reply(429, headers, ANSWER_BODY)
+    reader = io.BytesIO(_status_line(reply) + _header_block(reply) + reply.body)
+
+    # Act
+    answer = transport_module._read_answer(reader, MAX_BODY_BYTES)
+
+    # Assert
+    assert (answer.status, answer.body) == (429, ANSWER_BODY)
+    assert answer.retry_after_s == expected
 
 
 # How an answer may write its one signature header.

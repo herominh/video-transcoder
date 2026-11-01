@@ -6,18 +6,19 @@ only on a `200` whose body verifies under a Hub-to-worker key and is an accepted
 for exactly this dispatch, this runtime and this encryption. Every other ending is an Unclaimed outcome,
 and the runtime does no work:
 
-    refused         a `hub.error` that is not retryable, or still retryable when the claiming ends
-    unreachable     no answer from the Hub until the claiming ends
+    refused         a final `hub.error`, a retryable one when claiming ends, or a non-envelope 413
+    unreachable     no answer or only temporary non-envelope refusals until the claiming ends
     expired         no claim sent because the bootstrap had expired by this runtime's clock
     invalid_answer  any other answer: a grant that does not verify or is not accepted, a `200` that is
-                    not a grant, a redirect, a body that is no `hub.error` of this version
+                    not a grant, a redirect, or an unexpected status without a valid `hub.error`
 
 A `hub.error` is read only under a 4xx or 5xx status: under any other status its body is "any other
-answer". A 502, 503 or 504 that carries no `hub.error` is no answer from the Hub: it is what a gateway
-in front of the Hub says while it cannot reach the claim core (a restart), so the request failed in
-transport, and claiming again is safe, because the Hub gives one runtime the same grant again (README
-15.2, row 3). It claims again only after such a failure in transport or a retryable `hub.error`, with the
-same runtime id and token and a new message id and send time, never at or after the dispatch's
+answer". A 429, 502, 503 or 504 that carries no valid `hub.error` is a temporary refusal (README section
+12); a 413 is a permanent `payload_too_large` refusal. Claiming again is safe, because the Hub gives one
+runtime the same grant again (README 15.2, row 3). It claims again only after a failure in transport, a
+temporary refusal or a retryable `hub.error`, honouring a whole-seconds Retry-After for a temporary
+non-envelope refusal, with the same runtime id and token and a new message id and send time, never at or
+after the dispatch's
 `claim.expires_at`, for no longer than CLAIM_PATIENCE_S (a billed runtime does not wait out a bootstrap
 that can last an hour), and never at or after the instant its start's wall time ends
 (`wall_time_ends_at`: the handler counts the dispatch's wall-time limit from the moment the start
@@ -52,7 +53,14 @@ from .messages import ExecutionIdentity
 from .outbox import SealedMessage, seal_message
 from .registry import MessageKind, load_registry
 from .settings import WorkerSettings
-from .transport import GATEWAY_FAILURE_STATUSES, HTTP_ERROR_STATUSES, HttpAnswer, Transport, TransportFailed
+from .transport import (
+    HTTP_ERROR_STATUSES,
+    HTTP_PAYLOAD_TOO_LARGE,
+    TEMPORARY_REFUSAL_STATUSES,
+    HttpAnswer,
+    Transport,
+    TransportFailed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +110,8 @@ class Unclaimed:
 
 @dataclass(frozen=True)
 class _RetryableRefusal:
-    code: str
-    retry_after_s: int | None
+    code: str | None
+    retry_after_s: float | None
 
 
 def claim_execution(
@@ -161,7 +169,8 @@ def claim_execution(
         if isinstance(outcome, (Grant, Unclaimed)):
             return outcome
         if isinstance(outcome, _RetryableRefusal):
-            last_refusal_code = outcome.code
+            if outcome.code is not None:
+                last_refusal_code = outcome.code
             wait_s = max(wait_s, float(outcome.retry_after_s or 0))
         attempt += 1
         if wait_s >= time_left_s(clock()):
@@ -241,9 +250,12 @@ def _judge(
         error = accept_hub_error(
             answer.body, context=messages.receiver_context(MessageKind.HUB_ERROR, settings=settings)
         )
-    if error is None and answer.status in GATEWAY_FAILURE_STATUSES:
-        logger.info("claim of dispatch %s did not reach the Hub: status %d", dispatch_id, answer.status)
-        return None
+    if error is None and answer.status in TEMPORARY_REFUSAL_STATUSES:
+        logger.info("claim of dispatch %s refused for now: status %d", dispatch_id, answer.status)
+        return _RetryableRefusal(None, answer.retry_after_s)
+    if error is None and answer.status == HTTP_PAYLOAD_TOO_LARGE:
+        logger.info("claim of dispatch %s refused: payload_too_large", dispatch_id)
+        return Unclaimed(CAUSE_REFUSED, "payload_too_large")
     if error is None:
         logger.info("claim of dispatch %s got an answer that is no hub.error: status %d", dispatch_id, answer.status)
         return Unclaimed(CAUSE_INVALID_ANSWER)

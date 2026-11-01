@@ -473,15 +473,15 @@ def test_validate_when_an_overwritten_member_holds_a_2_mib_string_should_stay_wi
 
 # --- L2 --------------------------------------------------------------------------------------------
 
-PROGRESS_HEADER = {"protocol_version": "2.0.0-draft", "message_kind": "transcode.progress"}
-MANIFEST_HEADER = {"manifest_version": "1.0.0-draft", "document_kind": "generation.manifest"}
+PROGRESS_HEADER = {"protocol_version": "2.0.0", "message_kind": "transcode.progress"}
+MANIFEST_HEADER = {"manifest_version": "1.0.0", "document_kind": "generation.manifest"}
 REFUSALS = {
     "no version": (PUSH, {"message_kind": "transcode.progress"}, "unsupported_version", "/protocol_version"),
     "a null version": (PUSH, {**PROGRESS_HEADER, "protocol_version": None}, "unsupported_version",
                        "/protocol_version"),
     "a version that is a number": (PUSH, {**PROGRESS_HEADER, "protocol_version": 2}, "unsupported_version",
                                    "/protocol_version"),
-    "the release named without -draft": (PUSH, {**PROGRESS_HEADER, "protocol_version": "2.0.0"},
+    "an unlisted minor version": (PUSH, {**PROGRESS_HEADER, "protocol_version": "2.1.0"},
                                          "unsupported_version", "/protocol_version"),
     "another major": (PUSH, {**PROGRESS_HEADER, "protocol_version": "3.0.0-draft"}, "unsupported_version",
                       "/protocol_version"),
@@ -489,14 +489,14 @@ REFUSALS = {
                                          "unsupported_version", "/protocol_version"),
     "a wrong version and an unknown kind": (PUSH, {"protocol_version": "9.9.9", "message_kind": "x"},
                                             "unsupported_version", "/protocol_version"),
-    "no kind": (PUSH, {"protocol_version": "2.0.0-draft"}, "unknown_message_kind", "/message_kind"),
+    "no kind": (PUSH, {"protocol_version": "2.0.0"}, "unknown_message_kind", "/message_kind"),
     "a kind that is a number": (PUSH, {**PROGRESS_HEADER, "message_kind": 7}, "unknown_message_kind",
                                 "/message_kind"),
     "an unknown kind": (PUSH, {**PROGRESS_HEADER, "message_kind": "transcode.heartbeat"}, "unknown_message_kind",
                         "/message_kind"),
     "a known kind this receiver does not accept": (PUSH, {**PROGRESS_HEADER, "message_kind": "transcode.request"},
                                                    "unexpected_message_kind", "/message_kind"),
-    "a manifest posted to a message receiver": (PUSH, {"protocol_version": "2.0.0-draft",
+    "a manifest posted to a message receiver": (PUSH, {"protocol_version": "2.0.0",
                                                        "message_kind": "generation.manifest"},
                                                 "unexpected_message_kind", "/message_kind"),
     "a claim posted to the Hub callback": (PUSH, {**PROGRESS_HEADER, "message_kind": "transcode.claim"},
@@ -513,7 +513,7 @@ REFUSALS = {
     "a manifest version carrying a message kind": (STORAGE, {**MANIFEST_HEADER,
                                                              "document_kind": "transcode.progress"},
                                                    "unexpected_message_kind", "/document_kind"),
-    "a manifest without its kind": (STORAGE, {"manifest_version": "1.0.0-draft",
+    "a manifest without its kind": (STORAGE, {"manifest_version": "1.0.0",
                                               "message_kind": "generation.manifest"},
                                     "unknown_message_kind", "/document_kind"),
 }
@@ -534,7 +534,7 @@ def test_select_when_version_or_kind_is_not_accepted_should_refuse_with_the_reas
 @pytest.mark.parametrize(
     ("context", "fields", "kind"),
     [
-        (PUSH, {"protocol_version": "2.0.0-draft", "message_kind": "transcode.result.failed"},
+        (PUSH, {"protocol_version": "2.0.0", "message_kind": "transcode.result.failed"},
          MessageKind.TRANSCODE_RESULT_FAILED),
         (STORAGE, MANIFEST_HEADER, MessageKind.GENERATION_MANIFEST),
         (PUSH, {**PROGRESS_HEADER, "callback_url": "x"}, MessageKind.TRANSCODE_PROGRESS),
