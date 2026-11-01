@@ -2,8 +2,8 @@
 
 Everything here comes from the worker's own configuration, never from a message:
 
-    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of protocol versions versions.json defines; a draft is
-                                    accepted only when listed here, and there is no default
+    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of protocol versions versions.json defines; production
+                                    uses 2.0.0 from the live list, and there is no default
     VH_WORKER_AUDIENCE              this worker's audience, `worker:<name>` (the contract audience)
     VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids and
                                     distinct keys

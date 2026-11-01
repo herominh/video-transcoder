@@ -56,7 +56,7 @@ def _settings(worker_key_id: str = "test-wk2hub-k1", **changes: str) -> WorkerSe
     """The worker's settings for the catalog's keys; `changes` replace or add variables."""
     return WorkerSettings.from_env(
         {
-            "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0-draft",
+            "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0",
             "VH_WORKER_AUDIENCE": "worker:runpod-test",
             "VH_HUB_TO_WORKER_KEYS": f"test-hub2wk-k1={TEST_KEYS['test-hub2wk-k1']}",
             "VH_WORKER_TO_HUB_KEY_ID": worker_key_id,

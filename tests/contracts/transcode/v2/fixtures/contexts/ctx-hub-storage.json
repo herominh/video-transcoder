@@ -3,7 +3,7 @@
   "role": "hub_receiver",
   "channel": "storage",
   "accepted_manifest_versions": [
-    "1.0.0-draft"
+    "1.0.0"
   ],
   "accepted_message_kinds": [
     "generation.manifest"

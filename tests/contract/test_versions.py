@@ -1,17 +1,20 @@
-"""B03 accepts no version for live use: the draft documents are refused by any live context."""
+"""The live versions are accepted; a draft is supported only by a context built for tests."""
+
+from dataclasses import replace
 
 import pytest
 
-from core.protocol import files, pipeline
+from core.protocol import context as context_module
+from core.protocol import files, gate, pipeline
 from core.protocol.context import TrustedContext
 from core.protocol.reasons import Layer, ReasonCode
-from core.protocol.registry import ContractRegistry, VersionChannel, VersionLine
+from core.protocol.registry import ContractRegistry, MessageKind, VersionChannel, VersionLine
 
 POSITIVE_CASES = [case for case in files.read_json("fixtures/cases.json")["cases"]
                   if case["expect"]["outcome"] == "accept"]
 
 
-def test_live_versions_when_loaded_should_be_empty():
+def test_live_versions_when_loaded_should_be_exactly_protocol_2_and_manifest_1():
     # Arrange
     registry = ContractRegistry.load()
 
@@ -22,10 +25,10 @@ def test_live_versions_when_loaded_should_be_empty():
     )
 
     # Assert
-    assert live == ((), ())
+    assert live == (("2.0.0",), ("1.0.0",))
 
 
-def test_draft_versions_when_loaded_should_be_exactly_the_two_b03_drafts():
+def test_draft_versions_when_loaded_should_be_empty():
     # Arrange
     registry = ContractRegistry.load()
 
@@ -36,11 +39,11 @@ def test_draft_versions_when_loaded_should_be_exactly_the_two_b03_drafts():
     )
 
     # Assert
-    assert drafts == (("2.0.0-draft",), ("1.0.0-draft",))
+    assert drafts == ((), ())
 
 
 @pytest.mark.parametrize("case", POSITIVE_CASES, ids=[case["id"] for case in POSITIVE_CASES])
-def test_draft_message_when_validated_under_live_context_should_be_rejected_as_unsupported_version(case):
+def test_live_message_when_validated_under_live_context_should_be_accepted(case):
     # Arrange
     registry = ContractRegistry.load()
     context_data = files.read_json(case["context"])
@@ -56,4 +59,37 @@ def test_draft_message_when_validated_under_live_context_should_be_rejected_as_u
     verdict = pipeline.validate(files.read_bytes(case["payload"]), live_context)
 
     # Assert
-    assert (verdict.layer, verdict.reason) == (Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION)
+    assert verdict.accepted
+
+
+@pytest.mark.parametrize(
+    ("line", "version", "context_path", "header", "kind"),
+    [
+        (VersionLine.PROTOCOL, "2.1.0-draft", "fixtures/contexts/ctx-hub-push.json",
+         {"protocol_version": "2.1.0-draft", "message_kind": "transcode.progress"}, MessageKind.TRANSCODE_PROGRESS),
+        (VersionLine.MANIFEST, "1.1.0-draft", "fixtures/contexts/ctx-hub-storage.json",
+         {"manifest_version": "1.1.0-draft", "document_kind": "generation.manifest"}, MessageKind.GENERATION_MANIFEST),
+    ],
+)
+def test_draft_version_when_listed_only_in_a_test_registry_should_need_a_draft_context(
+    monkeypatch, line, version, context_path, header, kind
+):
+    # Arrange: no shipped file defines a draft; only this test's registry and context do.
+    shipped = ContractRegistry.load()
+    versions = {name: {**channels, "draft": []} for name, channels in shipped.versions.items()}
+    versions[line.value]["draft"] = [version]
+    registry = replace(shipped, versions=versions)
+    monkeypatch.setattr(context_module, "load_registry", lambda: registry)
+    data = files.read_json(context_path)
+    field = f"accepted_{line.value}_versions"
+    live = TrustedContext.from_dict({**data, field: list(registry.accepted_versions(line, VersionChannel.LIVE))})
+    draft = TrustedContext.from_dict({**data, field: list(registry.accepted_versions(line, VersionChannel.DRAFT))})
+
+    # Act
+    refused = gate.select_kind(header, live)
+    accepted = gate.select_kind(header, draft)
+
+    # Assert
+    assert (refused.layer, refused.reason) == (Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION)
+    assert accepted is kind
+    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == ()

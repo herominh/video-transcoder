@@ -4,7 +4,9 @@
   "channel": "push",
   "now": "2030-01-01T00:00:00.000Z",
   "clock_skew_s": 300,
-  "accepted_protocol_versions": [],
+  "accepted_protocol_versions": [
+    "2.0.0"
+  ],
   "accepted_message_kinds": [
     "transcode.progress",
     "transcode.result.completed",

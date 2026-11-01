@@ -1,10 +1,9 @@
-# Transcode contract v2 (draft)
+# Transcode contract v2
 
-Protocol `2.0.0-draft`, generation manifest `1.0.0-draft`. **This file is normative.** The Hub
+Protocol `2.0.0`, generation manifest `1.0.0`. **This file is normative.** The Hub
 validator (PHP, `App\Protocol\Transcode`) and the worker validator (Python, `tests/contract/` in the
 worker repository) both implement exactly the rules below. When a fixture and this file disagree,
-this file wins and the fixture is a bug. Nothing live uses this contract yet: `versions.json` lists
-no live version, and every fixture is synthetic.
+this file wins and the fixture is a bug. `versions.json` lists the versions accepted in production; every fixture is synthetic.
 
 The tree is byte-identical in both repositories (Hub: `laravel/resources/contracts/transcode/v2/`,
 worker: `tests/contracts/transcode/v2/`). Its files must never be normalized (line endings,
@@ -18,7 +17,7 @@ encoding, trailing newline): both repositories mark it `-text` in `.gitattribute
 | `SHA256SUMS` | `<sha256>  <relative path>\n` for every other file, sorted by path bytes, LF endings |
 | `versions.json` | accepted versions per line (`protocol`, `manifest`) and channel (`draft`, `live`) |
 | `limits.json` | byte limits per kind and carrier, `max_json_depth`, `max_tokens`, `clock_skew_seconds`, `max_segments_per_rendition`, `storage_call_margin_seconds` |
-| `reason-codes.json` | every reason code: layer, HTTP status (B07), retryable, reserved, first unit |
+| `reason-codes.json` | every reason code: layer, HTTP status, retryable, reserved, first unit |
 | `artifact-kinds.json` | active and reserved artifact kinds per manifest version |
 | `schemas/common.schema.json` | shared `$defs` |
 | `schemas/<kind>.schema.json` | one JSON Schema 2020-12 document per kind (section 7) |
@@ -196,7 +195,7 @@ Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no versio
 | `transcode.progress` | worker to Hub | 4,096 | envelope, full identity, `event_seq`, stage, stage percentage, optional message, counters, `ext` |
 | `transcode.result.completed` | worker to Hub | 16,384 | envelope, full identity, `generation_id`, manifest locator, source read facts, profile, media, encoder, optional diagnostics, `ext` |
 | `transcode.result.failed` | worker to Hub | 16,384 | envelope, full identity, typed error, optional source, encoder, diagnostics, `ext` |
-| `hub.error` | Hub to worker (HTTP body) | 2,048 | version, kind, id, `sent_at`, error; **no** audience, key id or identity; unsigned in B03 |
+| `hub.error` | Hub to worker (HTTP body) | 2,048 | version, kind, id, `sent_at`, error; **no** audience, key id or identity; unsigned |
 | `generation.manifest` | stored by the worker, read by the Hub | 8,388,608 | manifest version, kind, generation, identity (no cell, epoch, revision), profile, encryption, media, renditions, paths, inventory |
 | `transcode.claim` | worker to Hub (HTTP request body) | 4,096 | envelope, identity without execution fields, `claim` with the dispatch's `bootstrap_token` and the runtime's `runtime_id` |
 | `transcode.claim.granted` | Hub to worker (HTTP response body) | 4,096 | envelope, full identity, `runtime_id`, `generation_id`, `output` with `location_id` and the generation `prefix`, and, for an encrypted dispatch, `media_key` |
@@ -247,7 +246,8 @@ The claim kinds: `runtime_id` is a lowercase UUID. `output.prefix` is an object 
 characters, no leading or trailing `/`, no `.` or `..` segment); the contract fixes no literal
 layout, only that its last segment is the generation (S30). `cause` is one of `refused`,
 `unreachable`, `invalid_answer`, `expired` (15.1, rule 7); `hub_error_code` is required when the cause is `refused` and
-forbidden otherwise. It repeats the `error.code` of the refusing `hub.error`; its schema is the
+forbidden otherwise. It repeats the `error.code` of the refusing `hub.error` (or `payload_too_large` for
+a non-envelope `413`, section 12); its schema is the
 shape of a reason code, not the enum of this version, so this kind's schema does not change when
 a later version adds a code (a worker still accepts only a `hub.error` whose code its own version
 lists; any other answer is `invalid_answer`). The claim kinds carry no `ext`. Section 15 holds the rules of the exchange.
@@ -434,9 +434,9 @@ The Hub builds `expect` from its own records, and which record depends on the ki
 | Id | Rule |
 |---|---|
 | C1 | A version field that is absent, not a string, or not accepted is rejected at L2 (`unsupported_version`) before any schema runs. |
-| C2 | No protocol major other than 2 and no manifest major other than 1 is accepted by a B03 validator. |
-| C3 | Drafts match by exact string; no draft is compatible with another version. |
-| C4 | `versions.json` `live` is empty for both lines in B03; any payload validated under a live context is `unsupported_version`. |
+| C2 | No protocol major other than 2 and no manifest major other than 1 is accepted. |
+| C3 | Versions match by exact string; no draft is compatible with another version. |
+| C4 | `versions.json` `live` lists the versions production accepts; `draft` lists versions under development, accepted only by a context built for tests. A version absent from the list of the context's channel is `unsupported_version`. |
 | C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. |
 | C6 | Every object of every schema has `additionalProperties: false` (the nine kinds, the context, the carriers, the catalog), except `ext`. |
 | C7 | `ext` is the only extension point: optional on progress and results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
@@ -449,7 +449,7 @@ The Hub builds `expect` from its own records, and which record depends on the ki
 | C14 | Channel `poll`: only `sent_at <= now + skew` (S4). |
 | C15 | Channel `dispatch`: `sent_at <= now + skew` (S4), `claim.expires_at > sent_at` and `now <= claim.expires_at + skew` (S6). |
 
-## 11. Artifact kinds (manifest `1.0.0-draft`)
+## 11. Artifact kinds (manifest `1.0.0`)
 
 | Kind | Status | `rendition` | Count rule (L4) |
 |---|---|---|---|
@@ -489,7 +489,7 @@ key line.
 * **HTTP carrier** (worker-to-Hub callback, the claim request, the claim grant and the `hub.error`
   response): the body is the message bytes; the header `X-VH-Signature: hmac-sha256=<hex>`, a
   request header on a worker-to-Hub message and a response header on the claim grant. `sent_at` is
-  in the body; there is no timestamp header. `hub.error` is unsigned in B03. The claim grant is
+  in the body; there is no timestamp header. `hub.error` is unsigned. The claim grant is
   the body of a `200` response and is signed with a Hub-to-worker key; a `transcode.unclaimed`
   message travels like a result (callback or RunPod output).
 * **RunPod input** (`carriers/runpod-input.schema.json`) validates the value of RunPod's `input`
@@ -501,15 +501,16 @@ key line.
   accepted message is ASCII in all its bytes (section 4, step 1, overwritten duplicates included),
   so characters equal bytes, and decoding the JSON string yields the exact message bytes. The raw limits of `limits.json` `carrier_max_bytes` (`runpod.input` 8,448,
   `runpod.output` 33,024) apply to the serialized carrier value.
-* **Live receiver order (B07, not B03):** L0, L1, L2, then key lookup by `key_id` (`unknown_key_id`),
+* **Live receiver order:** L0, L1, L2, then key lookup by `key_id` (`unknown_key_id`),
   then signature verification over the exact received bytes (`invalid_signature`), then L3, L4 and
-  dedupe (below). B03 fixtures carry no signatures, so B03
-  checks key id membership in L4 (S3).
-* **Dedupe (B07).** An execution has exactly one terminal message, `transcode.result.completed` or
+  dedupe (below). Unsigned pipeline fixtures check key id membership in L4 (S3);
+  signing vectors exercise the exact-byte signature separately.
+* **Dedupe.** An execution has exactly one terminal message, `transcode.result.completed` or
   `transcode.result.failed`, and the worker sends the same bytes on every channel (the callback,
   the RunPod output and the stored result, 15.1 rule 9). The Hub keys terminal outcomes by
   `execution_id`: a terminal message whose bytes equal the accepted one's is answered
-  `duplicate_message` (200, with the prior outcome), and one whose bytes differ is answered
+  `200` with an empty body and `Cache-Control: no-store`, never a `hub.error` body
+  (`duplicate_message` exists for logs and has `retryable: false`), and one whose bytes differ is answered
   `conflicting_terminal_result` (409); neither changes the outcome. Progress is deduplicated by
   `event_seq` (S22) and `transcode.unclaimed` by `message_id`. A claim is never deduplicated: a
   claim whose `message_id` repeats is refused (15.2).
@@ -522,6 +523,26 @@ key line.
   v1 input `v1_timestamp + "." + body`), `other_direction_key` (the body signed with the Hub-to-worker
   key, verified with a worker-to-Hub key), `malformed_value`. Both suites recompute the
   `v1_signing_input` and `other_direction_key` values and compare them with the vector.
+
+### Answers that are not a hub.error
+
+A runtime judges a Hub response that is neither a valid `hub.error` nor the expected
+success response by its HTTP status alone. A claim succeeds only with the signed,
+accepted grant of section 15.1; a callback succeeds on a 2xx response, including the
+empty duplicate answer above.
+
+* `429`, `502`, `503`, `504`: a temporary refusal, retried with backoff, honouring a
+  `Retry-After` expressed in seconds. A claim retry never starts at or after
+  `claim.expires_at`; a callback retry never starts at or after the runtime's write
+  deadline (15.1 rule 8). A delay that reaches that bound ends retries.
+* `413`: a permanent refusal, treated as `payload_too_large`.
+* Any other status: `invalid_answer`.
+
+These rules also cover an ingress or another edge's own body. No ingress envelope or
+new reason code is required: a `hub.error` needs a fresh `message_id` and `sent_at`,
+which a static nginx response cannot provide. At claim expiry a temporary refusal
+without a valid `hub.error` is `unreachable`; a non-envelope `413` is reported as
+`refused` with `hub_error_code` `payload_too_large`.
 
 ## 13. Limits and reason codes
 
@@ -624,7 +645,7 @@ the rules below bind the worker and the Hub's claim core, which keeps the state.
    it receives is never logged, stored or put in the provider's job output, and the key of a
    response the runtime does not accept (rule 7) is discarded at once, unused.
 6. When the request fails in transport, times out, or is answered with a `hub.error` whose
-   `retryable` is true, it may send the claim again, after at least the error's `retry_after_s`
+   `retryable` is true, or the status rule of section 12 says to retry, it may send the claim again, after at least the error's `retry_after_s`
    when it carries one, with the same `runtime_id` and token and a new
    `message_id` and `sent_at`, until the dispatch's `claim.expires_at`, by its own clock. It never claims after that
    instant. S6 accepts a dispatch up to `claim.expires_at` plus the skew, so that a runtime whose
@@ -633,7 +654,8 @@ the rules below bind the worker and the Hub's claim core, which keeps the state.
 7. In every other case it does no work: it reads no source and writes no object. It reports
    `transcode.unclaimed` where it would have reported a result, with `cause` `refused` (a
    `hub.error` that is not retryable, or still retryable at the expiry; `hub_error_code` is that
-   error's code), `unreachable` (no answer until the expiry), `invalid_answer` (any other answer,
+   error's code; a non-envelope `413` uses `payload_too_large`), `unreachable` (no answer
+   or only temporary non-envelope refusals until the expiry), `invalid_answer` (any other answer,
    a grant that does not verify or is not accepted included) or `expired` (it sent no claim
    because `claim.expires_at` had passed by its own clock, rule 6). A `hub.error` is
    unsigned: the worker never acts on one except by not working. A start that refuses the dispatch

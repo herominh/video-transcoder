@@ -479,10 +479,10 @@
     },
     {
       "id": "N07",
-      "payload": "fixtures/request/N07-release-without-draft.json",
+      "payload": "fixtures/request/N07-unlisted-draft.json",
       "context": "fixtures/contexts/ctx-worker-dispatch.json",
       "rule": "C3",
-      "purpose": "2.0.0 against 2.0.0-draft: drafts match by exact string",
+      "purpose": "The retired 2.0.0-draft is not the live 2.0.0: versions match by exact string",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -493,10 +493,10 @@
     },
     {
       "id": "N08",
-      "payload": "fixtures/progress/P04-downloading.json",
+      "payload": "fixtures/progress/N08-unlisted-minor.json",
       "context": "fixtures/contexts/ctx-hub-live.json",
       "rule": "C4",
-      "purpose": "A valid draft message under the live context (no live version yet)",
+      "purpose": "An unlisted 2.1.0 message under a live context accepting 2.0.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",

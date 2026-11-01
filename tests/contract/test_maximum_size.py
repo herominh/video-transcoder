@@ -392,8 +392,8 @@ def test_validate_when_a_manifest_holds_the_most_malformed_artifacts_allowed_sho
 
 
 def test_validate_when_the_maximal_manifest_is_read_should_pass_every_gate_before_the_semantic_layer():
-    # Arrange: the worst case under the accepted draft version; its identity is synthetic, so L4 refuses it.
-    document = {**WORST_CASES[MessageKind.GENERATION_MANIFEST], "manifest_version": "1.0.0-draft"}
+    # Arrange: the worst case under the accepted live version; its identity is synthetic, so L4 refuses it.
+    document = {**WORST_CASES[MessageKind.GENERATION_MANIFEST], "manifest_version": "1.0.0"}
     raw = json.dumps(document, separators=(",", ":")).encode("ascii")
 
     # Act

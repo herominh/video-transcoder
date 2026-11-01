@@ -1781,7 +1781,7 @@ class _Generation:
         "360p/segment_0000.ts": b"\x47" + bytes(187) + b"first segment",
         "360p/segment_0001.ts": b"\x47" + bytes(187) + b"second segment, a little longer",
     }
-    MANIFEST = b'{"manifest_version":"1.0.0-draft","document_kind":"generation.manifest"}'
+    MANIFEST = b'{"manifest_version":"1.0.0","document_kind":"generation.manifest"}'
 
     def __init__(self, root: Path) -> None:
         self.output_root = root / "output"

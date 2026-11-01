@@ -80,7 +80,7 @@ PROGRESS_KIND = "transcode.progress"
 COMPLETED_KIND = "transcode.result.completed"
 FAILED_KIND = "transcode.result.failed"
 MANIFEST_KIND = "generation.manifest"
-MANIFEST_VERSION = "1.0.0-draft"
+MANIFEST_VERSION = "1.0.0"
 MANIFEST_NAME = "generation-manifest.json"
 MILLISECONDS_PER_SECOND = 1000
 

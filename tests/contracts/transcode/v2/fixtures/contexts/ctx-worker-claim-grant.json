@@ -5,7 +5,7 @@
   "now": "2030-01-01T00:00:00.000Z",
   "clock_skew_s": 300,
   "accepted_protocol_versions": [
-    "2.0.0-draft"
+    "2.0.0"
   ],
   "accepted_message_kinds": [
     "transcode.claim.granted"

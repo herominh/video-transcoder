@@ -194,7 +194,7 @@ def _context(arguments: dict[str, Any], *, max_artifact_count: int = MAX_ARTIFAC
             "context_version": 1,
             "role": "worker_sender",
             "channel": "storage",
-            "accepted_manifest_versions": ["1.0.0-draft"],
+            "accepted_manifest_versions": ["1.0.0"],
             "accepted_message_kinds": ["generation.manifest"],
             "expect": {
                 "org_uuid": identity.org_uuid,
@@ -1242,7 +1242,7 @@ def _literal_arguments() -> dict[str, Any]:
 
 
 LITERAL_DOCUMENT = {
-    "manifest_version": "1.0.0-draft",
+    "manifest_version": "1.0.0",
     "document_kind": "generation.manifest",
     "generation_id": "f6f6f6f6-0000-7000-8000-000000000006",
     "created_at": "2030-01-02T03:04:05.678Z",

@@ -3,7 +3,7 @@ room the job's output allowance keeps for them and for the thumbnail.
 
 The master playlist lists the renditions in the planned order (largest first) with the bandwidth
 measured from their segments on disk (RFC 8216 4.3.4.2), never a configured bitrate. The generation
-manifest is contract v2's `generation.manifest` 1.0.0-draft document: it names every artifact the
+manifest is contract v2's `generation.manifest` 1.0.0 document: it names every artifact the
 job wrote (the master, the thumbnail or the diagnostic that says why there is none, every rendition's
 playlist and segments) with its size and SHA-256. It is written last and is never an artifact
 itself. Its preconditions fail only on a wiring bug, never on media: every media fact was proven by
@@ -72,7 +72,7 @@ FRAME_RATE_SCALE = 1000
 HALF = Fraction(1, 2)
 
 MANIFEST_PATH = "generation-manifest.json"
-MANIFEST_VERSION = "1.0.0-draft"
+MANIFEST_VERSION = "1.0.0"
 DOCUMENT_KIND = "generation.manifest"
 CONTRACT_MANIFEST_MAX_BYTES = 8_388_608  # limits.json max_bytes["generation.manifest"]
 CONTRACT_MAX_ARTIFACTS = 25_209

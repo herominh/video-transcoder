@@ -3,7 +3,7 @@
   "role": "worker_receiver",
   "channel": "push",
   "accepted_protocol_versions": [
-    "2.0.0-draft"
+    "2.0.0"
   ],
   "accepted_message_kinds": [
     "hub.error"

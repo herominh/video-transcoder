@@ -4,7 +4,7 @@ from core.protocol import files
 from core.protocol.reasons import Layer, ReasonCode
 from core.protocol.registry import ContractRegistry
 
-MANIFEST_DRAFT = "1.0.0-draft"
+MANIFEST_VERSION = "1.0.0"
 RESERVED_CODES = {
     "invalid_signature",
     "duplicate_message",
@@ -74,7 +74,7 @@ def test_artifact_kinds_when_compared_should_equal_manifest_schema_enum():
     registry = ContractRegistry.load()
 
     # Act
-    active = list(registry.active_artifact_kinds(MANIFEST_DRAFT))
+    active = list(registry.active_artifact_kinds(MANIFEST_VERSION))
 
     # Assert
     assert active == _manifest_artifact_kind_enum()
@@ -85,8 +85,20 @@ def test_reserved_artifact_kinds_when_compared_should_be_absent_from_manifest_sc
     registry = ContractRegistry.load()
 
     # Act
-    reserved = set(registry.reserved_artifact_kinds(MANIFEST_DRAFT))
+    reserved = set(registry.reserved_artifact_kinds(MANIFEST_VERSION))
 
     # Assert
     assert reserved == {"captions", "transcript", "chapters", "storyboard"}
     assert reserved & set(_manifest_artifact_kind_enum()) == set()
+
+
+def test_duplicate_message_when_registered_should_be_a_final_success_for_logs_only():
+    # Arrange
+    registry = ContractRegistry.load()
+
+    # Act
+    duplicate = next(entry for entry in registry.reason_codes if entry["code"] == "duplicate_message")
+
+    # Assert
+    assert duplicate["http_status"] == 200
+    assert duplicate["retryable"] is False
