@@ -1,6 +1,6 @@
 # Transcode contract v2
 
-Protocol `2.0.0`, generation manifest `1.0.0`. **This file is normative.** The Hub
+Protocol `2.0.0` live, protocol `2.1.0` draft, generation manifest `1.0.0`. **This file is normative.** The Hub
 validator (PHP, `App\Protocol\Transcode`) and the worker validator (Python, `tests/contract/` in the
 worker repository) both implement exactly the rules below. When a fixture and this file disagree,
 this file wins and the fixture is a bug. `versions.json` lists the versions accepted in production; every fixture is synthetic.
@@ -23,7 +23,7 @@ encoding, trailing newline): both repositories mark it `-text` in `.gitattribute
 | `schemas/<kind>.schema.json` | one JSON Schema 2020-12 document per kind (section 7) |
 | `schemas/trusted-context.schema.json` | the trusted context (section 9) |
 | `schemas/fixture-catalog.schema.json` | validates `fixtures/cases.json` |
-| `carriers/runpod-input.schema.json`, `carriers/runpod-output.schema.json` | RunPod carrier values (section 12) |
+| `carriers/runpod-input.schema.json`, `carriers/runpod-output.schema.json`, `carriers/runpod-acquire-output.schema.json` | RunPod carrier values (section 12) |
 | `signing/vectors.json`, `signing/messages/*.bin` | known-answer signing vectors (section 12) |
 | `fixtures/cases.json`, `fixtures/contexts/*.json`, `fixtures/<kind dir>/*.json` | the paired fixture catalog (section 14) |
 
@@ -48,7 +48,7 @@ verdict `{accepted, layer, reason, instance_path}`. Layers run in this order; th
 | 3 | `version` (L2) | version, then kind; selects the schema |
 | 4 | `size` (L0 b) | raw byte count against the selected kind's limit |
 | 5 | `schema` (L3) | JSON Schema 2020-12 of the selected kind |
-| 6 | `semantic` (L4) | checks S1-S31 against the trusted context |
+| 6 | `semantic` (L4) | checks S1-S31, then applicable A1-A7, against the trusted context (A8 is L3) |
 
 * An accepted verdict has `layer`, `reason` and `instance_path` all null.
 * L1 yields `parse` / `malformed_json`, except its token budget, which yields `size` /
@@ -137,15 +137,23 @@ In this order:
 
 1. The version field is absent, not a string, or not in the accepted versions:
    `version` / `unsupported_version`, pointer `/protocol_version` (manifest: `/manifest_version`).
-2. The kind field is absent, not a string, or not one of the nine known kinds (`transcode.request`,
+2. The kind field is absent, not a string, or not one of the thirteen known kinds (`transcode.request`,
    `transcode.progress`, `transcode.result.completed`, `transcode.result.failed`, `hub.error`,
-   `generation.manifest`, `transcode.claim`, `transcode.claim.granted`, `transcode.unclaimed`):
+   `generation.manifest`, `transcode.claim`, `transcode.claim.granted`, `transcode.unclaimed`, `source.acquire.request`,
+   `source.acquire.granted`, `source.acquire.result.completed`, `source.acquire.result.failed`),
+   or an acquire kind at a version other than exactly `2.1.0`:
    `version` / `unknown_message_kind`, pointer `/message_kind`
    (manifest: `/document_kind`).
 3. The kind is known but not in `accepted_message_kinds`: `version` / `unexpected_message_kind`, same
    pointer as 2.
 
 Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no version negotiation.
+The eight existing protocol kinds are available at `2.0.0` and `2.1.0`; `generation.manifest`
+keeps manifest version `1.0.0`. An acquire kind at accepted `2.0.0` is `unknown_message_kind`,
+before the accepted-kind check. Draft `2.1.0` is accepted only by an explicit test context.
+A dispatch, claim, grant, unclaimed report and terminal result use the dispatch's recorded protocol
+version (a null historical version means `2.0.0`); the context lists only that version. A valid
+signature at another supported version cannot change it.
 
 ## 6. L3: schema
 
@@ -160,6 +168,10 @@ Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no versio
 | `transcode.claim` | `schemas/transcode-claim.schema.json` |
 | `transcode.claim.granted` | `schemas/transcode-claim-granted.schema.json` |
 | `transcode.unclaimed` | `schemas/transcode-unclaimed.schema.json` |
+| `source.acquire.request` | `schemas/source-acquire-request.schema.json` |
+| `source.acquire.granted` | `schemas/source-acquire-granted.schema.json` |
+| `source.acquire.result.completed` | `schemas/source-acquire-result-completed.schema.json` |
+| `source.acquire.result.failed` | `schemas/source-acquire-result-failed.schema.json` |
 
 * JSON Schema draft 2020-12. Every schema file of `schemas/` and `carriers/` is registered locally
   under its `$id` before validation. A `$ref` that names anything else must fail; nothing is ever
@@ -200,6 +212,10 @@ Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no versio
 | `transcode.claim` | worker to Hub (HTTP request body) | 4,096 | envelope, identity without execution fields, `claim` with the dispatch's `bootstrap_token` and the runtime's `runtime_id` |
 | `transcode.claim.granted` | Hub to worker (HTTP response body) | 4,096 | envelope, full identity, `runtime_id`, `generation_id`, `output` with `location_id` and the generation `prefix`, and, for an encrypted dispatch, `media_key` |
 | `transcode.unclaimed` | worker to Hub | 4,096 | envelope, identity without execution fields, `runtime_id`, `cause`, `hub_error_code` when the cause is `refused` |
+| `source.acquire.request` | Hub to worker | 4,096 | envelope, dispatch identity, destination, external Google snapshot, part plan, limits, claim bootstrap |
+| `source.acquire.granted` | Hub to worker (HTTP response body) | 2,097,152 | envelope, execution identity, runtime id, output location and source prefix, part PUT URLs and result PUT URL |
+| `source.acquire.result.completed` | worker to Hub | 65,536 | envelope, execution identity, bytes, checksum mode, ordered opaque part ETags |
+| `source.acquire.result.failed` | worker to Hub | 4,096 | envelope, execution identity, typed acquire error |
 
 Envelope = `protocol_version`, `message_kind`, `message_id`, `sent_at`, `audience`, `key_id`.
 Identity = `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`,
@@ -209,12 +225,17 @@ manifest identity is `org_uuid`, `video_uuid`, `source_id`, `attempt_id`, `dispa
 `execution_id`.
 
 **Secrets and free text.** No field of any kind is defined to carry a media key, a storage credential
-or a presigned URL, with one exception: `transcode.claim.granted` `media_key.key_hex`, the
+or a presigned URL, with two exceptions: `transcode.claim.granted` `media_key.key_hex`, the
 generation's 16-byte AES-128 key in lowercase hex, which the Hub sends only for an encrypted dispatch
-and only in the body of the claim response to the runtime it grants (section 15). No other kind
+and only in the body of the claim response to the runtime it grants (section 15); and
+`source.acquire.granted.upload`, whose PUT URLs travel only in that signed TLS claim response.
+No request, result, provider output or stored result carries these URLs. Never persist a grant body
+or full URLs, even encrypted, or attach them to tracing. Keep URLs and bootstrap-bearing claim
+bodies out of exception messages and causes, HTTP debug logs, metrics labels and structured context.
+A grant DTO redacts repr/debug serialization. No other kind
 carries it, and the worker never puts it in a message. `bucket` and `credential_ref` name a
 location's bucket and the worker's configured access to it; `credential_ref` is a name, never a
-secret. `transcode.request` `claim.bootstrap_token` is a secret of its dispatch: neither side
+secret. a request's `claim.bootstrap_token` is a secret of its dispatch: neither side
 logs it or puts it in any other message or output, and the Hub stores only its SHA-256. Free text (`message`, `error.detail`, `error.message`, `diagnostics[].detail`,
 `encoder.ffmpeg_version`) and `ext` string values are printable ASCII and refuse the substring
 `://` (the `ascii_text_*` definitions: `not` `[^\x20-\x7e]` and `allOf` `not` `://`). Free text is
@@ -243,14 +264,25 @@ segments per rendition. The HLS segment duration is fixed platform-wide (6 s, ca
 profile) and is not a request field.
 
 The claim kinds: `runtime_id` is a lowercase UUID. `output.prefix` is an object key (at most 512
-characters, no leading or trailing `/`, no `.` or `..` segment); the contract fixes no literal
-layout, only that its last segment is the generation (S30). `cause` is one of `refused`,
+characters, no leading or trailing `/`, no `.` or `..` segment); an encode prefix ends in its
+generation (S30). An acquire prefix is exactly
+`sources/{video_uuid}/{source_id}` (A1, A4); its original is `original.{ext}`, with `ext` one
+of `mp4`, `mov`, `avi`, `mkv`, `webm`. `cause` is one of `refused`,
 `unreachable`, `invalid_answer`, `expired` (15.1, rule 7); `hub_error_code` is required when the cause is `refused` and
 forbidden otherwise. It repeats the `error.code` of the refusing `hub.error` (or `payload_too_large` for
 a non-envelope `413`, section 12); its schema is the
 shape of a reason code, not the enum of this version, so this kind's schema does not change when
 a later version adds a code (a worker still accepts only a `hub.error` whose code its own version
 lists; any other answer is `invalid_answer`). The claim kinds carry no `ext`. Section 15 holds the rules of the exchange.
+
+Acquire uses the local `acquire-common.schema.json` definitions: Google file ids are 10-128
+characters, resource keys null or 1-128, and the required nullable MD5, SHA-1, SHA-256 and revision
+facts stay in `external.expected`. Size is 1-10,737,418,240 bytes; parts are 67,108,864 bytes,
+1-160 parts. `max_wall_time_ms` is 1-86,400,000. A part ETag is an opaque, case-sensitive string of
+1-128 non-space printable ASCII characters except quotes; it has no enclosing quotes and refuses
+`://`. It is not `common.etag`. Every new object is closed and nullable members are required.
+A request carries no upload id, URL, bucket, credential, processing preference, generation,
+profile or media key. A grant carries no generation, media key or expiry member.
 
 ## 8. L4: semantic checks
 
@@ -335,6 +367,110 @@ S5 runs only when the channel is `push`: the `poll` channel (provider output rea
 past bound, and the `dispatch` channel judges the claim expiry instead (S6). The manifest carries no
 cell, epoch, revision or freshness: those are rechecked when the generation is published (B10).
 
+### 8.4 Acquire checks (draft `2.1.0`)
+
+Here request, grant, completed and failed mean the corresponding `source.acquire` kinds.
+I is dispatch identity, X adds execution identity and fence, Q is the ordered trusted destination,
+external snapshot, plan, limits and expiry, and H is the configured storage host (9.3 expands every
+required member literally). Applicable S checks keep numerical order; A checks follow them.
+A8 is encoded in the failed schema, so it runs at L3 before any S or A semantic check.
+
+| Role | Kind | Allowed channels | Checks, in order |
+|---|---|---|---|
+| `worker_receiver` | `source.acquire.request` | `dispatch` | S1 S2 S3 S4 S6 S7 A1 A3 |
+| `hub_sender` | `source.acquire.request` | `dispatch` | S1 S2 S3 S4 S6 S7 S8 S9 S10 S11 S12 S13 S14 S17 S18 A1 A2 A3 |
+| `worker_receiver` | `source.acquire.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S18 S29 A1 A3 A4 A5 |
+| `hub_sender` | `source.acquire.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S29 A1 A3 A4 A5 |
+| `worker_sender`, `hub_receiver` | `source.acquire.result.completed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 A3 A6 A7 |
+| `worker_sender`, `hub_receiver` | `source.acquire.result.failed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 |
+
+| Kind / role | Existing checks restated |
+|---|---|
+| request / both roles | S1 real sent_at and claim expiry; S2 audience; S3 key ID; S4 future timestamp; S6 expiry later than sent_at and now no later than expiry plus skew; S7 attempt/dispatch/source/org must not alias identity.video_uuid, in the existing order; no message_id alias check |
+| request / hub_sender | additionally S8 organization, S9 video, S10 cell, S11 placement fence, S12 lifecycle fence, S13 attempt, S14 dispatch; S17 compares destination.source_id; S18 compares destination.location_id; exact Q equality |
+| grant / both roles | S1–S5 with push freshness; S7 identity nonalias, including runtime/execution; S8–S14; S29 runtime; S18 output.location_id equals destination.location_id; no generation/profile/encryption checks |
+| grant / hub_sender | additionally S15 execution and S16 execution fence against the committed grant |
+| completed and failed / both roles | S1–S5 with push freshness or poll's no-old-age check; S7–S16 against the recorded execution; no generation, manifest, profile, encryption or progress checks |
+| claim and unclaimed / existing roles | unchanged S checks and precedence; lookup dispatch kind to select the expected response/result family; no acquire fields added to either message |
+
+For grant worker_receiver, execution_id and execution_fence are newly granted authority, not
+compared with invented expected execution fields. Hub sender compares both. The distinction follows
+the existing grant rows. For results, identity is checked against the old recorded fence even when
+the video's current counter is higher; source acceptance is a separate current-authority decision.
+
+| Check | Runs for | Exact rule / failure |
+|---|---|---|
+| A1 acquire destination | request both; grant both via Q | destination.object_key equals sources/{I.video_uuid}/{destination.source_id}/original.{ext}; ext one of mp4, mov, avi, mkv, webm. No alternate layout, encoded path, alias source/video UUID, extra segment or basename. Failure acquire_destination_mismatch |
+| A2 immutable request | request hub_sender | destination, external, plan, limits and claim.expires_at equal Q member-for-member. Failure acquire_snapshot_mismatch. The bootstrap is validated by its schema and separately hashed by claim core, not copied into context |
+| A3 plan and limit | request both; grant both; completed both | parts_total = ceil(expected.size / 67,108,864); expected.size <= limits.max_source_bytes. Failure acquire_plan_mismatch. Hub policy further restricts wall time to its transfer envelope, the Hub admission policy |
+| A4 prefix | grant both | output.location_id = Q.destination.location_id; output.prefix is exactly the parent folder of Q.destination.object_key. Failure storage_location_mismatch for location, acquire_destination_mismatch for prefix. S30's last-segment-is-generation rule applies only to encode |
+| A5 URL authority | grant both | rules in the next paragraph; failure acquire_url_invalid. Hub sender also requires the decoded uploadId to equal expect.acquire_upload_id |
+| A6 result parts | completed both | n values exactly 1..parts_total, in ascending order, with no duplicate, missing or additional part; ETags opaque and case-sensitive. Failure acquire_parts_mismatch |
+| A7 result evidence | completed both | bytes = expected.size, checksum_verified = sha256 when expected.sha256 nonnull, else md5 when expected.md5 nonnull, else none. sha1 remains a metadata comparison only. Failure acquire_integrity_mismatch |
+| A8 error mapping | failed both | code/class/retryable/stage satisfy the error relation below. Encode the complete relation with schema oneOf branches; a mismatch is schema_violation at L3. No duplicate semantic error code |
+
+For new kinds, S17 reads destination.source_id and expect.acquire_destination.source_id, and S18
+reads destination/output location and that same trusted destination location; do not require old
+expect.source_id/output_location_id fields in addition to Q. S7's source alias uses
+/destination/source_id on the request, and source identity in Q is checked at A1 on grant. All
+identity comparisons retain their /identity/... pointers. New reason entries have layer semantic,
+http_status 422, retryable false, reserved false, first_unit "item19": acquire_destination_mismatch,
+acquire_snapshot_mismatch, acquire_plan_mismatch, acquire_url_invalid, acquire_parts_mismatch,
+acquire_integrity_mismatch. Existing storage_location_mismatch retains 409.
+
+New failure pointers and tie-breaking are fixed: A1 /destination/object_key on request or
+/output/prefix on grant; A2 first differing member in destination, external, plan, limits,
+claim.expires_at order, pointing at that whole member; A3 /plan/parts_total then
+/limits/max_source_bytes on request, /upload/parts on grant, /parts on completed; A4
+/output/location_id then /output/prefix; A5 first bad part in array order at /upload/parts/{i}/url,
+then /upload/result_url, with count/order failures at /upload/parts; A6 first bad n at /parts/{i}/n,
+or /parts for length mismatch; A7 /bytes then /checksum_verified. The required Q is validated at
+context construction. An inconsistent trusted destination or part plan is an invalid-context
+programming error, never a worker verdict; A1 and A3 retain their defensive checks and their
+specified positions.
+
+**A5 URL rules.** Preserve the current path-style S3 interface, generalized to the new key. No
+provider SDK or hostname constant enters application logic. A URL has HTTPS and exactly the
+configured storage host, no port/user info/fragment, an unescaped path
+/{bucket}/{destination.object_key}, and a nonempty well-formed query. Bucket uses the common bucket
+definition. Every part uses the same bucket, key and nonempty uploadId; exactly one partNumber
+equals n in decimal with no leading zero. Parts are ordered 1..N. The result URL uses the same
+host/bucket and /{output.prefix}/acquire-result-{execution_id}.json, with no uploadId or partNumber.
+Reject repeated query parameter names and invalid percent escapes. Parse query values once; never
+decode or normalize the path. Require SigV4 X-Amz-Date and X-Amz-Expires exactly once: Date is a
+real YYYYMMDDTHHMMSSZ instant no later than context.now plus skew, Expires is canonical decimal
+seconds 1–604,800, and their sum equals W in section 15.2 with W > context.now. Other SigV4 signing
+parameters are opaque, bounded by the URL length. Both URL kinds are PUT-only capabilities because
+the Hub signs PUT; never infer a new HTTP method from a parameter. Worker never follows a redirect
+or logs a parsing exception containing a URL.
+
+Virtual-hosted URL support is not introduced by this unit. A non-SigV4 store is outside the current
+S3 signing interface, not a silent fallback.
+
+
+The failed error relation (A8, a schema `oneOf`; no semantic error code):
+
+| Code | v2 class | retryable | stage |
+|---|---|---|---|
+| file_removed | source_unavailable | false | downloading |
+| link_not_shared | source_unavailable | false | downloading |
+| provider_quota | source_unavailable | true | downloading |
+| provider_refused | source_unavailable | false | downloading |
+| not_configured | configuration_error | false | null |
+| size_exceeded | input_limits_exceeded | false | downloading |
+| size_short | source_integrity_mismatch | false | downloading |
+| integrity_failed | source_integrity_mismatch | false | finalizing |
+| source_changed_at_provider | source_integrity_mismatch | false | downloading |
+| deadline | deadline_exceeded | false | null, downloading, uploading or finalizing: stage where time expired |
+| download_failed | source_unavailable | true | downloading |
+| upload_failed | output_write_failed | true | uploading |
+| input_refused | input_invalid | false | null |
+
+
+SHA-256 is preferred, then MD5, otherwise `none`; SHA-1 is metadata comparison only.
+Retryability describes the failure and never authorizes a second dispatch. Claim errors and
+unclaimed causes are unchanged; validation reasons are not failed-result error codes.
+
 ## 9. The trusted context
 
 The context carries what the validating side knows from its own records; identity is compared with
@@ -347,13 +483,13 @@ it, never taken from the message. `schemas/trusted-context.schema.json` is exact
 | `context_version` | integer 1 | required |
 | `role` | `hub_receiver`, `hub_sender`, `worker_receiver`, `worker_sender` | required |
 | `channel` | `push`, `poll`, `dispatch`, `storage` | required; selects message or manifest (2.1) and the freshness rule |
-| `accepted_message_kinds` | 1 to 9 distinct kinds | required |
+| `accepted_message_kinds` | 1 to 13 distinct kinds | required |
 | `now` | timestamp or null | injected clock |
 | `clock_skew_s` | integer 0 to 600 or null | `limits.json` `clock_skew_seconds` (300) in production |
 | `accepted_protocol_versions`, `accepted_manifest_versions` | up to 8 distinct versions, or null | from `versions.json` (`live`; `draft` in tests only); may be empty |
 | `expected_audience` | audience or null | the receiver's own audience (a sender self-check: the target's) |
 | `known_key_ids` | up to 8 distinct key ids, or null | the keys valid for this direction |
-| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`; each optional and nullable |
+| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`, `acquire_destination`, `acquire_external`, `acquire_plan`, `acquire_limits`, `acquire_expires_at`, `acquire_storage_host`, `acquire_upload_id`; each optional and nullable |
 | `last_event_seq` | integer 0 to 2,147,483,647 or null | highest accepted progress sequence of the execution |
 
 ### 9.2 Construction
@@ -361,7 +497,8 @@ it, never taken from the message. `schemas/trusted-context.schema.json` is exact
 Building a context (PHP `TrustedContext::fromArray()`, Python `TrustedContext.from_dict()`) checks, in
 this order:
 
-1. The data satisfies `trusted-context.schema.json`; `now`, when present, is a real instant (S1's
+1. The data satisfies `trusted-context.schema.json`; `now` and `expect.acquire_expires_at`, when
+present, are real instants (S1's
    rule); every entry of `accepted_protocol_versions` is a `protocol` version of `versions.json`
    (draft or live) and every entry of `accepted_manifest_versions` a `manifest` version (a context
    cannot create protocol support). Otherwise: an invalid-context error.
@@ -372,12 +509,18 @@ this order:
    exception, Python exception class of the same name), naming the role, the kind and the first
    missing field.
 
+After the required fields have been checked in table order, acquire contexts also refuse an
+inconsistent trusted destination (layout or source/video alias) or plan (part count or source byte
+limit). An absent optional snapshot is not invented. A corrupt stored Q is a programming error.
+
 Both errors are programming errors raised at construction, never a verdict and never a skipped check.
 The invalid-context error is a separate type from `ContextIncomplete` (Python: `ContextInvalid`, a
 `ValueError`).
 
 The schema judges the context as a JSON document: the root, `expect`, `expect.profile` and
-`expect.encryption` are objects (an empty one is `{}`), and `accepted_message_kinds`, both version
+`expect.encryption`, `expect.acquire_destination`, `expect.acquire_external`, its `expected`,
+`expect.acquire_plan` and `expect.acquire_limits` are objects (an empty one is `{}`), and
+`accepted_message_kinds`, both version
 lists, `known_key_ids` and `expect.renditions` are arrays. An implementation whose native map cannot
 tell the two apart (a PHP array) builds that document explicitly, never by a JSON round trip: an empty
 PHP array at an object position is `{}`, and a PHP array that is not a list (`array_is_list`) where an
@@ -403,19 +546,43 @@ reads it, whatever the channel:
 | `worker_receiver` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.output_location_id`, `expect.runtime_id`, `expect.encryption` |
 | `hub_sender` | `transcode.claim.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.output_location_id`, `expect.runtime_id`, `expect.encryption` |
 | `hub_receiver`, `worker_sender` | `transcode.unclaimed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id` |
+| `worker_receiver` | `source.acquire.request` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s` |
+| `hub_sender` | `source.acquire.request` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
+| `worker_receiver` | `source.acquire.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.runtime_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at`, `expect.acquire_storage_host` |
+| `hub_sender` | `source.acquire.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.runtime_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at`, `expect.acquire_storage_host`, `expect.acquire_upload_id` |
+| `worker_sender` | `source.acquire.result.completed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
+| `worker_sender` | `source.acquire.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence` |
+| `hub_receiver` | `source.acquire.result.completed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
+| `hub_receiver` | `source.acquire.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence` |
+
+`expect.acquire_storage_host` is a lowercase DNS hostname, 1-253 characters, with 1-63
+character alphanumeric labels and only interior hyphens; no scheme, path, port, user information
+or trailing dot. `expect.acquire_upload_id` is 1-1,024 non-space printable ASCII characters,
+refuses `://`, and comes from the source row for the Hub sender only. It is never a wire member.
 
 `expect.<name>` is missing when `expect` itself is missing or null. An empty version list is present
 (not missing): it makes every message `unsupported_version`.
 
 ### 9.4 Which values `expect` holds
 
-The Hub builds `expect` from its own records, and which record depends on the kind:
+The Hub builds `expect` from tenant-bound immutable records, and which record depends on the kind.
+For acquire, Q is the destination, external facts, part plan, limits and expiry of the accepted
+request; H is trusted storage configuration. The worker derives context from its accepted request
+and grant, never from the result it is validating. The grant receiver learns execution identity
+and fence, while the Hub sender compares both against its committed grant. Acquire completed and
+failed results use recorded execution fences even after trash/restore; current authority for source
+acceptance is a separate decision. The reused claim and unclaimed rows keep their fields and
+channels; dispatch kind selects the expected grant/result family. Stored acquire results use
+`poll`; `storage` still selects only generation manifests.
+
+The record rules apply to both encode and acquire:
 
 * `transcode.claim`: the dispatch's identity as recorded, with the organization's **current**
   `placement_epoch` and the video's **current** `lifecycle_revision`. A claim for a video that was
   deleted or restored since its dispatch (a higher `lifecycle_revision`), or whose organization
   moved to another cell (a higher `placement_epoch`), fails S12 or S11, and no execution starts.
-* `transcode.progress`, both results, `transcode.unclaimed` and `generation.manifest`: the values
+* `transcode.progress`, both encode results, both acquire results, `transcode.unclaimed` and
+`generation.manifest`: the values
   **recorded on the dispatch and on its execution** (`placement_epoch` and `lifecycle_revision`
   as dispatched, `execution_id` and `execution_fence` as granted), never the current ones. The
   outcome of an execution that ran across a deletion, a restore or a cell move is therefore accepted
@@ -437,9 +604,9 @@ The Hub builds `expect` from its own records, and which record depends on the ki
 | C2 | No protocol major other than 2 and no manifest major other than 1 is accepted. |
 | C3 | Versions match by exact string; no draft is compatible with another version. |
 | C4 | `versions.json` `live` lists the versions production accepts; `draft` lists versions under development, accepted only by a context built for tests. A version absent from the list of the context's channel is `unsupported_version`. |
-| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. |
-| C6 | Every object of every schema has `additionalProperties: false` (the nine kinds, the context, the carriers, the catalog), except `ext`. |
-| C7 | `ext` is the only extension point: optional on progress and results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
+| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` is draft in this slice: live remains `["2.0.0"]`; only test-built contexts list `2.1.0`. |
+| C6 | Every object of every schema has `additionalProperties: false` (the thirteen kinds, the context, the carriers, the catalog), except `ext`. |
+| C7 | `ext` is the only extension point: optional on encode progress and encode results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
 | C8 | Every identity field is required and non-null, with no default; an identity field equal to `video_uuid` where it names another entity is S7. |
 | C9 | A key id outside the context's set for that direction is `unknown_key_id`; there is no fallback key. |
 | C10 | Number literals are integer literals (4, step 4). No coercion (6): a number sent as a string, or `null` where a value is required, fails L3. |
@@ -500,13 +667,26 @@ key line.
   characters. `vh_message` holds only printable ASCII and JSON whitespace (tab, LF, CR); every
   accepted message is ASCII in all its bytes (section 4, step 1, overwritten duplicates included),
   so characters equal bytes, and decoding the JSON string yields the exact message bytes. The raw limits of `limits.json` `carrier_max_bytes` (`runpod.input` 8,448,
-  `runpod.output` 33,024) apply to the serialized carrier value.
+  `runpod.output` 33,024) apply to the serialized carrier value. Acquire terminal output uses
+  `carriers/runpod-acquire-output.schema.json`, the same closed value with `vh_message` length
+  2-65,536 and raw cap `runpod.acquire.output` 131,328. Failed and unclaimed acquire messages may
+  use it but retain their 4,096-byte inner cap. The HTTP callback raw outer cap is 65,536, followed
+  by the selected kind's cap; the claim request stays 4,096. Only an acquire grant answer reader
+  permits 2,097,152. Encode output and encode grant limits are unchanged.
+* Acquire requests use the Hub-to-worker key and existing input carrier; RunPod wraps that value
+  in `input`. Raw nested requests are refused. The reused claim uses the worker-to-Hub key.
+  Acquire grants are signed raw HTTP 200 bodies, `Cache-Control: no-store`, only to the granted
+  runtime. Acquire results use the worker-to-Hub key and identical bytes/signature on callback,
+  provider and stored acquire carriers. Unclaimed has no storage URL. Routes stay
+  `/api/transcode/v2/claim` and `/api/transcode/v2/callback`. The signing domain stays v2 at `2.1.0`;
+  there is no new key family.
 * **Live receiver order:** L0, L1, L2, then key lookup by `key_id` (`unknown_key_id`),
   then signature verification over the exact received bytes (`invalid_signature`), then L3, L4 and
   dedupe (below). Unsigned pipeline fixtures check key id membership in L4 (S3);
   signing vectors exercise the exact-byte signature separately.
 * **Dedupe.** An execution has exactly one terminal message, `transcode.result.completed` or
-  `transcode.result.failed`, and the worker sends the same bytes on every channel (the callback,
+  `transcode.result.failed` (acquire: `source.acquire.result.completed` or
+  `source.acquire.result.failed`), and the worker sends the same bytes on every channel (the callback,
   the RunPod output and the stored result, 15.1 rule 9). The Hub keys terminal outcomes by
   `execution_id`: a terminal message whose bytes equal the accepted one's is answered
   `200` with an empty body and `Cache-Control: no-store`, never a `hub.error` body
@@ -548,7 +728,8 @@ without a valid `hub.error` is `unreachable`; a non-envelope `413` is reported a
 
 `limits.json`: `max_bytes` per kind (request 4,096; progress 4,096; completed 16,384; failed 16,384;
 `hub.error` 2,048; manifest 8,388,608; claim, claim grant and unclaimed 4,096 each), `carrier_max_bytes` (`runpod.input` 8,448, `runpod.output`
-33,024), `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
+33,024, `runpod.acquire.output` 131,328); acquire request 4,096, grant 2,097,152,
+completed 65,536 and failed 4,096; `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
 `max_segments_per_rendition` 3,600, `storage_call_margin_seconds` 600 (15.1, rule 8; 15.2). The worst case of every kind (every string at its maximum length
 in the costliest characters, every integer at its maximum, every array full, every optional member
 present, `/` written as `\/`) passes its schema and fits its limit; both suites build it, prove it
@@ -583,16 +764,29 @@ file (9.2), validate, and assert:
   (`instance_path` is null for L0 and L1; for `schema` it is the first error both libraries report,
   section 6).
 
-Catalog rules: 28 positive and 149 negative cases, ids `P01`-`P29` and `N01`-`N149` (two or three
-digits). `P17` is retired: it pinned an integer-valued float as accepted, and its payload became
+Catalog counts are calculated from `cases.json`; positive and negative ids continue after `P29`
+and `N149`, without renumbering old cases (two or three digits). The acquire groups are
+`acquire-request`, `acquire-grant`, `acquire-results`, `acquire-contexts`, `acquire-version`,
+`acquire-semantics`, `acquire-bounds`, `acquire-carriers`, named by `rule`. Context-construction
+cases use outcome `context_invalid` or `context_incomplete`, layer `context`, the matching
+snake-case reason, and the missing field as a pointer for incomplete (null for invalid). They
+never run the message pipeline. A carrier case additionally names `carrier`: check its raw cap,
+then its schema, verify its exact inner message and signature, then run the inner pipeline.
+PHP native array construction is also exercised in the context suite. `P17` is retired: it pinned an
+integer-valued float as accepted, and its payload became
 `N76` when number literals had to be integer literals. Large payloads (`P21`, `N84`, `N112`, `N113`)
-are stored compact; every file stays under 1 MB; every non-reserved reason code is produced by at
+are stored compact; every file stays under 1 MB except acquire-grant payload fixtures, whose
+ceiling is 2,097,153 bytes (the maximal escaped grant and the one-byte-over-cap refusal); every
+non-reserved reason code is produced by at
 least one negative; every fixture file is used by a case. Each negative starts from a valid positive
 and changes one thing, so it holds one violation at its layer: an L3 negative produces errors only
 at its pinned pointer (in jsonschema's flattened report), and an L4 negative fails only its pinned
 check, except that an S7 case also fails the equality check of the aliased id where its row runs
 one (S13 for N45, S15 for N91); N126, whose row runs no S15, fails S21 instead, and N132 (the
-runtime id, which no equality check of its row reads) fails S7 alone. A negative may still
+runtime id, which no equality check of its row reads) fails S7 alone. An acquire source alias also
+fails A1, after S7; a grant location mismatch is the same predicate in S18 and A4. A8 oneOf
+suberrors
+explain the relation; its reported L3 pointer is `/error`. A negative may still
 break a later layer as a consequence (N27 renames the master playlist, so `master_playlist_path`
 would dangle at L4); the pipeline stops at the first failing layer. N03 (nesting 33, L1) and N70
 (nesting 32, accepted by L1, refused by L3) pin the depth boundary.
@@ -616,6 +810,29 @@ the execution; the others do no work. The validator checks the three messages (s
 the rules below bind the worker and the Hub's claim core, which keeps the state.
 
 ### 15.1 The worker
+
+For acquire the following specializes the encode rules below. At handler entry capture monotonic
+start and draw a fresh unpredictable runtime UUID. Accept `source.acquire.request` before any
+Google metadata/content or storage call; send the unchanged claim over configured HTTPS, with
+certificate validation and no redirect. Only a signed, fully accepted `source.acquire.granted`
+HTTP 200 authorizes work; an encode grant or a malformed URL is `invalid_answer`, with no URL used.
+Bind execution identity and PUT capabilities; use no bucket credential, complete, list, delete or
+abort API. There is no media key: keep URLs in this runtime's memory and multipart-upload content.
+Never log, store or return claim/grant bodies or URLs; discard rejected grants unused.
+
+Retry transient claims with the same runtime/token but new id, timestamp and signature, bounded
+backoff and Retry-After, until the earliest request expiry, runtime deadline or claim patience
+(120 seconds, 15-second call timeout). Never replay identical claim bytes. Before grant use the
+unchanged unclaimed causes; invalid dispatches have only a sanitized provider failure.
+
+The wall deadline is entry monotonic time plus `max_wall_time_ms`, including claim time. Start no
+read, PUT, retry, result-store attempt or callback after it, actively close outstanding transfer
+sockets, and close writes within the 600-second margin. A granted runtime with no sealed terminal
+creates failed `deadline`; a sealed terminal is returned unchanged. The worker opened no multipart
+upload and aborts none. Before callback/provider return, best-effort PUT the sealed acquire
+carrier via `result_url` while time permits. Failure never replaces the terminal. Its fixed key is
+`sources/{video_uuid}/{source_uuid}/acquire-result-{execution_id}.json`; write no generation manifest
+or `result.json` for acquire.
 
 1. A runtime is one start of the worker's handler for one dispatch. It draws a fresh random
    `runtime_id` (a UUID) when it starts, keeps it in memory only, and never reuses it for another
@@ -685,6 +902,82 @@ the rules below bind the worker and the Hub's claim core, which keeps the state.
 
 ### 15.2 The Hub's claim core
 
+**Acquire, in exact decision order.**
+
+Before the table, require TLS; validate the signed claim and tenant-bound dispatch; commit its
+replay record in a separate transaction before deciding it, including a subsequent semantic refusal
+or server error. Unknown dispatch and replay retain their existing responses. Retain each replay
+record until both claim.sent_at + 2*S and dispatch expiry + 2*S have passed; keep the current longer
+pruning safeguards. Compare current placement/revision before the table. Lock organization shared,
+activation guard, video, dispatch, operation and source in that order. Take no storage call while
+holding these locks. The contract's replay retention minimum is twice skew after sent_at.
+
+| Row | Condition | Acquire answer and effects |
+|---:|---|---|
+| 1 | token hash differs | existing invalid_bootstrap_token; no authority |
+| 2 | granted to another runtime, including an ended runtime | existing claim_conflict; never a second execution |
+| 3 | same runtime, held running authority | same execution/fence/output/part plan/upload ID/result key/deadlines; fresh envelope and freshly signed URLs, all expiring at the original W; no new reservation or capacity test |
+| 4 | same runtime but ended or withdrawn | existing claim_refused |
+| 5 | ungranted and revoked | existing claim_refused |
+| 6 | ungranted and expired | existing dispatch_expired; use existing status/retryability mapping |
+| 7 | ungranted but source, organization, operation, activation or held capacity no longer authorizes | existing claim_refused; no URLs |
+| 8 | eligible | mint UUIDv7 execution, increment video's execution_fence, bind runtime hash; record output prefix and deadlines; beginImport reserved → ingesting; answer acquire grant after commit |
+
+A row-8 grant does not set the video's encode marker/status processing, create a generation or media
+key, or publish a source. A consumed bootstrap is never reused. This unit permits only one acquire
+dispatch per source operation, with max_rejections = 0: a confirmed rejection ends that acquisition;
+an ambiguous send is polled, not resubmitted. This preserves the old import's one-send behaviour and
+avoids granting the same source prefix twice. A person starting another import creates a new source
+UUID/prefix.
+
+Admission freeze refuses new attempts of every kind and optionally cancels pending attempts. It does
+not itself withdraw an already admitted/sent dispatch or prevent its grant, terminal recording or
+settle; these must drain. Keep ServiceGate distinct from admission freeze. This follows C8-4's
+shared admission boundary and maintenance rule, and the current claim authority test.
+
+Let E be bootstrap_expires_at, M max_wall_time_ms, S = 300 seconds and C = 600 seconds. At grant G:
+
+~~~text
+H = G + M
+W = max(E + M + 2*S + C, H)
+~~~
+
+Hub-issued acquire times use whole-second UTC instants and M is a multiple of 1,000. The Hub grants
+no first execution after E, so W = E + M + 1,200 seconds. Worker URL validation derives that same W
+from the accepted request; no wire deadline is added. H is the execution authority deadline; W is
+the conservative last-write fence. Provider timeout, an early terminal result or cancellation never
+shortens W. Existing contract defines the write fence and warns that server-side completion of an
+already received write is an assumed time bound.
+
+**URL minting is two-phase:** commit row 8 (or read row 3 under lock); outside all transactions,
+sign the source's recorded upload parts and result PUT with absolute expiry W; then reacquire the
+same authority locks and recheck running authority, current revision/placement, activation, source
+state, runtime and original deadlines. Return no grant if recheck refuses. Serialize/sign the
+response without storage I/O and return no-store. If presigning fails, leave the committed execution
+held and return the existing transient server-error shape; the same runtime can retry row 3. No URL
+has left the Hub before that recheck.
+
+For row 3, **re-sign; do not cache old URLs**. The tuple (method, bucket, key, upload ID, part
+number, absolute expiry) is identical; signature/date/query bytes may differ. Absolute-expiry
+signing is required so 160 sequential signatures cannot acquire successively later expiries through
+a relative TTL. Each signer computes X-Amz-Date + X-Amz-Expires = W exactly and refuses if W has
+passed.
+
+After the final authority recheck releases its locks, deletion can race the HTTP response. That is
+allowed: its prefix and W are already durable and included in deletion. Revocation cannot revoke
+issued URLs; worker deadline and cleanup fencing remain required. Trash/purge records an intent and
+fences future claims, but does not erase a running dispatch or its cost. Activation change,
+suspension, explicit operation cancellation and hard deadline withdraw execution authority; late
+signed facts remain accountable but do not authorize assembly.
+
+The Hub created and alone completes the multipart upload. It alone aborts it through the recorded
+upload pair, after existing B06 writer safety checks. The worker must not abort it on failure. A
+granted PUT can write only a part of that upload or the one result object. Any deletion of an
+original/result object additionally needs a recovery-stamped removal intent and horizon coverage;
+aborting a Hub-opened, Hub-only-completed multipart follows the existing exception.
+
+**Encode decision table and shared exchange rules.**
+
 The Hub validates the claim (`hub_receiver`, `transcode.claim`, with the live receiver order of
 section 12) against the dispatch its `dispatch_id` names, then decides in one atomic step. A claim
 whose `dispatch_id` names no dispatch of the Hub is answered `hub.error` `dispatch_mismatch`,
@@ -695,7 +988,7 @@ the dispatch. A claim whose `message_id` the replay record holds (below) is answ
 |---|---|---|
 | 1 | the token is not the dispatch's | `hub.error` `invalid_bootstrap_token` |
 | 2 | an execution was granted for the dispatch to another `runtime_id`, whatever became of it since | `hub.error` `claim_conflict`: no authority and no new execution, also after that execution ended or its deadline passed |
-| 3 | an execution was granted to this same `runtime_id` and the Hub still holds it as the dispatch's execution (it has not ended and the Hub has not withdrawn it) | the same grant again: identity, `runtime_id`, `generation_id`, `output` and `media_key` identical, `message_id` and `sent_at` new. A limit that is reached never refuses this row: the granted execution is what holds the limit's place |
+| 3 | an execution was granted to this same `runtime_id` and the Hub still holds it as the dispatch's execution (it has not ended and the Hub has not withdrawn it) | for acquire, re-sign the same authority with URLs expiring at original W as above; for encode, the same grant again: identity, `runtime_id`, `generation_id`, `output` and `media_key` identical, `message_id` and `sent_at` new. A limit that is reached never refuses this row: the granted execution is what holds the limit's place |
 | 4 | an execution was granted to this same `runtime_id` and it has ended or the Hub has withdrawn it (the organization was suspended, the work was cancelled) | `hub.error` `claim_refused` |
 | 5 | no execution was granted and the dispatch's bootstrap was revoked (the Hub withdrew the dispatch before any grant: a cancellation, a confirmed rejection of its send, a replacement) | `hub.error` `claim_refused` |
 | 6 | no execution was granted and the dispatch's bootstrap has expired | `hub.error` `dispatch_expired` |
@@ -765,7 +1058,7 @@ the dispatch. A claim whose `message_id` the replay record holds (below) is answ
 * **Where a prefix may lie.** A prefix is granted once and never reused. Every granted prefix lies
   in the location its dispatch names as output (S18) and is recorded by the Hub, with that
   location, before the grant is answered, where a deletion of the video finds it, so that a deletion removes every prefix ever
-  granted for the video. No granted prefix followed by `/` begins another granted prefix or a
+  granted for the video. For encode, no granted prefix followed by `/` begins another granted prefix or a
   source object key, and none is begun by one: the removal of one prefix never reaches into
   another, nor into an original.
 * **The fixed keys.** The Hub reads a generation's manifest only at
@@ -776,7 +1069,7 @@ the dispatch. A claim whose `message_id` the replay record holds (below) is answ
 
 ### 15.3 Outside this version
 
-The grant carries no storage credential, no lease and no deadline: the worker still holds its
+The encode grant carries no storage credential, no lease and no deadline: the encode worker still holds its
 configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its run from its own start (15.1, rule 8; 15.2, the write deadline). It
 carries the media key since the amendment of 2026-10-10 (C1b): the plan's protected channel, so the
 dispatch never needs one. The amendment of 2026-10-15 (C1c) added, after the pilot stream's
@@ -791,5 +1084,6 @@ dispatch still naming the location (section 7, "Reaching a location"). Until the
 profile can reach every organization's bucket, so a Hub defect that paired a `location_id` with
 another location's `bucket` would put the output in the wrong bucket: no semantic check compares
 them, and the residual risk is accepted until B07's scoped credentials (publication still fails
-closed, the manifest being read from the named location). The claim address, its
-route and the literal layout of `output.prefix` are the Hub's, outside the contract.
+closed, the manifest being read from the named location). The claim address and encode prefix layout
+are the Hub's; acquire fixes its source layout and
+PUT authority in draft `2.1.0` as specified above.

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/source-acquire-granted.schema.json",
+  "title": "Transcode contract v2: source-acquire-granted",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "runtime_id",
+    "output",
+    "upload"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "source.acquire.granted"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "runtime_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "location_id",
+        "prefix"
+      ],
+      "properties": {
+        "location_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "prefix": {
+          "$ref": "common.schema.json#/$defs/object_key"
+        }
+      }
+    },
+    "upload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parts",
+        "result_url"
+      ],
+      "properties": {
+        "parts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 160,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "n",
+              "url"
+            ],
+            "properties": {
+              "n": {
+                "$ref": "acquire-common.schema.json#/$defs/part_number"
+              },
+              "url": {
+                "$ref": "acquire-common.schema.json#/$defs/presigned_put_url"
+              }
+            }
+          }
+        },
+        "result_url": {
+          "$ref": "acquire-common.schema.json#/$defs/presigned_put_url"
+        }
+      }
+    }
+  }
+}

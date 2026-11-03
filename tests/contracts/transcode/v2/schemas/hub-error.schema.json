@@ -84,7 +84,13 @@
             "invalid_bootstrap_token",
             "claim_conflict",
             "claim_refused",
-            "claim_replayed"
+            "claim_replayed",
+            "acquire_destination_mismatch",
+            "acquire_snapshot_mismatch",
+            "acquire_plan_mismatch",
+            "acquire_url_invalid",
+            "acquire_parts_mismatch",
+            "acquire_integrity_mismatch"
           ]
         },
         "message": {

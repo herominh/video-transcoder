@@ -9,11 +9,16 @@
     "generation.manifest": 8388608,
     "transcode.claim": 4096,
     "transcode.claim.granted": 4096,
-    "transcode.unclaimed": 4096
+    "transcode.unclaimed": 4096,
+    "source.acquire.request": 4096,
+    "source.acquire.granted": 2097152,
+    "source.acquire.result.completed": 65536,
+    "source.acquire.result.failed": 4096
   },
   "carrier_max_bytes": {
     "runpod.input": 8448,
-    "runpod.output": 33024
+    "runpod.output": 33024,
+    "runpod.acquire.output": 131328
   },
   "max_json_depth": 32,
   "max_tokens": 277507,

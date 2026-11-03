@@ -112,6 +112,114 @@
       "key_id": "test-wk2hub-k1",
       "value": "hmac-sha256=3b161f62b3ecde6204da0add95ce2d8e0630f0db49d1bcbfae1b40650cc43d9",
       "valid": false
+    },
+    {
+      "id": "V11",
+      "category": "valid",
+      "purpose": "Acquire source.acquire.request valid",
+      "message_file": "signing/messages/V11-acquire.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=7616712e6ac12f6eb3f8cfbe3fc3fc724fbc6b97cd3bc723c23e9099b98f770f",
+      "valid": true
+    },
+    {
+      "id": "V12",
+      "category": "body_byte_changed",
+      "purpose": "Acquire source.acquire.request body_byte_changed",
+      "message_file": "signing/messages/V12-acquire.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=7616712e6ac12f6eb3f8cfbe3fc3fc724fbc6b97cd3bc723c23e9099b98f770f",
+      "valid": false
+    },
+    {
+      "id": "V13",
+      "category": "other_direction_key",
+      "purpose": "Acquire source.acquire.request other_direction_key",
+      "message_file": "signing/messages/V13-acquire.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=7616712e6ac12f6eb3f8cfbe3fc3fc724fbc6b97cd3bc723c23e9099b98f770f",
+      "valid": false
+    },
+    {
+      "id": "V14",
+      "category": "valid",
+      "purpose": "Acquire source.acquire.granted valid",
+      "message_file": "signing/messages/V14-acquire.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=65acca17d283bbc250615eef9e4d0b7582757950568f487fc0225599c4a76ee4",
+      "valid": true
+    },
+    {
+      "id": "V15",
+      "category": "body_byte_changed",
+      "purpose": "Acquire source.acquire.granted body_byte_changed",
+      "message_file": "signing/messages/V15-acquire.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=65acca17d283bbc250615eef9e4d0b7582757950568f487fc0225599c4a76ee4",
+      "valid": false
+    },
+    {
+      "id": "V16",
+      "category": "other_direction_key",
+      "purpose": "Acquire source.acquire.granted other_direction_key",
+      "message_file": "signing/messages/V16-acquire.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=65acca17d283bbc250615eef9e4d0b7582757950568f487fc0225599c4a76ee4",
+      "valid": false
+    },
+    {
+      "id": "V17",
+      "category": "valid",
+      "purpose": "Acquire source.acquire.result.completed valid",
+      "message_file": "signing/messages/V17-acquire.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=3e0ca4bee5fed35241029170f5807a2020d759287e9db1612f2e6d0aae758a62",
+      "valid": true
+    },
+    {
+      "id": "V18",
+      "category": "body_byte_changed",
+      "purpose": "Acquire source.acquire.result.completed body_byte_changed",
+      "message_file": "signing/messages/V18-acquire.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=3e0ca4bee5fed35241029170f5807a2020d759287e9db1612f2e6d0aae758a62",
+      "valid": false
+    },
+    {
+      "id": "V19",
+      "category": "other_direction_key",
+      "purpose": "Acquire source.acquire.result.completed other_direction_key",
+      "message_file": "signing/messages/V19-acquire.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=3e0ca4bee5fed35241029170f5807a2020d759287e9db1612f2e6d0aae758a62",
+      "valid": false
+    },
+    {
+      "id": "V20",
+      "category": "valid",
+      "purpose": "Acquire source.acquire.result.failed valid",
+      "message_file": "signing/messages/V20-acquire.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=f062326dfd389a0377194e2dad369a4892187b678c694accc5a393d065437e11",
+      "valid": true
+    },
+    {
+      "id": "V21",
+      "category": "body_byte_changed",
+      "purpose": "Acquire source.acquire.result.failed body_byte_changed",
+      "message_file": "signing/messages/V21-acquire.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=f062326dfd389a0377194e2dad369a4892187b678c694accc5a393d065437e11",
+      "valid": false
+    },
+    {
+      "id": "V22",
+      "category": "other_direction_key",
+      "purpose": "Acquire source.acquire.result.failed other_direction_key",
+      "message_file": "signing/messages/V22-acquire.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=f062326dfd389a0377194e2dad369a4892187b678c694accc5a393d065437e11",
+      "valid": false
     }
   ],
   "carrier_examples": [

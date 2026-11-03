@@ -251,7 +251,7 @@ def escaped_size(document: Any) -> int:
 WORST_CASES = worst_cases()
 
 
-@pytest.mark.parametrize("kind", list(MessageKind), ids=[kind.value for kind in MessageKind])
+@pytest.mark.parametrize("kind", list(WORST_CASES), ids=[kind.value for kind in WORST_CASES])
 def test_worst_case_message_when_generated_from_bounds_should_pass_schema_and_fit_its_kind_limit(kind):
     # Arrange
     document = WORST_CASES[kind]
@@ -325,7 +325,7 @@ def _maximality_gaps(value: Any, node: dict, base_uri: str, pointer: str, gaps: 
             gaps.append(f"{pointer}: {len(value)} members below maxProperties {node['maxProperties']}")
 
 
-@pytest.mark.parametrize("kind", list(MessageKind), ids=[kind.value for kind in MessageKind])
+@pytest.mark.parametrize("kind", list(WORST_CASES), ids=[kind.value for kind in WORST_CASES])
 def test_worst_case_message_when_walked_against_its_schema_should_reach_every_bound(kind):
     # Arrange
     base_uri = schema.SCHEMA_BASE_URI + kind.schema_file

@@ -160,6 +160,8 @@ def select_kind(document: Mapping[str, Any], context: TrustedContext) -> Message
     kind = document.get(kind_field)
     if not isinstance(kind, str) or kind not in KNOWN_KINDS:
         return Verdict.reject(Layer.VERSION, ReasonCode.UNKNOWN_MESSAGE_KIND, f"/{kind_field}")
+    if kind.startswith("source.acquire.") and version != "2.1.0":
+        return Verdict.reject(Layer.VERSION, ReasonCode.UNKNOWN_MESSAGE_KIND, f"/{kind_field}")
     if kind not in context.accepted_message_kinds:
         return Verdict.reject(Layer.VERSION, ReasonCode.UNEXPECTED_MESSAGE_KIND, f"/{kind_field}")
     return MessageKind(kind)

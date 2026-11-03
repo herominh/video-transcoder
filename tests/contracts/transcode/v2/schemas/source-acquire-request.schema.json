@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/source-acquire-request.schema.json",
+  "title": "Transcode contract v2: source-acquire-request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "destination",
+    "external",
+    "plan",
+    "limits",
+    "claim"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "source.acquire.request"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_dispatch"
+    },
+    "destination": {
+      "$ref": "acquire-common.schema.json#/$defs/destination"
+    },
+    "external": {
+      "$ref": "acquire-common.schema.json#/$defs/external"
+    },
+    "plan": {
+      "$ref": "acquire-common.schema.json#/$defs/plan"
+    },
+    "limits": {
+      "$ref": "acquire-common.schema.json#/$defs/limits"
+    },
+    "claim": {
+      "$ref": "transcode-request.schema.json#/properties/claim"
+    }
+  }
+}

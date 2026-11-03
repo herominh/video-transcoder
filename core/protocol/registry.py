@@ -11,7 +11,7 @@ from . import files
 
 
 class MessageKind(str, Enum):
-    """The nine kinds of the contract; generation.manifest is a stored document, the others are messages."""
+    """The thirteen kinds of the contract; generation.manifest is a stored document, the others are messages."""
 
     TRANSCODE_REQUEST = "transcode.request"
     TRANSCODE_PROGRESS = "transcode.progress"
@@ -23,12 +23,21 @@ class MessageKind(str, Enum):
     TRANSCODE_CLAIM_GRANTED = "transcode.claim.granted"
     TRANSCODE_UNCLAIMED = "transcode.unclaimed"
 
+    SOURCE_ACQUIRE_REQUEST = "source.acquire.request"
+    SOURCE_ACQUIRE_GRANTED = "source.acquire.granted"
+    SOURCE_ACQUIRE_RESULT_COMPLETED = "source.acquire.result.completed"
+    SOURCE_ACQUIRE_RESULT_FAILED = "source.acquire.result.failed"
+
     @property
     def schema_file(self) -> str:
         return _SCHEMA_FILES[self]
 
 
 _SCHEMA_FILES: Mapping[MessageKind, str] = {
+    MessageKind.SOURCE_ACQUIRE_REQUEST: "schemas/source-acquire-request.schema.json",
+    MessageKind.SOURCE_ACQUIRE_GRANTED: "schemas/source-acquire-granted.schema.json",
+    MessageKind.SOURCE_ACQUIRE_RESULT_COMPLETED: "schemas/source-acquire-result-completed.schema.json",
+    MessageKind.SOURCE_ACQUIRE_RESULT_FAILED: "schemas/source-acquire-result-failed.schema.json",
     MessageKind.TRANSCODE_REQUEST: "schemas/transcode-request.schema.json",
     MessageKind.TRANSCODE_PROGRESS: "schemas/transcode-progress.schema.json",
     MessageKind.TRANSCODE_RESULT_COMPLETED: "schemas/transcode-result-completed.schema.json",

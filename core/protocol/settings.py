@@ -2,7 +2,7 @@
 
 Everything here comes from the worker's own configuration, never from a message:
 
-    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of protocol versions versions.json defines; production
+    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; production
                                     uses 2.0.0 from the live list, and there is no default
     VH_WORKER_AUDIENCE              this worker's audience, `worker:<name>` (the contract audience)
     VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids and
@@ -37,7 +37,7 @@ from typing import Any, Mapping
 from urllib.parse import SplitResult, urlsplit
 
 from . import schema
-from .registry import VersionLine, load_registry
+from .registry import VersionChannel, VersionLine, load_registry
 
 VERSIONS_VARIABLE = "VH_ACCEPTED_PROTOCOL_VERSIONS"
 AUDIENCE_VARIABLE = "VH_WORKER_AUDIENCE"
@@ -214,10 +214,10 @@ def _key(variable: str, key_hex: str, where: str = "") -> bytes:
 
 def _accepted_versions(env: Mapping[str, str]) -> tuple[str, ...]:
     versions = _entries(env, VERSIONS_VARIABLE)
-    defined = load_registry().known_versions(VersionLine.PROTOCOL)
+    defined = load_registry().accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)
     for position, version in enumerate(versions, start=1):
         if version not in defined:
-            raise SettingsInvalid(VERSIONS_VARIABLE, f"entry {position} is not a protocol version versions.json defines")
+            raise SettingsInvalid(VERSIONS_VARIABLE, f"entry {position} is not a live protocol version versions.json defines")
     if len(set(versions)) != len(versions):
         raise SettingsInvalid(VERSIONS_VARIABLE, "lists a version twice")
     return versions
