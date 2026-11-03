@@ -47,6 +47,8 @@ WORKER_KEY_VARIABLE = "VH_WORKER_TO_HUB_KEY"
 CLAIM_URL_VARIABLE = "VH_CLAIM_URL"
 CALLBACK_URL_VARIABLE = "VH_CALLBACK_URL"
 CLOCK_SKEW_VARIABLE = "VH_CLOCK_SKEW_S"
+ACQUIRE_GOOGLE_KEY_VARIABLE = "VH_GOOGLE_DRIVE_API_KEY"
+ACQUIRE_STORAGE_HOST_VARIABLE = "VH_ACQUIRE_STORAGE_HOST"
 STORAGE_PROFILES_VARIABLE = "VH_STORAGE_PROFILES"
 STORAGE_VARIABLE_PREFIX = "VH_STORAGE_"
 STORAGE_ENDPOINT_SUFFIX = "_ENDPOINT"
@@ -114,7 +116,7 @@ class StorageProfile:
 
 
 @dataclass(frozen=True)
-class WorkerSettings:
+class ProtocolSettings:
     """The validated configuration; build it with from_env(). repr() shows no key and no secret."""
 
     accepted_protocol_versions: tuple[str, ...]
@@ -122,24 +124,16 @@ class WorkerSettings:
     hub_to_worker_keys: Mapping[str, bytes] = field(repr=False)
     worker_to_hub_key_id: str
     worker_to_hub_key: bytes = field(repr=False)
-    claim_url: str
-    callback_url: str
+    claim_url: str = field(repr=False)
+    callback_url: str = field(repr=False)
     clock_skew_s: int
-    storage_profiles: Mapping[str, StorageProfile]
 
     @property
     def hub_to_worker_key_ids(self) -> tuple[str, ...]:
         return tuple(self.hub_to_worker_keys)
 
-    def storage_profile(self, credential_ref: str) -> StorageProfile:
-        """The profile a dispatch's credential_ref names; UnknownCredentialRef when this worker holds none."""
-        profile = self.storage_profiles.get(credential_ref) if isinstance(credential_ref, str) else None
-        if profile is None:
-            raise UnknownCredentialRef(credential_ref)
-        return profile
-
     @classmethod
-    def from_env(cls, env: Mapping[str, str]) -> WorkerSettings:
+    def from_env(cls, env: Mapping[str, str]) -> ProtocolSettings:
         """Read and check every variable, in the order the module lists them; the first problem raises SettingsInvalid."""
         if not isinstance(env, Mapping):
             raise TypeError("from_env() takes the environment as a mapping")
@@ -161,8 +155,51 @@ class WorkerSettings:
             claim_url=_https_url(CLAIM_URL_VARIABLE, _text(env, CLAIM_URL_VARIABLE)),
             callback_url=_https_url(CALLBACK_URL_VARIABLE, _text(env, CALLBACK_URL_VARIABLE)),
             clock_skew_s=_clock_skew(env),
-            storage_profiles=MappingProxyType(_storage_profiles(env)),
         )
+
+
+@dataclass(frozen=True)
+class WorkerSettings(ProtocolSettings):
+    """Encode configuration additionally requires the named storage profiles."""
+
+    storage_profiles: Mapping[str, StorageProfile]
+
+    def storage_profile(self, credential_ref: str) -> StorageProfile:
+        """The profile a dispatch's credential_ref names; UnknownCredentialRef when this worker holds none."""
+        profile = self.storage_profiles.get(credential_ref) if isinstance(credential_ref, str) else None
+        if profile is None:
+            raise UnknownCredentialRef(credential_ref)
+        return profile
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> WorkerSettings:
+        common = ProtocolSettings.from_env(env)
+        return cls(**vars(common), storage_profiles=MappingProxyType(_storage_profiles(env)))
+
+
+@dataclass(frozen=True)
+class AcquireSettings(ProtocolSettings):
+    """Acquire holds a Google API key and a trusted storage host, with no bucket credentials."""
+
+    google_api_key: str = field(repr=False)
+    storage_host: str = field(repr=False)
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> AcquireSettings:
+        common = ProtocolSettings.from_env(env)
+        if common.clock_skew_s != load_registry().clock_skew_seconds:
+            raise SettingsInvalid(CLOCK_SKEW_VARIABLE, "must equal the contract clock skew for acquire")
+        key = _text(env, ACQUIRE_GOOGLE_KEY_VARIABLE)
+        if re.fullmatch(r"[\x21-\x7e]+", key) is None:
+            raise SettingsInvalid(ACQUIRE_GOOGLE_KEY_VARIABLE, "must hold non-space printable ASCII only")
+        host = _text(env, ACQUIRE_STORAGE_HOST_VARIABLE)
+        return cls(**vars(common), google_api_key=key, storage_host=_acquire_host(host))
+
+
+def _acquire_host(host: str) -> str:
+    if not re.fullmatch(r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*", host):
+        raise SettingsInvalid(ACQUIRE_STORAGE_HOST_VARIABLE, "must be a lowercase DNS hostname")
+    return host
 
 
 def _satisfies(definition_uri: str, value: Any) -> bool:

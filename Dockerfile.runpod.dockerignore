@@ -19,3 +19,4 @@ CLAUDE.md
 # Dockerfile.runpod copies core/ and wrappers/ whole: the Drive import's files (Dockerfile.import's) stay out.
 core/drive_import/
 wrappers/runpod_import_handler.py
+wrappers/runpod_acquire_handler.py

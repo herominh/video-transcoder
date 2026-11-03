@@ -42,17 +42,17 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Protocol, TypeVar
 
 from . import messages
 from .dispatch import AcceptedDispatch
 from .inbound import NotAccepted, accept_hub_error, accept_signed
-from .messages import ExecutionIdentity
+from .messages import DispatchIdentity, ExecutionIdentity
 from .outbox import SealedMessage, seal_message
 from .registry import MessageKind, load_registry
-from .settings import WorkerSettings
+from .settings import ProtocolSettings, WorkerSettings
 from .transport import (
     HTTP_ERROR_STATUSES,
     HTTP_PAYLOAD_TOO_LARGE,
@@ -114,6 +114,20 @@ class _RetryableRefusal:
     retry_after_s: float | None
 
 
+class ClaimDispatch(Protocol):
+    @property
+    def identity(self) -> DispatchIdentity: ...
+    @property
+    def protocol_version(self) -> str: ...
+    @property
+    def bootstrap_token(self) -> str: ...
+    @property
+    def claim_expires_at(self) -> datetime: ...
+
+
+GrantT = TypeVar("GrantT")
+
+
 def claim_execution(
     dispatch: AcceptedDispatch,
     *,
@@ -133,6 +147,22 @@ def claim_execution(
     start's wall time ends (ValueError otherwise, an integer too large to be a float included, before
     any claim): no claim is sent at or after it.
     """
+    return exchange(
+        dispatch, clock=clock, monotonic=monotonic, sleep=sleep, wall_time_ends_at=wall_time_ends_at,
+        build=lambda now: _sealed_claim(dispatch, settings, runtime_id, now, new_message_id()),
+        send=lambda sealed, left: _send(dispatch, settings, transport, sealed, left),
+        judge=lambda answer, now: _judge(answer, dispatch, settings, runtime_id, now),
+    )
+
+
+def exchange(
+    dispatch: ClaimDispatch, *, clock: Callable[[], datetime], monotonic: Callable[[], float],
+    sleep: Callable[[float], None], wall_time_ends_at: float,
+    build: Callable[[datetime], SealedMessage],
+    send: Callable[[SealedMessage, float], HttpAnswer | None],
+    judge: Callable[[HttpAnswer, datetime], GrantT | Unclaimed | _RetryableRefusal | None],
+) -> GrantT | Unclaimed:
+    """The shared bounded claim exchange; the dispatch family selects its grant validator and response cap."""
     try:
         finite = (
             not isinstance(wall_time_ends_at, bool)
@@ -156,7 +186,7 @@ def claim_execution(
         if time_left_s(now) <= 0:
             break
         wait_s = float(CLAIM_BACKOFF_S[min(attempt, len(CLAIM_BACKOFF_S) - 1)])
-        sealed = _sealed_claim(dispatch, settings, runtime_id, now, new_message_id())
+        sealed = build(now)
         # Building and sealing took time (milliseconds, more on a starved host), so both ends are read
         # again, immediately before the POST. A claim whose time ran out meanwhile is not sent: the
         # claiming ends here as it does above, and what was sealed was neither a claim nor a failure.
@@ -164,9 +194,9 @@ def claim_execution(
         left_s = time_left_s(now)
         if left_s <= 0:
             break
-        answer = _send(dispatch, settings, transport, sealed, left_s)
-        outcome = None if answer is None else _judge(answer, dispatch, settings, runtime_id, clock())
-        if isinstance(outcome, (Grant, Unclaimed)):
+        answer = send(sealed, left_s)
+        outcome = None if answer is None else judge(answer, clock())
+        if outcome is not None and not isinstance(outcome, _RetryableRefusal):
             return outcome
         if isinstance(outcome, _RetryableRefusal):
             if outcome.code is not None:
@@ -196,7 +226,7 @@ def claim_execution(
 
 
 def _sealed_claim(
-    dispatch: AcceptedDispatch, settings: WorkerSettings, runtime_id: str, now: datetime, message_id: str
+    dispatch: ClaimDispatch, settings: ProtocolSettings, runtime_id: str, now: datetime, message_id: str
 ) -> SealedMessage:
     """One claim of this runtime, sent at `now`: built, self-checked and signed, not yet posted."""
     claim = messages.claim(
@@ -208,18 +238,22 @@ def _sealed_claim(
         bootstrap_token=dispatch.bootstrap_token,
         runtime_id=runtime_id,
     )
-    context = messages.worker_sender_context(MessageKind.TRANSCODE_CLAIM, dispatch.identity, settings=settings, now=now)
+    context = messages.worker_sender_context(
+        MessageKind.TRANSCODE_CLAIM, dispatch.identity,
+        settings=replace(settings, accepted_protocol_versions=(dispatch.protocol_version,)), now=now,
+    )
     return seal_message(claim, context, settings=settings)
 
 
 def _send(
-    dispatch: AcceptedDispatch, settings: WorkerSettings, transport: Transport, sealed: SealedMessage, left_s: float
+    dispatch: ClaimDispatch, settings: ProtocolSettings, transport: Transport, sealed: SealedMessage, left_s: float,
+    *, grant_kind: MessageKind = MessageKind.TRANSCODE_CLAIM_GRANTED, strict_timeout: bool = False,
 ) -> HttpAnswer | None:
     """Post one sealed claim, `left_s` seconds (more than none) before the claiming ends, as read
     immediately before this call; None when it got no answer."""
-    timeout_s = max(CLAIM_MIN_REQUEST_TIMEOUT_S, min(CLAIM_REQUEST_TIMEOUT_S, left_s))
+    timeout_s = min(CLAIM_REQUEST_TIMEOUT_S, left_s) if strict_timeout else max(CLAIM_MIN_REQUEST_TIMEOUT_S, min(CLAIM_REQUEST_TIMEOUT_S, left_s))
     largest_answer = max(
-        load_registry().max_bytes(MessageKind.TRANSCODE_CLAIM_GRANTED), load_registry().max_bytes(MessageKind.HUB_ERROR)
+        load_registry().max_bytes(grant_kind), load_registry().max_bytes(MessageKind.HUB_ERROR)
     )
     try:
         return transport.post(
@@ -229,9 +263,10 @@ def _send(
             timeout_s=timeout_s,
             max_body_bytes=largest_answer,
         )
-    except TransportFailed as failure:
-        logger.info("claim of dispatch %s got no answer: %s", dispatch.identity.dispatch_id, failure)
-        return None
+    except TransportFailed:
+        pass
+    logger.info("claim of dispatch %s got no answer", dispatch.identity.dispatch_id)
+    return None
 
 
 def _judge(
@@ -245,6 +280,12 @@ def _judge(
             return Unclaimed(CAUSE_INVALID_ANSWER)
         logger.info("claim of dispatch %s granted: execution %s", dispatch_id, grant.identity.execution_id)
         return grant
+    return judge_refusal(answer, dispatch.identity.dispatch_id, settings)
+
+
+def judge_refusal(
+    answer: HttpAnswer, dispatch_id: str, settings: ProtocolSettings,
+) -> Unclaimed | _RetryableRefusal:
     error = None
     if answer.status in HTTP_ERROR_STATUSES:
         error = accept_hub_error(

@@ -1018,7 +1018,7 @@ def test_deliver_when_given_no_end_should_post_with_a_time_out_below_one_second_
 @pytest.mark.parametrize(
     ("answer", "outcome"),
     [
-        pytest.param(NO_ANSWER, "got no answer: ReadTimeout", id="no-answer"),
+        pytest.param(NO_ANSWER, "got no answer", id="no-answer"),
         pytest.param(RETRY_LATER, f"refused for now: {RETRYABLE_CODE}", id="a-retryable-hub-error"),
         pytest.param(FINAL_REFUSAL, f"refused: status {HTTP_CONFLICT}, code {FINAL_CODE}", id="a-final-hub-error"),
         pytest.param(

@@ -15,7 +15,7 @@ serialised (each raises TypeError): a different context is built again from its 
 from __future__ import annotations
 
 import copy
-from dataclasses import InitVar, dataclass
+from dataclasses import InitVar, dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -89,7 +89,7 @@ class TrustedContext:
     accepted_manifest_versions: tuple[str, ...] | None
     expected_audience: str | None
     known_key_ids: tuple[str, ...] | None
-    expect: Mapping[str, Any] | None
+    expect: Mapping[str, Any] | None = field(repr=False)
     last_event_seq: int | float | None
     _construction: InitVar[object] = None
 
