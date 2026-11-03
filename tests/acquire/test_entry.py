@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import logging
-import traceback
 from dataclasses import replace
 from typing import Any
 
@@ -133,28 +132,24 @@ def test_acquire_when_errors_contain_secrets_should_redact_output_exception_chai
     else:
         scenario.http.metadata = [Fail(ValueError(secret))]
     caplog.set_level(logging.DEBUG)
-    loggers = [logging.getLogger(name) for name in ("core.protocol.claim", "core.protocol.outbox", "core.drive_import.transfer", entry.__name__)]
+    loggers = [logging.getLogger(name) for name in ("core.protocol.claim", "core.protocol.outbox", "core.drive_import.transfer", "core.drive_import.acquire", entry.__name__)]
     sink = logging.StreamHandler(BrokenLog())
     if broken_logger:
         monkeypatch.setattr(logging, "raiseExceptions", True)
         for logger in loggers:
             logger.addHandler(sink)
     output = ""
-    error_text = ""
     # Act
     try:
+        result = scenario.run()
+        output = repr(result)
         if source == "unexpected":
-            with pytest.raises(entry.WorkerFault) as caught:
-                scenario.run()
-            assert caught.value.__cause__ is None and caught.value.__context__ is None
-            error_text = "".join(traceback.format_exception(caught.value)) + repr(caught.value)
-        else:
-            output = repr(scenario.run())
+            assert json.loads(result["vh_message"])["error"]["code"] == "download_failed"
     finally:
         for logger in loggers:
             if broken_logger:
                 logger.removeHandler(sink)
-    shown = output + error_text + caplog.text + capsys.readouterr().err
+    shown = output + caplog.text + capsys.readouterr().err
     # Assert
     for value in (API_KEY, FILE_ID, RESOURCE_KEY, scenario.request["claim"]["bootstrap_token"], SIGNATURE_CANARY,
                   scenario.urls()[0], HUB_KEY.hex(), WORKER_KEY.hex()):

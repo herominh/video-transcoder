@@ -76,6 +76,8 @@ class Tally:
     job: str | None = None
     bytes_read: int = 0
     parts_written: int = 0
+    # The active transfer operation, including buffering/checking downloaded bytes and recording a PUT.
+    stage: Stage = Stage.DOWNLOAD
 
 
 class SelfCheckFailed(RuntimeError):
@@ -303,6 +305,7 @@ class _Transfer:
         self._md5.update(self._buffer)
         self._stop_line.require(Stage.DOWNLOAD)
         self._put_part()
+        self._tally.stage = Stage.DOWNLOAD
         self._part_start += len(self._buffer)
         self._part += 1
         self._buffer = bytearray()
@@ -336,6 +339,7 @@ class _Transfer:
         return CHECKSUM_NONE
 
     def _put_part(self) -> None:
+        self._tally.stage = Stage.UPLOAD
         part = self._part
         etag = store.put(
             self._http,

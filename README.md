@@ -5,7 +5,8 @@ Video processing worker for Video Hub. Supported processing runs through an exte
 ## Architecture
 
 - `wrappers/runpod_handler.py` and `Dockerfile.runpod` — contract v2 transcode entry: claim the execution before processing, then return the signed result. The protocol and job runner live in `core/protocol/` and `core/job/`.
-- `wrappers/runpod_import_handler.py`, `core/drive_import/` and `Dockerfile.import` — supported Google Drive intake, separate from transcoding.
+- `wrappers/runpod_import_handler.py` and `Dockerfile.import` (`video-transcoder-import`) — legacy v1 Google Drive intake, retained through drain.
+- `wrappers/runpod_acquire_handler.py` and `Dockerfile.acquire` (`video-transcoder-acquire`) — signed source acquisition; shares the transfer modules in `core/drive_import/` with v1.
 - `wrappers/docker_server.py`, `core/api.py` and `Dockerfile` — development-only v1 HTTP adapter, disabled unless `VH_DEVELOPMENT_ADAPTER` is exactly `1`.
 - `wrappers/modal_app.py` — staged second candidate. Both its HTTP endpoint and worker function refuse execution until Modal implements the provider adapter contract.
 - Stateless — no database; job tracking lives in Video Hub.

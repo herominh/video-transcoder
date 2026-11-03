@@ -1,0 +1,42 @@
+# RunPod Serverless CPU worker for source.acquire (transcode contract v2).
+# No GPU, no FFmpeg: the job downloads one Drive file and writes it through presigned URLs.
+# Build with BuildKit (the default builder since Docker Engine 23): the build context is the one
+# Dockerfile.acquire.dockerignore leaves, a file the legacy builder does not read.
+# Build: docker build --platform linux/amd64 -f Dockerfile.acquire -t yourdockerhub/video-transcoder-acquire .
+# Push:  docker push yourdockerhub/video-transcoder-acquire:latest
+
+# The digest is the pin; the tag is only a label. Recompile the lock in the new base whenever the digest moves.
+FROM python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV TZ=UTC
+
+# A user of its own: the job needs no privilege and writes no file (a home directory, for whatever the SDK may keep).
+RUN groupadd --system importer \
+    && useradd --system --gid importer --create-home --home-dir /home/importer --shell /usr/sbin/nologin importer
+
+WORKDIR /app
+
+COPY requirements-import.lock .
+RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements-import.lock
+
+COPY core/__init__.py core/__init__.py
+COPY core/failure.py core/failure.py
+COPY core/protocol/ core/protocol/
+COPY core/drive_import/__init__.py core/drive_import/__init__.py
+COPY core/drive_import/acquire.py core/drive_import/acquire.py
+COPY core/drive_import/transfer.py core/drive_import/transfer.py
+COPY core/drive_import/google.py core/drive_import/google.py
+COPY core/drive_import/store.py core/drive_import/store.py
+COPY core/drive_import/transport.py core/drive_import/transport.py
+COPY core/drive_import/clock.py core/drive_import/clock.py
+COPY core/drive_import/failure.py core/drive_import/failure.py
+COPY tests/contracts/transcode/v2/ tests/contracts/transcode/v2/
+COPY wrappers/runpod_acquire_handler.py wrappers/runpod_acquire_handler.py
+
+USER importer
+# The process's working directory is the user's own, where the SDK may keep its state; the code stays in /app.
+WORKDIR /home/importer
+
+CMD ["python3", "/app/wrappers/runpod_acquire_handler.py"]

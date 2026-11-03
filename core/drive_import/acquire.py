@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import traceback
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
@@ -15,12 +16,13 @@ from core.protocol.outbox import SealedMessage, deliver, runpod_output, seal_mes
 from core.protocol.registry import MessageKind
 from core.protocol.runtime import Runtime
 from core.protocol.settings import AcquireSettings
+from core.protocol.transport import TransportFailed
 
 from . import store
-from .clock import StopLine
+from .clock import DeadlineReached, StopLine
 from .failure import Code, ImportFailed, Stage
-from .transfer import Part, TransferPlan, TransferResult, transfer
-from .transport import HttpSession
+from .transfer import Part, Tally, TransferPlan, TransferResult, transfer
+from .transport import TRANSFER_ERRORS, HttpSession
 
 logger = logging.getLogger(__name__)
 
@@ -93,20 +95,32 @@ def run_acquire(claimed: ClaimedAcquire, runtime: Runtime[AcquireSettings], http
     stop = StopLine(_Clock(runtime), claimed.wall_time_ends_at)
     dispatch, grant = claimed.dispatch, claimed.grant
     external, expected = dispatch.external, dispatch.external.expected
-    plan = TransferPlan(
-        file_id=external.file_id, resource_key=external.resource_key, expected_size=expected.size,
-        expected_md5=expected.md5, expected_sha1=expected.sha1, expected_sha256=expected.sha256,
-        expected_head_revision_id=expected.head_revision_id, part_size=dispatch.plan.part_size,
-        parts=tuple(Part(part.number, part.url) for part in grant.parts), stop_line=stop,
-    )
     failure: ImportFailed | None = None
     result: TransferResult | None = None
+    tally = Tally()
+    bug: Exception | None = None
     try:
-        result = transfer(plan, runtime.settings.google_api_key, http)
+        plan = TransferPlan(
+            file_id=external.file_id, resource_key=external.resource_key, expected_size=expected.size,
+            expected_md5=expected.md5, expected_sha1=expected.sha1, expected_sha256=expected.sha256,
+            expected_head_revision_id=expected.head_revision_id, part_size=dispatch.plan.part_size,
+            parts=tuple(Part(part.number, part.url) for part in grant.parts), stop_line=stop,
+        )
+        result = transfer(plan, runtime.settings.google_api_key, http, tally)
     except ImportFailed as error:
         failure = error
+    except Exception as error:
+        bug = error
+    if bug is not None:
+        # A broken logging sink must never inherit the URL-bearing exception's context.
+        _log_bug(bug, with_frames=True)
+        bug = None
+        code = Code.UPLOAD_FAILED if tally.stage is Stage.UPLOAD else Code.DOWNLOAD_FAILED
+        failure = ImportFailed(code, tally.stage)
     if stop.passed():
         failure = ImportFailed(Code.DEADLINE, failure.stage if failure is not None else Stage.VERIFY)
+    # A crash building/sealing a completed result has no truthful finalizing code in §2.7.
+    # Leave it to the wrapper's sanitized provider failure; never invent a second terminal.
     report = _terminal(claimed, runtime, result, failure, stop)
     _store_terminal(report, grant, http, stop)
     return report
@@ -143,29 +157,52 @@ def _terminal(
 
 
 def _store_terminal(report: SealedMessage, grant: AcquireGrant, http: HttpSession, stop: StopLine) -> None:
-    if stop.passed():
-        return
-    body = json.dumps(runpod_output(report), ensure_ascii=True, separators=(",", ":")).encode("ascii")
+    bug: Exception | None = None
     try:
+        if stop.passed():
+            return
+        body = json.dumps(runpod_output(report), ensure_ascii=True, separators=(",", ":")).encode("ascii")
         store.put(http, grant.result_url, body, RESULT_HEADERS, stop, Stage.RECEIPT, lambda attempt: None)
-    except Exception:  # Delivery cannot replace an execution's sealed terminal.
+    except (ImportFailed, DeadlineReached, *TRANSFER_ERRORS):
         pass
+    except Exception as error:  # Delivery cannot replace an execution's sealed terminal.
+        bug = error
     else:
         return
-    _delivery_diagnostic("storage")
+    if bug is not None:
+        _log_bug(bug)
+    else:
+        _delivery_diagnostic("storage")
 
 
 def _callback(report: SealedMessage, runtime: Runtime[AcquireSettings], ends_at: float) -> None:
+    bug: Exception | None = None
     try:
         deliver(
             report, settings=runtime.settings, transport=runtime.transport, sleep=runtime.sleep,
             give_up_at=ends_at, monotonic=runtime.monotonic, strict_deadline=True,
         )
-    except Exception:  # The provider still receives the exact sealed terminal.
+    except (ImportFailed, OSError, TransportFailed):
         pass
+    except Exception as error:  # The provider still receives the exact sealed terminal.
+        bug = error
     else:
         return
-    _delivery_diagnostic("callback")
+    if bug is not None:
+        _log_bug(bug)
+    else:
+        _delivery_diagnostic("callback")
+
+
+def _log_bug(error: Exception, *, with_frames: bool = False) -> None:
+    try:
+        if with_frames:
+            frames = "; ".join(frame.f_code.co_name for frame, _ in traceback.walk_tb(error.__traceback__))
+            logger.error("acquire failed on %s at %s", type(error).__name__, frames)
+        else:
+            logger.error("acquire terminal delivery failed on %s", type(error).__name__)
+    except Exception:
+        pass
 
 
 def _delivery_diagnostic(channel: str) -> None:

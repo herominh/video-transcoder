@@ -1,4 +1,4 @@
-# RunPod Serverless CPU worker for source.acquire (transcode contract v2).
+# RunPod Serverless CPU worker of the Google Drive import (contract import/v1; core/drive_import/).
 # No GPU, no FFmpeg: the job downloads one Drive file and writes it through presigned URLs.
 # Build with BuildKit (the default builder since Docker Engine 23): the build context is the one
 # Dockerfile.import.dockerignore leaves, a file the legacy builder does not read.
@@ -22,21 +22,14 @@ COPY requirements-import.lock .
 RUN pip install --no-cache-dir --require-hashes --no-deps -r requirements-import.lock
 
 COPY core/__init__.py core/__init__.py
-COPY core/failure.py core/failure.py
-COPY core/protocol/ core/protocol/
-COPY core/drive_import/__init__.py core/drive_import/__init__.py
-COPY core/drive_import/acquire.py core/drive_import/acquire.py
-COPY core/drive_import/transfer.py core/drive_import/transfer.py
-COPY core/drive_import/google.py core/drive_import/google.py
-COPY core/drive_import/store.py core/drive_import/store.py
-COPY core/drive_import/transport.py core/drive_import/transport.py
-COPY core/drive_import/clock.py core/drive_import/clock.py
-COPY core/drive_import/failure.py core/drive_import/failure.py
-COPY tests/contracts/transcode/v2/ tests/contracts/transcode/v2/
-COPY wrappers/runpod_acquire_handler.py wrappers/runpod_acquire_handler.py
+COPY core/drive_import/ core/drive_import/
+# The import contract tree core/drive_import/contract.py reads, at the same path relative to /app as in the
+# repository.
+COPY tests/contracts/import/v1/ tests/contracts/import/v1/
+COPY wrappers/runpod_import_handler.py wrappers/runpod_import_handler.py
 
 USER importer
 # The process's working directory is the user's own, where the SDK may keep its state; the code stays in /app.
 WORKDIR /home/importer
 
-CMD ["python3", "/app/wrappers/runpod_acquire_handler.py"]
+CMD ["python3", "/app/wrappers/runpod_import_handler.py"]
