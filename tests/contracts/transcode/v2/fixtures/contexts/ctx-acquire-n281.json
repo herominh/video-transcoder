@@ -52,6 +52,7 @@
       "max_wall_time_ms": 3600000
     },
     "acquire_expires_at": "2030-01-01T00:50:00.000Z",
+    "acquire_bucket": "test-source-bucket",
     "acquire_upload_id": "TestUpload+Opaque/Id"
   }
 }

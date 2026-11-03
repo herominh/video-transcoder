@@ -109,7 +109,9 @@ def urls(document, kind, context, registry):
     deadline = (parse_timestamp_ms(context.value("expect.acquire_expires_at"))
                 + context.value("expect.acquire_limits")["max_wall_time_ms"]
                 + (2 * registry.clock_skew_seconds + registry.limits["storage_call_margin_seconds"]) * MS_PER_SECOND)
-    bucket = upload_id = None
+    # The Hub pins the trusted location's bucket; the worker learns it from the first URL.
+    bucket = context.value("expect.acquire_bucket") if context.role == Role.HUB_SENDER.value else None
+    upload_id = None
     host = context.value("expect.acquire_storage_host")
     target = context.value("expect.acquire_destination")["object_key"]
     for index, part in enumerate(parts):

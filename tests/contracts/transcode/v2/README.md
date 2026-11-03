@@ -404,7 +404,7 @@ the video's current counter is higher; source acceptance is a separate current-a
 | A2 immutable request | request hub_sender | destination, external, plan, limits and claim.expires_at equal Q member-for-member. Failure acquire_snapshot_mismatch. The bootstrap is validated by its schema and separately hashed by claim core, not copied into context |
 | A3 plan and limit | request both; grant both; completed both | parts_total = ceil(expected.size / 67,108,864); expected.size <= limits.max_source_bytes. Failure acquire_plan_mismatch. Hub policy further restricts wall time to its transfer envelope, the Hub admission policy |
 | A4 prefix | grant both | output.location_id = Q.destination.location_id; output.prefix is exactly the parent folder of Q.destination.object_key. Failure storage_location_mismatch for location, acquire_destination_mismatch for prefix. S30's last-segment-is-generation rule applies only to encode |
-| A5 URL authority | grant both | rules in the next paragraph; failure acquire_url_invalid. Hub sender also requires the decoded uploadId to equal expect.acquire_upload_id |
+| A5 URL authority | grant both | rules in the next paragraph; failure acquire_url_invalid. Hub sender also pins every URL bucket to expect.acquire_bucket and the decoded uploadId to expect.acquire_upload_id |
 | A6 result parts | completed both | n values exactly 1..parts_total, in ascending order, with no duplicate, missing or additional part; ETags opaque and case-sensitive. Failure acquire_parts_mismatch |
 | A7 result evidence | completed both | bytes = expected.size, checksum_verified = sha256 when expected.sha256 nonnull, else md5 when expected.md5 nonnull, else none. sha1 remains a metadata comparison only. Failure acquire_integrity_mismatch |
 | A8 error mapping | failed both | code/class/retryable/stage satisfy the error relation below. Encode the complete relation with schema oneOf branches; a mismatch is schema_violation at L3. No duplicate semantic error code |
@@ -436,6 +436,10 @@ configured storage host, no port/user info/fragment, an unescaped path
 definition. Every part uses the same bucket, key and nonempty uploadId; exactly one partNumber
 equals n in decimal with no leading zero. Parts are ordered 1..N. The result URL uses the same
 host/bucket and /{output.prefix}/acquire-result-{execution_id}.json, with no uploadId or partNumber.
+The Hub sender pins every part URL and the result URL to `expect.acquire_bucket`, the bucket of
+the trusted destination location. The worker receiver checks only that all URLs share one bucket,
+since its accepted request carries no bucket and it holds no trusted bucket. A mismatch fails
+`acquire_url_invalid` at the first offending URL in the pointer order above.
 Reject repeated query parameter names and invalid percent escapes. Parse query values once; never
 decode or normalize the path. Require SigV4 X-Amz-Date and X-Amz-Expires exactly once: Date is a
 real YYYYMMDDTHHMMSSZ instant no later than context.now plus skew, Expires is canonical decimal
@@ -489,7 +493,7 @@ it, never taken from the message. `schemas/trusted-context.schema.json` is exact
 | `accepted_protocol_versions`, `accepted_manifest_versions` | up to 8 distinct versions, or null | from `versions.json` (`live`; `draft` in tests only); may be empty |
 | `expected_audience` | audience or null | the receiver's own audience (a sender self-check: the target's) |
 | `known_key_ids` | up to 8 distinct key ids, or null | the keys valid for this direction |
-| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`, `acquire_destination`, `acquire_external`, `acquire_plan`, `acquire_limits`, `acquire_expires_at`, `acquire_storage_host`, `acquire_upload_id`; each optional and nullable |
+| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`, `acquire_destination`, `acquire_external`, `acquire_plan`, `acquire_limits`, `acquire_expires_at`, `acquire_storage_host`, `acquire_bucket`, `acquire_upload_id`; each optional and nullable |
 | `last_event_seq` | integer 0 to 2,147,483,647 or null | highest accepted progress sequence of the execution |
 
 ### 9.2 Construction
@@ -549,7 +553,7 @@ reads it, whatever the channel:
 | `worker_receiver` | `source.acquire.request` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s` |
 | `hub_sender` | `source.acquire.request` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
 | `worker_receiver` | `source.acquire.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.runtime_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at`, `expect.acquire_storage_host` |
-| `hub_sender` | `source.acquire.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.runtime_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at`, `expect.acquire_storage_host`, `expect.acquire_upload_id` |
+| `hub_sender` | `source.acquire.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.runtime_id`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at`, `expect.acquire_storage_host`, `expect.acquire_bucket`, `expect.acquire_upload_id` |
 | `worker_sender` | `source.acquire.result.completed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
 | `worker_sender` | `source.acquire.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence` |
 | `hub_receiver` | `source.acquire.result.completed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
@@ -557,7 +561,9 @@ reads it, whatever the channel:
 
 `expect.acquire_storage_host` is a lowercase DNS hostname, 1-253 characters, with 1-63
 character alphanumeric labels and only interior hyphens; no scheme, path, port, user information
-or trailing dot. `expect.acquire_upload_id` is 1-1,024 non-space printable ASCII characters,
+or trailing dot. `expect.acquire_bucket` reuses the common bucket definition and comes from the
+trusted destination location for the Hub sender only; it is never a wire member.
+`expect.acquire_upload_id` is 1-1,024 non-space printable ASCII characters,
 refuses `://`, and comes from the source row for the Hub sender only. It is never a wire member.
 
 `expect.<name>` is missing when `expect` itself is missing or null. An empty version list is present
@@ -703,6 +709,9 @@ key line.
   v1 input `v1_timestamp + "." + body`), `other_direction_key` (the body signed with the Hub-to-worker
   key, verified with a worker-to-Hub key), `malformed_value`. Both suites recompute the
   `v1_signing_input` and `other_direction_key` values and compare them with the vector.
+  A `body_byte_changed` vector has the same length as its valid twin (the valid vector with the
+  same signature value) and differs at exactly one byte; a `reserialized` vector has different
+  bytes but the same JSON value. Both suites check these relationships.
 
 ### Answers that are not a hub.error
 

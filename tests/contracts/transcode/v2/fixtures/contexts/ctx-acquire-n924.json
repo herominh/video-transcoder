@@ -53,6 +53,7 @@
     },
     "acquire_expires_at": "2030-01-01T00:50:00.000Z",
     "acquire_storage_host": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.invalid",
+    "acquire_bucket": "test-source-bucket",
     "acquire_upload_id": "TestUpload+Opaque/Id"
   }
 }

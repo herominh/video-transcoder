@@ -137,6 +137,30 @@ def test_signature_when_body_is_reserialized_should_not_verify():
     assert valid is False
 
 
+@pytest.mark.parametrize(
+    "vector",
+    [vector for vector in VECTORS["vectors"] if vector["category"] in {"body_byte_changed", "reserialized"}],
+    ids=lambda vector: vector["id"],
+)
+def test_changed_body_vector_when_compared_with_its_valid_twin_should_differ_exactly_as_its_category_says(vector):
+    # Arrange: the valid vector carrying the same signature value, as in the Hub's MessageSignerTest.
+    twins = [twin for twin in VECTORS["vectors"] if twin["valid"] and twin["value"] == vector["value"]]
+    assert len(twins) == 1, f"{vector['id']} has no single valid twin."
+    original = _vector_bytes(twins[0])
+    changed = _vector_bytes(vector)
+
+    # Act
+    differing_bytes = sum(a != b for a, b in zip(original, changed)) if len(original) == len(changed) else None
+    same_value = json.loads(original) == json.loads(changed)
+
+    # Assert
+    if vector["category"] == "body_byte_changed":
+        assert differing_bytes == 1, f"{vector['id']} differs from its twin in other than one byte."
+    else:
+        assert original != changed
+        assert same_value, f"{vector['id']} is not the same JSON value as its twin."
+
+
 @pytest.mark.parametrize("value", [None, 7, b"hmac-sha256=", "", "hmac-sha256=", "hmac-sha256=" + "g" * 64])
 def test_verify_when_value_is_malformed_should_return_false_without_raising(value):
     # Arrange

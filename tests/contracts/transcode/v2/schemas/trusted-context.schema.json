@@ -409,6 +409,16 @@
             }
           ]
         },
+        "acquire_bucket": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "common.schema.json#/$defs/bucket"
+            }
+          ]
+        },
         "acquire_upload_id": {
           "anyOf": [
             {

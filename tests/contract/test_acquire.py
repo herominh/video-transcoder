@@ -4,6 +4,7 @@ import copy
 import hashlib
 import hmac
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -20,6 +21,77 @@ ACQUIRE_INTEGER_FIELDS = (
     "acquire_external.expected.size", "acquire_plan.part_size", "acquire_plan.parts_total",
     "acquire_limits.max_source_bytes", "acquire_limits.max_wall_time_ms",
 )
+
+
+@pytest.mark.parametrize("parts,result,pointer", [
+    ([0], False, "/upload/parts/0/url"),
+    ([1], False, "/upload/parts/1/url"),
+    ([], True, "/upload/result_url"),
+    ([0, 1], True, "/upload/parts/0/url"),
+], ids=["first-part", "second-part", "result-only", "all-URLs-share-wrong-bucket"])
+def test_hub_grant_when_urls_name_another_bucket_should_reject_the_first_offending_url(parts, result, pointer):
+    # Arrange: two parts prove array-order precedence, including before the result URL.
+    fields = files.read_json("fixtures/contexts/ctx-acquire-p38.json")
+    fields["expect"]["acquire_bucket"] = "test-source-bucket"
+    fields["expect"]["acquire_plan"]["parts_total"] = 2
+    fields["expect"]["acquire_external"]["expected"]["size"] = 67_108_865
+    document = files.read_json("fixtures/acquire-grant/P38-hub-committed-execution.json")
+    document["upload"]["parts"].append({"n": 2, "url": document["upload"]["parts"][0]["url"].replace("partNumber=1", "partNumber=2")})
+    for index in parts:
+        document["upload"]["parts"][index]["url"] = document["upload"]["parts"][index]["url"].replace("/test-source-bucket/", "/other-tenant-bucket/")
+    if result:
+        document["upload"]["result_url"] = document["upload"]["result_url"].replace("/test-source-bucket/", "/other-tenant-bucket/")
+    # Act
+    verdict = pipeline.validate(_wire(document), TrustedContext.from_dict(fields))
+    # Assert
+    assert not verdict.accepted
+    assert verdict.layer.value == "semantic"
+    assert verdict.reason.value == "acquire_url_invalid"
+    assert verdict.instance_path == pointer
+
+
+def test_worker_grant_when_all_urls_share_a_bucket_should_require_no_trusted_bucket():
+    # Arrange: a request carries no bucket, so the worker has no trusted comparison value.
+    fields = files.read_json("fixtures/contexts/ctx-acquire-p35.json")
+    raw = files.read_bytes("fixtures/acquire-grant/P35-one-part.json").replace(b"test-source-bucket", b"other-tenant-bucket")
+    # Act / Assert: the optional member is ignored even if supplied for another role.
+    assert "acquire_bucket" not in fields["expect"]
+    assert pipeline.validate(raw, TrustedContext.from_dict(fields)).accepted
+    for bucket in (None, "test-source-bucket"):
+        fields["expect"]["acquire_bucket"] = bucket
+        assert pipeline.validate(raw, TrustedContext.from_dict(fields)).accepted
+
+
+@pytest.mark.parametrize("null", [False, True], ids=["absent", "null"])
+def test_hub_grant_when_bucket_is_absent_or_null_should_report_it_between_host_and_upload_id(null):
+    fields = files.read_json("fixtures/contexts/ctx-acquire-p38.json")
+    fields["expect"].pop("acquire_upload_id")
+    fields["expect"].pop("acquire_bucket", None)
+    if null:
+        fields["expect"]["acquire_bucket"] = None
+    for expected in ("expect.acquire_bucket", "expect.acquire_storage_host"):
+        with pytest.raises(ContextIncomplete) as caught:
+            TrustedContext.from_dict(fields)
+        assert caught.value.field == expected
+        fields["expect"].pop("acquire_storage_host", None)
+
+
+@pytest.mark.parametrize("member,value,extra_seconds", [
+    ("clock_skew_seconds", 317, 34),
+    ("storage_call_margin_seconds", 629, 29),
+], ids=["skew", "storage-margin"])
+def test_grant_deadline_when_a_registry_limit_changes_should_use_that_limit(member, value, extra_seconds):
+    # Arrange: change each registry limit independently; keep context skew unchanged.
+    registry = load_registry()
+    registry = replace(registry, limits={**registry.limits, member: value})
+    context = TrustedContext.from_dict(files.read_json("fixtures/contexts/ctx-acquire-p35.json"))
+    raw = files.read_bytes("fixtures/acquire-grant/P35-one-part.json")
+    # Act / Assert: old W is refused; only the recomputed W is accepted.
+    verdict = pipeline.validate(raw, context, registry)
+    assert verdict.reason.value == "acquire_url_invalid"
+    assert verdict.instance_path == "/upload/parts/0/url"
+    updated = raw.replace(b"X-Amz-Expires=7800", f"X-Amz-Expires={7800 + extra_seconds}".encode("ascii"))
+    assert pipeline.validate(updated, context, registry).accepted
 
 
 @pytest.mark.parametrize("case_id", ["P35", "P38"])

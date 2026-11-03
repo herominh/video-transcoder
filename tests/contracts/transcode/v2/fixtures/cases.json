@@ -14723,6 +14723,48 @@
         "reason": "payload_too_large",
         "instance_path": null
       }
+    },
+    {
+      "id": "N942",
+      "payload": "fixtures/acquire-grant/N942-hub-part-bucket-mismatch.json",
+      "context": "fixtures/contexts/ctx-acquire-p38.json",
+      "rule": "acquire-semantics",
+      "purpose": "hub part bucket mismatch",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "acquire_url_invalid",
+        "instance_path": "/upload/parts/0/url"
+      }
+    },
+    {
+      "id": "N943",
+      "payload": "fixtures/acquire-grant/N943-hub-result-bucket-mismatch.json",
+      "context": "fixtures/contexts/ctx-acquire-p38.json",
+      "rule": "acquire-semantics",
+      "purpose": "hub result bucket mismatch",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "acquire_url_invalid",
+        "instance_path": "/upload/result_url"
+      }
+    },
+    {
+      "id": "N944",
+      "payload": "fixtures/acquire-grant/P38-hub-committed-execution.json",
+      "context": "fixtures/contexts/ctx-acquire-n944.json",
+      "rule": "acquire-contexts",
+      "purpose": "hub grant acquire_bucket absent",
+      "context_needed": true,
+      "expect": {
+        "outcome": "context_incomplete",
+        "layer": "context",
+        "reason": "context_incomplete",
+        "instance_path": "/expect/acquire_bucket"
+      }
     }
   ]
 }
