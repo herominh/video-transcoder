@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Optional
 
+from . import acquire
 from .reasons import ReasonCode
 from .registry import Channel, ContractRegistry, MessageKind, Role
 
@@ -178,6 +179,8 @@ def required_context_fields(role: str, kind: str) -> tuple[str, ...]:
     row = RULES.get((role, kind))
     if row is None:
         raise KeyError(f"no rule set for role {role!r} and kind {kind!r}")
+    if (role, kind) in ACQUIRE_CONTEXT_FIELDS:
+        return ACQUIRE_CONTEXT_FIELDS[role, kind]
     versions_field = "accepted_manifest_versions" if kind == _MANIFEST else "accepted_protocol_versions"
     fields: list[str] = [versions_field]
     for check in row[1]:
@@ -185,6 +188,28 @@ def required_context_fields(role: str, kind: str) -> tuple[str, ...]:
         fields.extend(field for field in check_fields if field not in fields)
     return tuple(fields)
 
+
+ACQUIRE_CONTEXT_FIELDS = {
+    ('worker_receiver', 'source.acquire.request'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s'),
+    ('hub_sender', 'source.acquire.request'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.acquire_destination', 'expect.acquire_external', 'expect.acquire_plan', 'expect.acquire_limits', 'expect.acquire_expires_at'),
+    ('worker_receiver', 'source.acquire.granted'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.runtime_id', 'expect.acquire_destination', 'expect.acquire_external', 'expect.acquire_plan', 'expect.acquire_limits', 'expect.acquire_expires_at', 'expect.acquire_storage_host'),
+    ('hub_sender', 'source.acquire.granted'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.execution_id', 'expect.execution_fence', 'expect.runtime_id', 'expect.acquire_destination', 'expect.acquire_external', 'expect.acquire_plan', 'expect.acquire_limits', 'expect.acquire_expires_at', 'expect.acquire_storage_host', 'expect.acquire_bucket', 'expect.acquire_upload_id'),
+    ('worker_sender', 'source.acquire.result.completed'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.execution_id', 'expect.execution_fence', 'expect.acquire_destination', 'expect.acquire_external', 'expect.acquire_plan', 'expect.acquire_limits', 'expect.acquire_expires_at'),
+    ('worker_sender', 'source.acquire.result.failed'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.execution_id', 'expect.execution_fence'),
+    ('hub_receiver', 'source.acquire.result.completed'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.execution_id', 'expect.execution_fence', 'expect.acquire_destination', 'expect.acquire_external', 'expect.acquire_plan', 'expect.acquire_limits', 'expect.acquire_expires_at'),
+    ('hub_receiver', 'source.acquire.result.failed'): ('accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid', 'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision', 'expect.attempt_id', 'expect.dispatch_id', 'expect.execution_id', 'expect.execution_fence'),
+}
+
+RULES = {**RULES,
+    ('worker_receiver', 'source.acquire.request'): (('dispatch',), ('S1', 'S2', 'S3', 'S4', 'S6', 'S7', 'A1', 'A3')),
+    ('hub_sender', 'source.acquire.request'): (('dispatch',), ('S1', 'S2', 'S3', 'S4', 'S6', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S17', 'S18', 'A1', 'A2', 'A3')),
+    ('worker_receiver', 'source.acquire.granted'): (('push',), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S18', 'S29', 'A1', 'A3', 'A4', 'A5')),
+    ('hub_sender', 'source.acquire.granted'): (('push',), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'S18', 'S29', 'A1', 'A3', 'A4', 'A5')),
+    ('worker_sender', 'source.acquire.result.completed'): (('push', 'poll'), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'A3', 'A6', 'A7')),
+    ('worker_sender', 'source.acquire.result.failed'): (('push', 'poll'), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16')),
+    ('hub_receiver', 'source.acquire.result.completed'): (('push', 'poll'), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'A3', 'A6', 'A7')),
+    ('hub_receiver', 'source.acquire.result.failed'): (('push', 'poll'), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16')),
+}
 
 # --- helpers --------------------------------------------------------------------------------
 
@@ -195,6 +220,8 @@ def _identity(document: Mapping[str, Any]) -> Mapping[str, Any]:
 
 def _source_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any] | None:
     """Pointer and value of the message's source id; None when the kind (or an optional block) has none."""
+    if kind == "source.acquire.request":
+        return "/destination/source_id", document["destination"]["source_id"]
     if kind == _MANIFEST:
         return "/identity/source_id", _identity(document)["source_id"]
     source = document.get("source")
@@ -207,7 +234,7 @@ def _runtime_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any
     """Pointer and value of the message's runtime id; None when the kind carries none."""
     if kind == _CLAIM:
         return "/claim/runtime_id", document["claim"]["runtime_id"]
-    if kind in (_GRANT, _UNCLAIMED):
+    if kind in (_GRANT, _UNCLAIMED, "source.acquire.granted"):
         return "/runtime_id", document["runtime_id"]
     return None
 
@@ -215,7 +242,7 @@ def _runtime_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any
 def _timestamps(document: Mapping[str, Any], kind: str) -> Iterator[tuple[str, Any]]:
     if kind != _MANIFEST:
         yield "/sent_at", document["sent_at"]
-    if kind == _REQUEST:
+    if kind in (_REQUEST, "source.acquire.request"):
         yield "/claim/expires_at", document["claim"]["expires_at"]
     if kind == _MANIFEST:
         yield "/created_at", document["created_at"]
@@ -324,12 +351,18 @@ def _fenced_identity(field: str, lower: ReasonCode, higher: ReasonCode) -> Check
 
 def _s17_source(document: Document, kind: str, context: TrustedContext, registry: ContractRegistry) -> Finding:
     source_reference = _source_reference(document, kind)
-    if source_reference is not None and source_reference[1] != context.value("expect.source_id"):
+    expected = context.value("expect.acquire_destination")["source_id"] if kind == "source.acquire.request" else context.value("expect.source_id")
+    if source_reference is not None and source_reference[1] != expected:
         return ReasonCode.SOURCE_MISMATCH, source_reference[0]
     return None
 
 
 def _s18_locations(document: Document, kind: str, context: TrustedContext, registry: ContractRegistry) -> Finding:
+    if kind in ("source.acquire.request", "source.acquire.granted"):
+        member = "destination" if kind == "source.acquire.request" else "output"
+        if document[member]["location_id"] != context.value("expect.acquire_destination")["location_id"]:
+            return ReasonCode.STORAGE_LOCATION_MISMATCH, f"/{member}/location_id"
+        return None
     if kind == _REQUEST:
         comparisons = [
             ("/source/location_id", document["source"]["location_id"], "expect.source_location_id"),
@@ -493,6 +526,7 @@ def _s31_granted_media_key(
 
 
 CHECKS: Mapping[str, CheckFunction] = {
+    **acquire.CHECKS,
     "S1": _s1_timestamps,
     "S2": _s2_audience,
     "S3": _s3_key_id,

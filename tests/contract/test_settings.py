@@ -305,7 +305,8 @@ def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
     ("value", "rule"),
     [
         ("3.0.0-draft", "versions.json"),
-        ("2.1.0", "versions.json"),
+        ("2.9.0", "versions.json"),
+        ("2.1.0", "live protocol version"),
         ("2.0.0,2.0.0", "twice"),
         ("2.0.0 , 2.0.0", "twice"),
         ("2.0.0,", "empty entry"),
@@ -313,6 +314,7 @@ def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
     ids=[
         "another-major",
         "a-minor-version-the-contract-does-not-define",
+        "a-draft-defined-only-for-test-contexts",
         "listed-twice",
         "listed-twice-with-spaces-around-the-comma",
         "empty-entry",

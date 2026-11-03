@@ -384,6 +384,54 @@
       "retryable": true,
       "reserved": true,
       "first_unit": "B07"
+    },
+    {
+      "code": "acquire_destination_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item19"
+    },
+    {
+      "code": "acquire_snapshot_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item19"
+    },
+    {
+      "code": "acquire_plan_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item19"
+    },
+    {
+      "code": "acquire_url_invalid",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item19"
+    },
+    {
+      "code": "acquire_parts_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item19"
+    },
+    {
+      "code": "acquire_integrity_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item19"
     }
   ]
 }

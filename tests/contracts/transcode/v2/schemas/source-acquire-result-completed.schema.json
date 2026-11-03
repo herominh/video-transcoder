@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/source-acquire-result-completed.schema.json",
+  "title": "Transcode contract v2: source-acquire-result-completed",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "bytes",
+    "checksum_verified",
+    "parts"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "source.acquire.result.completed"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10737418240
+    },
+    "checksum_verified": {
+      "$ref": "acquire-common.schema.json#/$defs/checksum_verified"
+    },
+    "parts": {
+      "$ref": "acquire-common.schema.json#/$defs/result_parts"
+    }
+  }
+}

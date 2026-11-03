@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/source-acquire-result-failed.schema.json",
+  "title": "Transcode contract v2: source-acquire-result-failed",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "error"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "source.acquire.result.failed"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "class",
+        "code",
+        "retryable",
+        "stage",
+        "detail"
+      ],
+      "properties": {
+        "class": {
+          "$ref": "transcode-result-failed.schema.json#/properties/error/properties/class"
+        },
+        "code": {
+          "$ref": "common.schema.json#/$defs/diagnostic_code",
+          "enum": [
+            "file_removed",
+            "link_not_shared",
+            "provider_quota",
+            "provider_refused",
+            "not_configured",
+            "size_exceeded",
+            "size_short",
+            "integrity_failed",
+            "source_changed_at_provider",
+            "deadline",
+            "download_failed",
+            "upload_failed",
+            "input_refused"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "stage": {
+          "enum": [
+            null,
+            "downloading",
+            "uploading",
+            "finalizing"
+          ]
+        },
+        "detail": {
+          "$ref": "common.schema.json#/$defs/ascii_text_1000"
+        }
+      },
+      "if": {
+        "properties": {
+          "class": {
+            "enum": [
+              "source_integrity_mismatch",
+              "input_invalid",
+              "input_limits_exceeded",
+              "authority_refused",
+              "cancelled",
+              "configuration_error"
+            ]
+          }
+        },
+        "required": [
+          "class"
+        ]
+      },
+      "then": {
+        "properties": {
+          "retryable": {
+            "const": false
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "const": "file_removed"
+            },
+            "class": {
+              "const": "source_unavailable"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "link_not_shared"
+            },
+            "class": {
+              "const": "source_unavailable"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "provider_quota"
+            },
+            "class": {
+              "const": "source_unavailable"
+            },
+            "retryable": {
+              "const": true
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "provider_refused"
+            },
+            "class": {
+              "const": "source_unavailable"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "not_configured"
+            },
+            "class": {
+              "const": "configuration_error"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": null
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "size_exceeded"
+            },
+            "class": {
+              "const": "input_limits_exceeded"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "size_short"
+            },
+            "class": {
+              "const": "source_integrity_mismatch"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "integrity_failed"
+            },
+            "class": {
+              "const": "source_integrity_mismatch"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "finalizing"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "source_changed_at_provider"
+            },
+            "class": {
+              "const": "source_integrity_mismatch"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "deadline"
+            },
+            "class": {
+              "const": "deadline_exceeded"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "enum": [
+                null,
+                "downloading",
+                "uploading",
+                "finalizing"
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "download_failed"
+            },
+            "class": {
+              "const": "source_unavailable"
+            },
+            "retryable": {
+              "const": true
+            },
+            "stage": {
+              "const": "downloading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "upload_failed"
+            },
+            "class": {
+              "const": "output_write_failed"
+            },
+            "retryable": {
+              "const": true
+            },
+            "stage": {
+              "const": "uploading"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "const": "input_refused"
+            },
+            "class": {
+              "const": "input_invalid"
+            },
+            "retryable": {
+              "const": false
+            },
+            "stage": {
+              "const": null
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -10,7 +10,8 @@ from core.protocol import files, schema, semantic
 from core.protocol.context import ContextIncomplete, ContextInvalid, TrustedContext
 
 CONTEXT_SCHEMA_FILE = "schemas/trusted-context.schema.json"
-CONTEXT_FILES = [path for path in files.list_tree_files() if path.startswith("fixtures/contexts/")]
+CONTEXT_FILES = sorted({case["context"] for case in files.read_json("fixtures/cases.json")["cases"]
+                        if case["expect"]["layer"] != "context"})
 
 REQUEST = "transcode.request"
 PROGRESS = "transcode.progress"
@@ -304,7 +305,7 @@ def test_context_when_expect_is_an_empty_object_for_a_hub_receiver_should_raise_
     [
         ("accepted_protocol_versions", ["3.0.0-draft"]),
         ("accepted_protocol_versions", ["2.0.0", "2.1.0-draft"]),
-        ("accepted_protocol_versions", ["2.1.0"]),
+        ("accepted_protocol_versions", ["2.9.0"]),
         ("accepted_manifest_versions", ["2.0.0"]),
     ],
     ids=["another-major", "an-undefined-minor-beside-the-release", "an-undefined-minor", "another-manifest-major"],

@@ -19,7 +19,7 @@ from dataclasses import InitVar, dataclass
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from . import schema
+from . import acquire, schema
 from .registry import VersionLine, load_registry
 from .semantic import parse_timestamp_ms, required_context_fields, supported_channels
 
@@ -105,8 +105,24 @@ class TrustedContext:
         pointers = schema.error_pointers(CONTEXT_SCHEMA_FILE, snapshot)
         if pointers:
             raise ContextInvalid(f"context violates {CONTEXT_SCHEMA_FILE} at {pointers[0]!r}")
+        # Context integers, like clock_skew_s and placement_epoch, accept whole-number values.
+        # Normalize the acquire snapshot after schema validation, before arithmetic or freezing it.
+        expect = snapshot.get("expect") or {}
+        external = expect.get("acquire_external")
+        if external is not None:
+            external["expected"]["size"] = int(external["expected"]["size"])
+        for name, members in (
+            ("acquire_plan", ("part_size", "parts_total")),
+            ("acquire_limits", ("max_source_bytes", "max_wall_time_ms")),
+        ):
+            if expect.get(name) is not None:
+                for member in members:
+                    expect[name][member] = int(expect[name][member])
         if snapshot.get("now") is not None and parse_timestamp_ms(snapshot["now"]) is None:
             raise ContextInvalid("context `now` is not a real calendar instant")
+        expiry = (snapshot.get("expect") or {}).get("acquire_expires_at")
+        if expiry is not None and parse_timestamp_ms(expiry) is None:
+            raise ContextInvalid("context acquire expiry is not a real calendar instant")
         _refuse_undefined_versions(snapshot)
 
         role, channel = snapshot["role"], snapshot["channel"]
@@ -121,6 +137,23 @@ class TrustedContext:
             for field in required_context_fields(role, kind):
                 if _lookup(snapshot, field) is None:
                     raise ContextIncomplete(role, kind, field)
+
+        if any(kind.startswith("source.acquire.") for kind in kinds):
+            expect = snapshot.get("expect") or {}
+            destination = expect.get("acquire_destination")
+            video = expect.get("video_uuid")
+            if destination is not None and video is not None:
+                stem = f"sources/{video}/{destination['source_id']}/original."
+                if destination["source_id"] == video or destination["object_key"] not in {
+                    stem + extension for extension in ("mp4", "mov", "avi", "mkv", "webm")
+                }:
+                    raise ContextInvalid("trusted acquire destination is inconsistent")
+            external, plan, limits = (expect.get("acquire_" + member) for member in ("external", "plan", "limits"))
+            if external is not None and plan is not None and limits is not None:
+                size = external["expected"]["size"]
+                if (plan["parts_total"] != (size + acquire.PART_SIZE - 1) // acquire.PART_SIZE
+                        or size > limits["max_source_bytes"]):
+                    raise ContextInvalid("trusted acquire plan is inconsistent")
 
         return cls(
             role=role,

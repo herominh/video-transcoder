@@ -11,7 +11,7 @@ from core.protocol.reasons import Layer, ReasonCode
 from core.protocol.registry import ContractRegistry, MessageKind, VersionChannel, VersionLine
 
 POSITIVE_CASES = [case for case in files.read_json("fixtures/cases.json")["cases"]
-                  if case["expect"]["outcome"] == "accept"]
+                  if case["expect"]["outcome"] == "accept" and "carrier" not in case]
 
 
 def test_live_versions_when_loaded_should_be_exactly_protocol_2_and_manifest_1():
@@ -28,7 +28,7 @@ def test_live_versions_when_loaded_should_be_exactly_protocol_2_and_manifest_1()
     assert live == (("2.0.0",), ("1.0.0",))
 
 
-def test_draft_versions_when_loaded_should_be_empty():
+def test_draft_versions_when_loaded_should_list_only_acquire_minor():
     # Arrange
     registry = ContractRegistry.load()
 
@@ -39,7 +39,7 @@ def test_draft_versions_when_loaded_should_be_empty():
     )
 
     # Assert
-    assert drafts == ((), ())
+    assert drafts == (("2.1.0",), ())
 
 
 @pytest.mark.parametrize("case", POSITIVE_CASES, ids=[case["id"] for case in POSITIVE_CASES])
@@ -59,7 +59,11 @@ def test_live_message_when_validated_under_live_context_should_be_accepted(case)
     verdict = pipeline.validate(files.read_bytes(case["payload"]), live_context)
 
     # Assert
-    assert verdict.accepted
+    raw_version = files.read_json(case["payload"]).get("protocol_version")
+    if raw_version == "2.1.0":
+        assert verdict.reason is ReasonCode.UNSUPPORTED_VERSION
+    else:
+        assert verdict.accepted
 
 
 @pytest.mark.parametrize(
@@ -92,4 +96,4 @@ def test_draft_version_when_listed_only_in_a_test_registry_should_need_a_draft_c
     # Assert
     assert (refused.layer, refused.reason) == (Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION)
     assert accepted is kind
-    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == ()
+    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == (("2.1.0",) if line is VersionLine.PROTOCOL else ())

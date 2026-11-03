@@ -1,0 +1,272 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/acquire-common.schema.json",
+  "title": "Transcode contract v2: acquire-common",
+  "$defs": {
+    "drive_file_id": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9_-]{10,128}$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "drive_resource_key": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_-]{1,128}$",
+          "not": {
+            "pattern": "[\\x00-\\x1f\\x7f]"
+          }
+        }
+      ]
+    },
+    "expected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "size",
+        "md5",
+        "sha1",
+        "sha256",
+        "head_revision_id"
+      ],
+      "properties": {
+        "size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10737418240
+        },
+        "md5": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 32,
+              "maxLength": 32,
+              "pattern": "^[0-9a-f]{32}$",
+              "not": {
+                "pattern": "[\\x00-\\x1f\\x7f]"
+              }
+            }
+          ]
+        },
+        "sha1": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 40,
+              "maxLength": 40,
+              "pattern": "^[0-9a-f]{40}$",
+              "not": {
+                "pattern": "[\\x00-\\x1f\\x7f]"
+              }
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "common.schema.json#/$defs/sha256"
+            }
+          ]
+        },
+        "head_revision_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 255,
+              "pattern": "^[\\x21-\\x7e]+$",
+              "not": {
+                "pattern": "[^\\x20-\\x7e]"
+              },
+              "allOf": [
+                {
+                  "not": {
+                    "pattern": "://"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "external": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "file_id",
+        "resource_key",
+        "expected"
+      ],
+      "properties": {
+        "provider": {
+          "type": "string",
+          "const": "google_drive"
+        },
+        "file_id": {
+          "$ref": "acquire-common.schema.json#/$defs/drive_file_id"
+        },
+        "resource_key": {
+          "$ref": "acquire-common.schema.json#/$defs/drive_resource_key"
+        },
+        "expected": {
+          "$ref": "acquire-common.schema.json#/$defs/expected"
+        }
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "part_size",
+        "parts_total"
+      ],
+      "properties": {
+        "part_size": {
+          "type": "integer",
+          "minimum": 67108864,
+          "maximum": 67108864,
+          "const": 67108864
+        },
+        "parts_total": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 160
+        }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_source_bytes",
+        "max_wall_time_ms"
+      ],
+      "properties": {
+        "max_source_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10737418240
+        },
+        "max_wall_time_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400000
+        }
+      }
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "location_id",
+        "object_key"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "location_id": {
+          "$ref": "common.schema.json#/$defs/uuid"
+        },
+        "object_key": {
+          "$ref": "common.schema.json#/$defs/object_key"
+        }
+      }
+    },
+    "part_number": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 160
+    },
+    "part_etag": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[\\x21\\x23-\\x7e]+$",
+      "not": {
+        "pattern": "[^\\x20-\\x7e]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "://"
+          }
+        }
+      ]
+    },
+    "result_parts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 160,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "n",
+          "etag"
+        ],
+        "properties": {
+          "n": {
+            "$ref": "acquire-common.schema.json#/$defs/part_number"
+          },
+          "etag": {
+            "$ref": "acquire-common.schema.json#/$defs/part_etag"
+          }
+        }
+      }
+    },
+    "checksum_verified": {
+      "type": "string",
+      "enum": [
+        "sha256",
+        "md5",
+        "none"
+      ]
+    },
+    "presigned_put_url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^https://[\\x21-\\x7e]+$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "[\\x5c#\\x5b\\x5d]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^https://[^/]*@"
+          }
+        }
+      ]
+    }
+  }
+}
