@@ -25,7 +25,7 @@ from core.failure import Diagnostic, Failure
 from . import schema, signing
 from .context import TrustedContext
 from .registry import Channel, MessageKind, Role, load_registry
-from .settings import WorkerSettings
+from .settings import ProtocolSettings
 
 HUB_AUDIENCE_PREFIX = "hub:"
 CONTEXT_VERSION = 1
@@ -465,6 +465,8 @@ _SENT_IDENTITIES: Mapping[MessageKind, type] = {
     MessageKind.TRANSCODE_RESULT_COMPLETED: ExecutionIdentity,
     MessageKind.TRANSCODE_RESULT_FAILED: ExecutionIdentity,
     MessageKind.TRANSCODE_UNCLAIMED: DispatchIdentity,
+    MessageKind.SOURCE_ACQUIRE_RESULT_COMPLETED: ExecutionIdentity,
+    MessageKind.SOURCE_ACQUIRE_RESULT_FAILED: ExecutionIdentity,
 }
 
 
@@ -472,7 +474,7 @@ def worker_sender_context(
     kind: MessageKind | str,
     identity: DispatchIdentity | ExecutionIdentity,
     *,
-    settings: WorkerSettings,
+    settings: ProtocolSettings,
     now: datetime,
     channel: Channel | str = Channel.PUSH,
     last_event_seq: int | None = None,
@@ -490,7 +492,7 @@ def worker_sender_context(
     if expected_identity is None:
         raise ValueError(f"the worker does not send {message_kind.value}")
     _require_type("identity", identity, expected_identity)
-    _require_type("settings", settings, WorkerSettings)
+    _require_type("settings", settings, ProtocolSettings)
     _require_type("now", now, datetime)
     expect: dict[str, Any] = identity.to_dict()
     for name, value in (("source_id", source_id), ("output_location_id", output_location_id)):
@@ -519,7 +521,7 @@ def worker_sender_context(
 def receiver_context(
     kind: MessageKind | str,
     *,
-    settings: WorkerSettings,
+    settings: ProtocolSettings,
     now: datetime | None = None,
     dispatch: DispatchIdentity | None = None,
     output_location_id: str | None = None,
@@ -533,7 +535,7 @@ def receiver_context(
     requires and the caller left None raises ContextIncomplete.
     """
     message_kind = MessageKind(kind)
-    _require_type("settings", settings, WorkerSettings)
+    _require_type("settings", settings, ProtocolSettings)
     if now is not None:
         _require_type("now", now, datetime)
     data: dict[str, Any] = {

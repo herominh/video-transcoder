@@ -17,11 +17,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping
+from typing import Any, Mapping, Protocol
 from urllib.parse import quote
 
 from core.drive_import.failure import Code
-from core.drive_import.input_check import ImportInput
 from core.drive_import.transport import HttpResponse, read_small_answer
 
 HOST = "www.googleapis.com"
@@ -97,6 +96,23 @@ CONTENT_RANGE = re.compile(r"bytes ([0-9]{1,19})-([0-9]{1,19})/([0-9]{1,19}|\*)"
 IDENTITY = "identity"
 
 
+class GoogleFile(Protocol):
+    @property
+    def file_id(self) -> str: ...
+    @property
+    def resource_key(self) -> str | None: ...
+    @property
+    def expected_size(self) -> int: ...
+    @property
+    def expected_md5(self) -> str | None: ...
+    @property
+    def expected_sha1(self) -> str | None: ...
+    @property
+    def expected_sha256(self) -> str | None: ...
+    @property
+    def expected_head_revision_id(self) -> str | None: ...
+
+
 class Retry:
     """A try that failed in a way another try may not: a transfer that failed, a 408 or a 5xx."""
 
@@ -112,7 +128,7 @@ def media_url(file_id: str) -> str:
     return FILES_URL + quote(file_id, safe="") + MEDIA_QUERY
 
 
-def request_headers(api_key: str, job: ImportInput) -> dict[str, str]:
+def request_headers(api_key: str, job: GoogleFile) -> dict[str, str]:
     """The headers of both requests: the key, the link's resource key when it has one, and no content coding."""
     headers = {API_KEY_HEADER: api_key, ACCEPT_ENCODING_HEADER: IDENTITY}
     if job.resource_key is not None:
@@ -218,7 +234,7 @@ def metadata_answer(response: HttpResponse) -> dict[str, Any] | Code | Retry:
     return refusal_of(status, _error_body(status, response))
 
 
-def change_at_provider(job: ImportInput, metadata: Mapping[str, Any]) -> Code | None:
+def change_at_provider(job: GoogleFile, metadata: Mapping[str, Any]) -> Code | None:
     """Why the file Google describes now is not the one the Hub saw at the paste, or None when nothing differs.
 
     In the trash: `file_removed`. Its owner lets viewers no longer download it (`capabilities.canDownload` present
@@ -266,7 +282,7 @@ def _lower_text(value: Any) -> str | None:
 # --- the bytes (G-17) ----------------------------------------------------------------------------------------------
 
 
-def media_headers(api_key: str, job: ImportInput, offset: int) -> dict[str, str]:
+def media_headers(api_key: str, job: GoogleFile, offset: int) -> dict[str, str]:
     """The download's headers: the key, the resource key and no content coding (request_headers()), and from `offset`
     on when it is not the start."""
     headers = request_headers(api_key, job)

@@ -153,7 +153,7 @@ class _Watchdog:
         self._timer.cancel()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class _Target:
     host: str
     port: int

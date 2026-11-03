@@ -24,10 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
-import time
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Callable, Mapping
 
 from . import files, messages
@@ -36,27 +33,11 @@ from .dispatch import AcceptedDispatch, accept_dispatch
 from .outbox import SealedMessage, deliver, runpod_output, seal_message
 from .registry import MessageKind
 from .settings import WorkerSettings
-from .transport import HttpsTransport, Transport
+from .runtime import Runtime, _random_uuid, load_runtime as load_protocol_runtime
 
 logger = logging.getLogger(__name__)
 
 _MS_PER_SECOND = 1000
-
-
-@dataclass(frozen=True)
-class Runtime:
-    """What every start of this process shares: the configuration, the carrier, the clocks and the id source.
-
-    `clock` is the aware wall-clock time the contract's timestamps are judged on; `monotonic` gives seconds
-    that only move forward, for the worker's own waits.
-    """
-
-    settings: WorkerSettings
-    transport: Transport
-    clock: Callable[[], datetime]
-    monotonic: Callable[[], float]
-    sleep: Callable[[float], None]
-    new_uuid: Callable[[], str]
 
 
 @dataclass(frozen=True)
@@ -92,25 +73,8 @@ class ClaimedExecution:
 JobRunner = Callable[[ClaimedExecution, Runtime], SealedMessage]
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _random_uuid() -> str:
-    return str(uuid.uuid4())
-
-
-def load_runtime(env: Mapping[str, str]) -> Runtime:
-    """The process's runtime, or an error: ContractTreeInvalid for the tree, SettingsInvalid for the configuration."""
-    files.verify_contract_tree()
-    return Runtime(
-        settings=WorkerSettings.from_env(env),
-        transport=HttpsTransport(),
-        clock=_utc_now,
-        monotonic=time.monotonic,
-        sleep=time.sleep,
-        new_uuid=_random_uuid,
-    )
+def load_runtime(env: Mapping[str, str]) -> Runtime[WorkerSettings]:
+    return load_protocol_runtime(env, WorkerSettings)
 
 
 def handle(job_input: object, *, runtime: Runtime, run_job: JobRunner) -> dict[str, str]:

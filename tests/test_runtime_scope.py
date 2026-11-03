@@ -30,6 +30,11 @@ PROTOCOL_PACKAGE = "core.protocol"
 ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py", "wrappers/docker_server.py"]
 RUNPOD_ENTRY_POINT = "wrappers/runpod_handler.py"
 IMPORT_ENTRY_POINT = "wrappers/runpod_import_handler.py"
+ACQUIRE_ENTRY_POINT = "wrappers/runpod_acquire_handler.py"
+ACQUIRE_TRANSFER_MODULES = {
+    "core.drive_import", "core.drive_import.acquire", "core.drive_import.transfer", "core.drive_import.google",
+    "core.drive_import.store", "core.drive_import.transport", "core.drive_import.clock", "core.drive_import.failure",
+}
 IMPORT_PACKAGE = "core.drive_import"
 IMPORT_REQUIREMENTS = "requirements-import.lock"
 # A requirement line's distribution name: what comes before a version specifier, an extra or a marker.
@@ -42,7 +47,7 @@ V1_MODULES = [
 SHARED_DOCKERIGNORE = ".dockerignore"
 RUNPOD_DOCKERIGNORE = "Dockerfile.runpod.dockerignore"
 # What the transcode image's build context leaves out beyond the shared one: the files of the import's own image.
-IMPORT_BUILD_EXCLUSIONS = ["core/drive_import/", IMPORT_ENTRY_POINT]
+IMPORT_BUILD_EXCLUSIONS = ["core/drive_import/", IMPORT_ENTRY_POINT, ACQUIRE_ENTRY_POINT]
 
 
 def _in_package(name: str, package: str) -> bool:
@@ -210,14 +215,17 @@ def test_import_entry_point_when_its_imports_are_followed_should_never_reach_the
     assert sorted(name for name in reachable if name in V1_MODULES) == []
 
 
-def test_import_entry_point_when_its_imports_are_followed_should_reach_only_what_its_image_ships():
-    # Act: the import image copies core/__init__.py, core/drive_import/ and the entry point, nothing else of core/
-    reachable = _reachable_modules(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
+def test_acquire_entry_when_imported_should_reach_only_the_cpu_module_closure() -> None:
+    # Arrange / Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / ACQUIRE_ENTRY_POINT)
 
     # Assert
-    shipped = ("core", "wrappers.runpod_import_handler")
-    outside = [name for name in reachable if name not in shipped and not _in_package(name, IMPORT_PACKAGE)]
-    assert sorted(outside) == []
+    assert ACQUIRE_TRANSFER_MODULES <= reachable
+    assert "core.protocol.acquire_claim" in reachable
+    outside = {name for name in reachable if not _in_package(name, PROTOCOL_PACKAGE)}
+    assert outside == ACQUIRE_TRANSFER_MODULES | {"core", "core.failure", "wrappers.runpod_acquire_handler"}
+    assert not any(_in_package(name, JOB_PACKAGE) for name in reachable)
+    assert not any("ffmpeg" in name for name in reachable)
 
 
 def _third_party_imports(entry: Path) -> set[str]:
@@ -244,9 +252,10 @@ def _requirements(name: str) -> set[str]:
     return names
 
 
-def test_import_entry_point_when_its_imports_are_followed_should_need_only_what_its_image_installs():
+@pytest.mark.parametrize("entry", [IMPORT_ENTRY_POINT, ACQUIRE_ENTRY_POINT])
+def test_cpu_entry_when_imported_should_need_only_what_the_locked_dependencies_provide(entry: str) -> None:
     # Act: every distribution of these happens to be named as its import is
-    imported = _third_party_imports(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
+    imported = _third_party_imports(REPOSITORY_ROOT / entry)
 
     # Assert
     assert {"requests", "jsonschema", "referencing", "runpod"} <= imported
@@ -279,9 +288,12 @@ def test_import_dockerignore_when_read_should_include_only_the_lock_and_the_file
         "*",
         f"!{IMPORT_REQUIREMENTS}",
         "!core/__init__.py",
-        "!core/drive_import/",
-        f"!{IMPORT_ENTRY_POINT}",
-        "!tests/contracts/import/v1/",
+        "!core/failure.py",
+        "!core/protocol/",
+        *[f"!core/drive_import/{name}.py" for name in
+          ("__init__", "acquire", "transfer", "google", "store", "transport", "clock", "failure")],
+        f"!{ACQUIRE_ENTRY_POINT}",
+        "!tests/contracts/transcode/v2/",
         "**/__pycache__",
         "**/*.pyc",
     ]
@@ -300,3 +312,40 @@ def test_runpod_dockerignore_when_read_beside_the_shared_one_should_hold_its_pat
 
     # Assert: a pattern added to one file alone shows here (their order matters, `!` patterns among them)
     assert runpod == shared + IMPORT_BUILD_EXCLUSIONS
+
+
+def test_acquire_image_when_inspected_should_copy_exactly_the_cpu_runtime_and_v2_contract() -> None:
+    # Arrange
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile.import").read_text()
+    expected = {
+        "requirements-import.lock", "core/__init__.py", "core/failure.py", "core/protocol/",
+        "tests/contracts/transcode/v2/", ACQUIRE_ENTRY_POINT,
+        *[f"core/drive_import/{name}.py" for name in
+          ("__init__", "acquire", "transfer", "google", "store", "transport", "clock", "failure")],
+    }
+
+    # Act
+    copied = {line.split()[1] for line in dockerfile.splitlines() if line.startswith("COPY ")}
+
+    # Assert
+    assert copied == expected
+    assert re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", dockerfile, re.MULTILINE)
+    assert "USER importer" in dockerfile
+    assert 'CMD ["python3", "/app/wrappers/runpod_acquire_handler.py"]' in dockerfile
+    assert "ffmpeg" not in dockerfile.lower().split("from", 1)[1]
+
+
+def test_cpu_lock_when_read_should_pin_every_dependency_with_sha256_hashes() -> None:
+    # Arrange
+    lock = (REPOSITORY_ROOT / IMPORT_REQUIREMENTS).read_text()
+    logical = lock.replace("\\\n", " ")
+
+    # Act
+    requirements = [line.strip() for line in logical.splitlines() if line.strip() and not line.lstrip().startswith("#")]
+
+    # Assert
+    assert requirements
+    for requirement in requirements:
+        assert re.match(r"[A-Za-z0-9_.-]+==[^\s]+\s+--hash=sha256:[0-9a-f]{64}", requirement), requirement
+    assert "requests==2.34.2" in lock
+    assert "urllib3==2.8.0" in lock

@@ -28,7 +28,7 @@ from . import messages, pipeline, schema
 from .context import TrustedContext
 from .inbound import accept_hub_error
 from .registry import MessageKind, load_registry
-from .settings import WorkerSettings
+from .settings import ProtocolSettings
 from .transport import HTTP_ERROR_STATUSES, HTTP_PAYLOAD_TOO_LARGE, TEMPORARY_REFUSAL_STATUSES, Transport, TransportFailed
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,8 @@ _HTTP_SUCCESS = range(200, 300)
 _OUTPUT_KINDS = frozenset(
     {MessageKind.TRANSCODE_RESULT_COMPLETED, MessageKind.TRANSCODE_RESULT_FAILED, MessageKind.TRANSCODE_UNCLAIMED}
 )
+_ACQUIRE_OUTPUT_KINDS = frozenset({MessageKind.SOURCE_ACQUIRE_RESULT_COMPLETED, MessageKind.SOURCE_ACQUIRE_RESULT_FAILED})
+_OUTPUT_KINDS |= _ACQUIRE_OUTPUT_KINDS
 _CALLBACK_KINDS = _OUTPUT_KINDS | {MessageKind.TRANSCODE_PROGRESS}
 _SEALED = object()
 
@@ -70,8 +72,11 @@ class SealedMessage:
             raise TypeError("a SealedMessage is made only by seal_message()")
 
 
-def seal_message(message: Mapping[str, Any], context: TrustedContext, *, settings: WorkerSettings) -> SealedMessage:
-    """Encode the message, validate its bytes under the sender context and sign them."""
+def seal_message(
+    message: Mapping[str, Any], context: TrustedContext, *, settings: ProtocolSettings,
+    require_time: Callable[[], None] | None = None,
+) -> SealedMessage:
+    """Validate and sign; an optional time guard must pass before a sealed terminal can exist."""
     body = messages.encode(message)
     verdict = pipeline.validate(body, context)
     kind = MessageKind(message["message_kind"])
@@ -79,9 +84,12 @@ def seal_message(message: Mapping[str, Any], context: TrustedContext, *, setting
         raise SelfCheckFailed(
             f"a {kind.value} fails its self-check at {verdict.layer.value}/{verdict.reason.value}"  # type: ignore[union-attr]
         )
-    return SealedMessage(
-        kind=kind, body=body, signature=messages.seal(body, settings.worker_to_hub_key), _construction=_SEALED
-    )
+    if require_time is not None:
+        require_time()
+    signature = messages.seal(body, settings.worker_to_hub_key)
+    if require_time is not None:
+        require_time()
+    return SealedMessage(kind=kind, body=body, signature=signature, _construction=_SEALED)
 
 
 def runpod_output(sealed: SealedMessage) -> dict[str, str]:
@@ -90,8 +98,11 @@ def runpod_output(sealed: SealedMessage) -> dict[str, str]:
         raise ValueError(f"a {sealed.kind.value} is never a job output")
     value = {MESSAGE_MEMBER: sealed.body.decode("ascii"), SIGNATURE_MEMBER: sealed.signature}
     serialized = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
-    within_limit = len(serialized) <= load_registry().carrier_max_bytes(RUNPOD_OUTPUT_CARRIER)
-    if not within_limit or schema.first_error_pointer(RUNPOD_OUTPUT_SCHEMA, value) is not None:
+    acquire = sealed.kind in _ACQUIRE_OUTPUT_KINDS
+    carrier = "runpod.acquire.output" if acquire else RUNPOD_OUTPUT_CARRIER
+    output_schema = "carriers/runpod-acquire-output.schema.json" if acquire else RUNPOD_OUTPUT_SCHEMA
+    within_limit = len(serialized) <= load_registry().carrier_max_bytes(carrier)
+    if not within_limit or schema.first_error_pointer(output_schema, value) is not None:
         raise ValueError(f"a {sealed.kind.value} does not fit the RunPod output carrier")
     return value
 
@@ -99,13 +110,14 @@ def runpod_output(sealed: SealedMessage) -> dict[str, str]:
 def deliver(
     sealed: SealedMessage,
     *,
-    settings: WorkerSettings,
+    settings: ProtocolSettings,
     transport: Transport,
     sleep: Callable[[float], None],
     attempts: int = CALLBACK_ATTEMPTS,
     timeout_s: float = CALLBACK_TIMEOUT_S,
     give_up_at: float | None = None,
     monotonic: Callable[[], float] | None = None,
+    strict_deadline: bool = False,
 ) -> bool:
     """POST the message to the callback address; True when the Hub answered 2xx. It never raises for a failed delivery.
 
@@ -123,7 +135,7 @@ def deliver(
     number, at which the delivery ends. With them no attempt starts at or after that instant (the first
     included: then nothing is sent), no wait between attempts is started that would end at or after it,
     and each POST's time-out is the smaller of `timeout_s` and the time left, where less time left than
-    CALLBACK_MIN_TIMEOUT_S counts as that much: an attempt that started before the end gets that long,
+    CALLBACK_MIN_TIMEOUT_S counts as that much unless strict_deadline is set: an attempt that started before the end gets that long,
     never more than `timeout_s`. Without them, a temporary refusal's Retry-After is honoured only up to
     the largest value of CALLBACK_BACKOFF_S; each wait is still at least the attempt's own backoff.
     """
@@ -148,7 +160,7 @@ def deliver(
             left_s = time_left_s()
             if left_s <= 0:
                 return _stopped_for_want_of_time(sealed)
-            post_timeout_s = min(timeout_s, max(CALLBACK_MIN_TIMEOUT_S, left_s))
+            post_timeout_s = min(timeout_s, left_s if strict_deadline else max(CALLBACK_MIN_TIMEOUT_S, left_s))
         try:
             answer = transport.post(
                 settings.callback_url,
@@ -157,8 +169,10 @@ def deliver(
                 timeout_s=post_timeout_s,
                 max_body_bytes=load_registry().max_bytes(MessageKind.HUB_ERROR),
             )
-        except TransportFailed as failure:
-            logger.info("callback of a %s got no answer: %s", sealed.kind.value, failure)
+        except TransportFailed:
+            answer = None
+        if answer is None:
+            logger.info("callback of a %s got no answer", sealed.kind.value)
             continue
         if answer.status in _HTTP_SUCCESS:
             return True

@@ -128,7 +128,7 @@ class _Sockets:
     @property
     def expired(self) -> bool:
         with self._lock:
-            return self._expired
+            return self._expired or (self._due is not None and time.monotonic() >= self._due)
 
     def arm(self, due: float) -> None:
         """The stop line's instant, on the monotonic clock: the earliest one a request named."""
@@ -337,6 +337,7 @@ class RequestsSession:
         )
 
     def close(self) -> None:
+        self._sockets.expire()
         with self._watchdog_lock:
             if self._watchdog is not None:
                 self._watchdog.cancel()
@@ -350,15 +351,20 @@ class RequestsSession:
         the job, reading the stop line on its own clock, finds it passed when a request ends there."""
         if self._sockets.expired:
             raise DeadlineReached()
-        seconds_left = max(0.0, stop_line.left_s()) + _WATCHDOG_AFTER_S
-        due = time.monotonic() + seconds_left
+        armed_at = time.monotonic()
+        seconds_left = stop_line.left_s()
+        if seconds_left <= 0:
+            self._sockets.expire()
+            raise DeadlineReached()
+        due = armed_at + seconds_left
         self._sockets.arm(due)
         with self._watchdog_lock:
             if self._watchdog_due is not None and self._watchdog_due <= due + _WATCHDOG_SLACK_S:
                 return
             if self._watchdog is not None:
                 self._watchdog.cancel()
-            watchdog = threading.Timer(seconds_left, self._sockets.expire)
+            # The timer may fire just after the boundary; connecting never borrows that scheduling margin.
+            watchdog = threading.Timer(seconds_left + _WATCHDOG_AFTER_S, self._sockets.expire)
             watchdog.daemon = True
             self._watchdog, self._watchdog_due = watchdog, due
             watchdog.start()

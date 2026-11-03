@@ -17,7 +17,7 @@ import base64
 import hashlib
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 from core.drive_import.clock import DeadlineReached, StopLine
@@ -48,7 +48,7 @@ class _Answer:
     """What one PUT came to: the store's status and ETag, or no answer (`status` None), or the stop line."""
 
     status: int | None
-    etag: str | None
+    etag: str | None = field(repr=False)
     deadline: bool = False
 
 
@@ -122,7 +122,9 @@ def _put_once(
     except TRANSFER_ERRORS:
         # No answer: the error's text names the URL, so nothing of it is kept.
         response = None
-    if reached:
+    if reached or stop_line.passed():
+        if response is not None:
+            close_quietly(response)
         return _Answer(None, None, deadline=True)
     if response is None:
         return _Answer(None, None)
