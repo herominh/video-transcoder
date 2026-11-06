@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import io
 import json
 import logging
@@ -73,10 +74,14 @@ from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
     CALLBACK_URL,
     CLAIM_URL,
+    ACQUIRE_PROTOCOL_VERSION,
+    ACQUIRE_REQUEST,
     GRANT_ENCRYPTED,
     HUB_KEY,
     HUB_UNCLAIMED_POLL_CONTEXT,
+    LIVE_PROTOCOL_VERSIONS,
     MEDIA_KEY_HEX,
+    PROTOCOL_VERSION,
     REQUEST_ENCRYPTED,
     RUNTIME_ID,
     UNCONFIGURED_KEY,
@@ -1051,6 +1056,17 @@ def test_build_handler_when_the_tree_and_the_configuration_are_whole_should_retu
     assert callable(handler)
 
 
+def test_build_handler_when_every_live_version_is_listed_should_return_a_handler(tmp_path):
+    # Arrange
+    env = _changed(_whole_env(tmp_path), {"VH_ACCEPTED_PROTOCOL_VERSIONS": LIVE_PROTOCOL_VERSIONS})
+
+    # Act
+    handler = build_handler(env)
+
+    # Assert
+    assert callable(handler)
+
+
 def test_build_handler_when_its_handler_gets_a_dispatch_no_configured_key_signed_should_refuse_it_and_do_no_work(
     tmp_path,
 ):
@@ -1686,6 +1702,32 @@ def test_sdk_run_job_when_the_process_abandoned_a_request_should_record_exactly_
         "stopPod": True,
     }
     assert _shown(SECRETS, json.dumps(result), printed.out, printed.err) == []
+
+
+@pytest.mark.parametrize(
+    ("version", "reason"),
+    [
+        pytest.param(ACQUIRE_PROTOCOL_VERSION, "unexpected_message_kind", id="at-its-own-version"),
+        pytest.param(PROTOCOL_VERSION, "unknown_message_kind", id="at-a-version-without-the-kind"),
+    ],
+)
+def test_handler_when_the_encode_endpoint_is_sent_a_signed_acquire_request_should_refuse_it_and_do_no_work(version, reason):
+    # Arrange: a worker that lists every live version, and a Hub that would grant the claim.
+    clock = FakeClock()
+    transport = _transport(clock, _granted())
+    runtime = dataclasses.replace(
+        _runtime(transport, clock), settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    )
+    stand_in = _StandInJob()
+    request = modified_fixture(ACQUIRE_REQUEST, {"/protocol_version": version})
+
+    # Act
+    with pytest.raises(JobRefused) as raised:
+        job_handler(runtime, stand_in)(_job(signed_carrier(request, HUB_KEY)))
+
+    # Assert
+    assert str(raised.value) == f"the dispatch is refused at validation: version/{reason}"
+    assert (transport.calls, stand_in.calls) == ([], [])
 
 
 def test_sdk_run_job_when_the_dispatch_is_refused_should_record_the_refusals_words_and_nothing_of_the_input(

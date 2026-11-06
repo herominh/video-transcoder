@@ -310,9 +310,10 @@ def judge_refusal(
 def _accepted_grant(
     answer: HttpAnswer, dispatch: AcceptedDispatch, settings: WorkerSettings, runtime_id: str, now: datetime
 ) -> Grant | None:
+    # A grant keeps its dispatch's version, whatever else this worker lists (README section 5).
     context = messages.receiver_context(
         MessageKind.TRANSCODE_CLAIM_GRANTED,
-        settings=settings,
+        settings=replace(settings, accepted_protocol_versions=(dispatch.protocol_version,)),
         now=now,
         dispatch=dispatch.identity,
         output_location_id=dispatch.output.location_id,

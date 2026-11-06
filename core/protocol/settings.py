@@ -2,8 +2,10 @@
 
 Everything here comes from the worker's own configuration, never from a message:
 
-    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; production
-                                    uses 2.0.0 from the live list, and there is no default
+    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; both RunPod
+                                    endpoints use 2.0.0,2.1.0, an unknown or draft entry refuses the start,
+                                    and there is no default. Listing a version does not accept all its
+                                    kinds: each entry accepts only its own family's dispatch
     VH_WORKER_AUDIENCE              this worker's audience, `worker:<name>` (the contract audience)
     VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids and
                                     distinct keys

@@ -1,6 +1,6 @@
 # Transcode contract v2
 
-Protocol `2.0.0` live, protocol `2.1.0` draft, generation manifest `1.0.0`. **This file is normative.** The Hub
+Protocols `2.0.0` and `2.1.0` live, generation manifest `1.0.0`. **This file is normative.** The Hub
 validator (PHP, `App\Protocol\Transcode`) and the worker validator (Python, `tests/contract/` in the
 worker repository) both implement exactly the rules below. When a fixture and this file disagree,
 this file wins and the fixture is a bug. `versions.json` lists the versions accepted in production; every fixture is synthetic.
@@ -150,7 +150,9 @@ In this order:
 Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no version negotiation.
 The eight existing protocol kinds are available at `2.0.0` and `2.1.0`; `generation.manifest`
 keeps manifest version `1.0.0`. An acquire kind at accepted `2.0.0` is `unknown_message_kind`,
-before the accepted-kind check. Draft `2.1.0` is accepted only by an explicit test context.
+before the accepted-kind check. Listing a version does not accept all its kinds: a context names its kinds, so
+a runtime that lists both live versions accepts as a dispatch only its own family's request (the encode endpoint
+`transcode.request`, the acquire endpoint `source.acquire.request`).
 A dispatch, claim, grant, unclaimed report and terminal result use the dispatch's recorded protocol
 version (a null historical version means `2.0.0`); the context lists only that version. A valid
 signature at another supported version cannot change it.
@@ -367,7 +369,7 @@ S5 runs only when the channel is `push`: the `poll` channel (provider output rea
 past bound, and the `dispatch` channel judges the claim expiry instead (S6). The manifest carries no
 cell, epoch, revision or freshness: those are rechecked when the generation is published (B10).
 
-### 8.4 Acquire checks (draft `2.1.0`)
+### 8.4 Acquire checks (`2.1.0`)
 
 Here request, grant, completed and failed mean the corresponding `source.acquire` kinds.
 I is dispatch identity, X adds execution identity and fence, Q is the ordered trusted destination,
@@ -610,7 +612,7 @@ The record rules apply to both encode and acquire:
 | C2 | No protocol major other than 2 and no manifest major other than 1 is accepted. |
 | C3 | Versions match by exact string; no draft is compatible with another version. |
 | C4 | `versions.json` `live` lists the versions production accepts; `draft` lists versions under development, accepted only by a context built for tests. A version absent from the list of the context's channel is `unsupported_version`. |
-| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` is draft in this slice: live remains `["2.0.0"]`; only test-built contexts list `2.1.0`. |
+| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` went live with its readers: `live` is `["2.0.0", "2.1.0"]`, `draft` is empty, and a runtime's list holds live values only; a dispatch keeps its one recorded version (section 5). |
 | C6 | Every object of every schema has `additionalProperties: false` (the thirteen kinds, the context, the carriers, the catalog), except `ext`. |
 | C7 | `ext` is the only extension point: optional on encode progress and encode results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
 | C8 | Every identity field is required and non-null, with no default; an identity field equal to `video_uuid` where it names another entity is S7. |
@@ -1095,4 +1097,4 @@ another location's `bucket` would put the output in the wrong bucket: no semanti
 them, and the residual risk is accepted until B07's scoped credentials (publication still fails
 closed, the manifest being read from the named location). The claim address and encode prefix layout
 are the Hub's; acquire fixes its source layout and
-PUT authority in draft `2.1.0` as specified above.
+PUT authority in `2.1.0` as specified above.

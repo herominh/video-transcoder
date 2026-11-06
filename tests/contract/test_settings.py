@@ -1,5 +1,6 @@
 """The worker's v2 configuration loads only when every variable holds, and never shows a key or a secret."""
 
+import dataclasses
 import re
 import traceback
 from dataclasses import FrozenInstanceError
@@ -10,6 +11,7 @@ import pytest
 
 from core.protocol import files
 from core.protocol import settings as worker_settings
+from core.protocol.registry import ContractRegistry
 from core.protocol.settings import (
     MAX_HUB_TO_WORKER_KEYS,
     SettingsInvalid,
@@ -306,7 +308,6 @@ def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
     [
         ("3.0.0-draft", "versions.json"),
         ("2.9.0", "versions.json"),
-        ("2.1.0", "live protocol version"),
         ("2.0.0,2.0.0", "twice"),
         ("2.0.0 , 2.0.0", "twice"),
         ("2.0.0,", "empty entry"),
@@ -314,7 +315,6 @@ def test_from_env_when_a_value_starts_or_ends_with_a_space_should_refuse(value):
     ids=[
         "another-major",
         "a-minor-version-the-contract-does-not-define",
-        "a-draft-defined-only-for-test-contexts",
         "listed-twice",
         "listed-twice-with-spaces-around-the-comma",
         "empty-entry",
@@ -327,6 +327,30 @@ def test_from_env_when_the_accepted_versions_break_a_rule_should_refuse(value, r
     # Assert
     assert refusal.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
     assert rule in refusal.rule
+
+
+def test_from_env_when_every_live_version_is_listed_should_accept_them_in_order():
+    # Act
+    settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.1.0"))
+
+    # Assert
+    assert settings.accepted_protocol_versions == ("2.0.0", "2.1.0")
+
+
+@pytest.mark.parametrize("value", ["2.2.0", "2.0.0,2.2.0"], ids=["alone", "beside-a-live-version"])
+def test_from_env_when_an_entry_is_a_draft_version_should_refuse_the_start(monkeypatch, value):
+    # Arrange: the shipped tree holds no draft, so this test's registry defines one.
+    shipped = ContractRegistry.load()
+    versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.2.0"]}}
+    registry = dataclasses.replace(shipped, versions=versions)
+    monkeypatch.setattr(worker_settings, "load_registry", lambda: registry)
+
+    # Act
+    refusal = _refusal(_env(VH_ACCEPTED_PROTOCOL_VERSIONS=value))
+
+    # Assert
+    assert refusal.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
+    assert "live protocol version" in refusal.rule
 
 
 # --- VH_WORKER_AUDIENCE ------------------------------------------------------------------------

@@ -61,10 +61,12 @@ from core.source_facts import AudioStreamFacts, SourceFacts, VideoStreamFacts
 from core.source_reader import RangeSource, ReadStats
 from core.thumbnail import ThumbnailResult
 from tests.contract.v2_support import (
+    ACQUIRE_PROTOCOL_VERSION,
     CALLBACK_URL,
     CLAIM_URL,
     GRANT_ENCRYPTED,
     HUB_KEY,
+    LIVE_PROTOCOL_VERSIONS,
     MEDIA_KEY_HEX,
     REQUEST_ENCRYPTED,
     RUNTIME_ID,
@@ -819,6 +821,22 @@ def test_run_when_every_stage_succeeds_should_return_a_completed_result_the_hub_
         "preset": "medium",
     }
     assert "diagnostics" not in result
+
+
+def test_run_when_the_dispatch_speaks_the_newer_live_version_should_report_and_store_at_that_version(tmp_path, monkeypatch):
+    # Arrange: a worker that lists every live version, and a dispatch at the newer one.
+    newer = Harness(
+        tmp_path, monkeypatch, request_changes={"/protocol_version": ACQUIRE_PROTOCOL_VERSION},
+        settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS),
+    )
+
+    # Act
+    result = newer.result()
+
+    # Assert: the Hub's context for this execution lists only the dispatch's version, and accepted the result.
+    assert result["message_kind"] == COMPLETED_KIND
+    assert result["protocol_version"] == ACQUIRE_PROTOCOL_VERSION
+    assert {report["protocol_version"] for report in newer.progress} == {ACQUIRE_PROTOCOL_VERSION}
 
 
 def test_run_when_every_stage_succeeds_should_locate_the_manifest_it_stored(harness):

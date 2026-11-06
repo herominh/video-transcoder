@@ -34,7 +34,7 @@ from botocore.exceptions import ClientError
 from core.bounded_process import Deadline
 from core.job import storage
 from core.job.config import JobSettings
-from core.protocol import files, pipeline, signing
+from core.protocol import pipeline, signing
 from core.protocol.claim import Grant, claim_execution
 from core.protocol.context import TrustedContext
 from core.protocol.handler import ClaimedExecution, Runtime
@@ -46,7 +46,6 @@ from tests.contract.v2_support import (
     GRANT_ENCRYPTED,
     GRANT_UNENCRYPTED,
     HUB_KEY,
-    PROTOCOL_VERSION,
     REQUEST_ENCRYPTED,
     REQUEST_UNENCRYPTED,
     RUNTIME_ID,
@@ -397,7 +396,9 @@ def claimed_execution(
         dispatch,
         settings=settings,
         runtime_id=RUNTIME_ID,
-        transport=FakeTransport(signed_answer(files.read_bytes(grant_fixture), HUB_KEY)),
+        transport=FakeTransport(
+            signed_answer(modified_fixture(grant_fixture, {"/protocol_version": dispatch.protocol_version}), HUB_KEY)
+        ),
         clock=clock,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
@@ -445,7 +446,7 @@ def hub_push_context(claimed: ClaimedExecution, *, now: datetime, last_event_seq
             "channel": "push",
             "now": timestamp_text(now),
             "clock_skew_s": CLOCK_SKEW_S,
-            "accepted_protocol_versions": [PROTOCOL_VERSION],
+            "accepted_protocol_versions": [claimed.dispatch.protocol_version],
             "accepted_message_kinds": [PROGRESS_KIND, COMPLETED_KIND, FAILED_KIND],
             "expected_audience": f"hub:{CELL_ID}",
             "known_key_ids": [WORKER_KEY_ID],

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping
 
@@ -15,7 +15,8 @@ from core.protocol.runtime import Runtime
 from core.protocol.settings import AcquireSettings
 from core.protocol.transport import HttpAnswer
 from tests.contract.v2_support import (
-    CALLBACK_URL, CLAIM_URL, FIXTURE_NOW, HUB_KEY, WORKER_KEY, signed_carrier, uuid_source, worker_env,
+    CALLBACK_URL, CLAIM_URL, FIXTURE_NOW, HUB_KEY, LIVE_PROTOCOL_VERSIONS, WORKER_KEY, signed_carrier, uuid_source,
+    worker_env,
 )
 from tests.drive_import.fakes import (
     API_KEY, FILE_ID, HEAD_REVISION, RESOURCE_KEY, STORAGE_HOST, DriveFile, FakeClock, FakeResponse, FakeSession,
@@ -33,13 +34,15 @@ SIGNATURE_CANARY = "ACQUIRE-PUT-CAPABILITY-CANARY"
 
 def environment() -> dict[str, str]:
     env = {name: value for name, value in worker_env().items() if not name.startswith("VH_STORAGE_")}
-    env.update(VH_GOOGLE_DRIVE_API_KEY=API_KEY, VH_ACQUIRE_STORAGE_HOST=STORAGE_HOST, VH_CLOCK_SKEW_S="300")
+    env.update(
+        VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, VH_GOOGLE_DRIVE_API_KEY=API_KEY,
+        VH_ACQUIRE_STORAGE_HOST=STORAGE_HOST, VH_CLOCK_SKEW_S="300",
+    )
     return env
 
 
 def settings() -> AcquireSettings:
-    # Draft support is explicit in this test's object, never in runtime environment parsing.
-    return replace(AcquireSettings.from_env(environment()), accepted_protocol_versions=("2.0.0", "2.1.0"))
+    return AcquireSettings.from_env(environment())
 
 
 def wire(document: Mapping[str, Any]) -> bytes:
