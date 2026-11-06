@@ -106,7 +106,9 @@ def test_acquire_endpoint_when_sent_a_signed_transcode_request_should_refuse_the
 
 
 @pytest.mark.parametrize("answer,cause,code", [
-    (signed_answer(files.read_bytes(GRANT_UNENCRYPTED), HUB_KEY), "invalid_answer", None),
+    # An encode grant at the dispatch's version: only the kind is wrong, so only the kind check refuses it.
+    (signed_answer(modified_fixture(GRANT_UNENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION}), HUB_KEY),
+     "invalid_answer", None),
     (HttpAnswer(200, b"{}", None), "invalid_answer", None),
     (HttpAnswer(302, b"", None), "invalid_answer", None),
     (HttpAnswer(413, b"not an envelope", None), "refused", "payload_too_large"),

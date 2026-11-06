@@ -32,6 +32,7 @@ from core.protocol.reasons import ReasonCode
 from core.protocol.registry import MessageKind, load_registry
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
+    ACQUIRE_GRANT,
     ACQUIRE_PROTOCOL_VERSION,
     CELL_ID,
     CLAIM_URL,
@@ -428,6 +429,35 @@ NOT_A_GRANT_FOR_THIS_RUNTIME = [
         id="one-byte-above-the-limit",
     ),
 ]
+
+
+def test_claim_execution_when_an_acquire_grant_comes_at_the_dispatchs_version_should_end_invalid_at_the_kind_check(caplog):
+    # Arrange: a Hub-signed acquire grant, at 2.1.0 like the encode dispatch: only its kind is wrong.
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    clock = FakeClock()
+    dispatch = accepted_dispatch(
+        modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION}), settings=settings
+    )
+    transport = FakeTransport(signed_answer(files.read_bytes(ACQUIRE_GRANT), HUB_KEY), clock=clock)
+
+    # Act
+    outcome = claim_execution(
+        dispatch,
+        settings=settings,
+        runtime_id=RUNTIME_ID,
+        transport=transport,
+        clock=clock,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        new_message_id=uuid_source(),
+        wall_time_ends_at=clock.monotonic() + LONGEST_PATIENCE_S,
+    )
+
+    # Assert: no Grant, so nothing is handed to a job; one answer read, and no second claim.
+    assert outcome == Unclaimed(CAUSE_INVALID_ANSWER)
+    assert len(transport.calls) == 1
+    assert "validation: version/unexpected_message_kind" in caplog.text
 
 
 @pytest.mark.parametrize("version", [PROTOCOL_VERSION, ACQUIRE_PROTOCOL_VERSION])

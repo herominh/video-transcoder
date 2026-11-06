@@ -56,6 +56,16 @@ def test_acquire_entry_when_configured_with_a_draft_should_refuse_before_sdk_sta
     assert not started
 
 
+def test_acquire_entry_when_the_encode_endpoints_list_is_copied_should_refuse_before_sdk_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    started: list[Any] = []
+    monkeypatch.setattr(entry, "configure_logging", lambda: None)
+    # Act / Assert
+    with pytest.raises(SettingsInvalid, match="every live protocol version"):
+        entry.main(start=started.append, env={**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0"})
+    assert not started
+
+
 def test_acquire_entry_when_every_live_version_is_listed_should_reach_the_sdk_start(monkeypatch: pytest.MonkeyPatch) -> None:
     # Arrange
     started: list[Any] = []

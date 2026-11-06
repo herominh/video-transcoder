@@ -72,6 +72,26 @@ def test_acquire_settings_when_every_live_version_is_listed_should_accept_them()
     assert settings.accepted_protocol_versions == ("2.0.0", "2.1.0")
 
 
+@pytest.mark.parametrize("value", ["2.0.0", "2.1.0"])
+def test_acquire_settings_when_the_list_misses_a_live_version_should_refuse_the_start(value: str) -> None:
+    # Arrange: 2.0.0 alone refuses every acquire request; 2.1.0 alone cannot read the Hub's 2.0.0 hub.error.
+    env = {**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": value}
+    # Act / Assert
+    with pytest.raises(SettingsInvalid, match="every live protocol version") as caught:
+        AcquireSettings.from_env(env)
+    assert caught.value.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
+    assert value not in str(caught.value)
+
+
+def test_acquire_settings_when_the_live_versions_are_listed_in_another_order_should_accept_them() -> None:
+    # Arrange
+    env = {**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.1.0,2.0.0"}
+    # Act
+    settings = AcquireSettings.from_env(env)
+    # Assert
+    assert settings.accepted_protocol_versions == ("2.1.0", "2.0.0")
+
+
 @pytest.mark.parametrize("value", ["2.2.0", "2.0.0,2.2.0"])
 def test_acquire_settings_when_an_entry_is_a_draft_version_should_refuse_the_start(
     value: str, monkeypatch: pytest.MonkeyPatch,

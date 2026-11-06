@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from dataclasses import replace
 from typing import Callable, ParamSpec
 
 from core.protocol import messages
@@ -203,7 +204,7 @@ class ProgressReporter:
         context = messages.worker_sender_context(
             MessageKind.TRANSCODE_PROGRESS,
             self._identity,
-            settings=settings,
+            settings=replace(settings, accepted_protocol_versions=(self._protocol_version,)),
             now=now,
             last_event_seq=previous_event_seq,
         )

@@ -329,6 +329,14 @@ def test_from_env_when_the_accepted_versions_break_a_rule_should_refuse(value, r
     assert rule in refusal.rule
 
 
+def test_from_env_when_only_the_first_live_version_is_listed_should_load_while_an_image_rolls_out():
+    # Act
+    settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0"))
+
+    # Assert: the encode endpoint keeps its old value until the owner changes it, unlike the acquire endpoint.
+    assert settings.accepted_protocol_versions == ("2.0.0",)
+
+
 def test_from_env_when_every_live_version_is_listed_should_accept_them_in_order():
     # Act
     settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.1.0"))

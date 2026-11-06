@@ -155,7 +155,8 @@ a runtime that lists both live versions accepts as a dispatch only its own famil
 `transcode.request`, the acquire endpoint `source.acquire.request`).
 A dispatch, claim, grant, unclaimed report and terminal result use the dispatch's recorded protocol
 version (a null historical version means `2.0.0`); the context lists only that version. A valid
-signature at another supported version cannot change it.
+signature at another supported version cannot change it. Progress keeps the dispatch's version too.
+`hub.error` is unsigned, may speak any live version, and a runtime reads it under its whole list.
 
 ## 6. L3: schema
 

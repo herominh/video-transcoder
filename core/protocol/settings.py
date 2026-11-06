@@ -5,7 +5,9 @@ Everything here comes from the worker's own configuration, never from a message:
     VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; both RunPod
                                     endpoints use 2.0.0,2.1.0, an unknown or draft entry refuses the start,
                                     and there is no default. Listing a version does not accept all its
-                                    kinds: each entry accepts only its own family's dispatch
+                                    kinds: each RunPod entry point accepts only its own family's dispatch.
+                                    The acquire entry point refuses a list without every live version;
+                                    the encode one takes one live version while an image rolls out
     VH_WORKER_AUDIENCE              this worker's audience, `worker:<name>` (the contract audience)
     VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids and
                                     distinct keys
@@ -189,6 +191,10 @@ class AcquireSettings(ProtocolSettings):
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AcquireSettings:
         common = ProtocolSettings.from_env(env)
+        live_versions = load_registry().accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)
+        if set(common.accepted_protocol_versions) != set(live_versions):
+            # Without the newer version it refuses every request; without the older it cannot read a Hub refusal.
+            raise SettingsInvalid(VERSIONS_VARIABLE, "must list every live protocol version for acquire")
         if common.clock_skew_s != load_registry().clock_skew_seconds:
             raise SettingsInvalid(CLOCK_SKEW_VARIABLE, "must equal the contract clock skew for acquire")
         key = _text(env, ACQUIRE_GOOGLE_KEY_VARIABLE)

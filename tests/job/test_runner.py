@@ -837,6 +837,8 @@ def test_run_when_the_dispatch_speaks_the_newer_live_version_should_report_and_s
     assert result["message_kind"] == COMPLETED_KIND
     assert result["protocol_version"] == ACQUIRE_PROTOCOL_VERSION
     assert {report["protocol_version"] for report in newer.progress} == {ACQUIRE_PROTOCOL_VERSION}
+    stored = json.loads(newer.uploaded[RESULT_NAME])
+    assert json.loads(stored["vh_message"])["protocol_version"] == ACQUIRE_PROTOCOL_VERSION
 
 
 def test_run_when_every_stage_succeeds_should_locate_the_manifest_it_stored(harness):
@@ -2766,6 +2768,27 @@ def test_run_when_the_manifest_it_wrote_fails_its_self_check_should_fail_and_sto
     assert _error_of(result) == ("internal_error", "manifest_self_check_failed", False, "finalizing")
     assert "semantic/source_mismatch" in result["error"]["detail"]
     assert OTHER_UUID not in result["error"]["detail"]
+    _assert_only_result_stored(harness, result)
+
+
+def test_run_when_a_writer_stamps_the_other_live_version_should_fail_its_self_check_and_store_only_its_result(
+    tmp_path, monkeypatch
+):
+    # Arrange: a worker that lists every live version, a dispatch at 2.0.0, and a writer of the result that stamps 2.1.0.
+    harness = Harness(tmp_path, monkeypatch, settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS))
+    real_result_completed = runner_module.messages.result_completed
+
+    def stamping_the_other_version(**arguments: Any) -> dict[str, Any]:
+        return real_result_completed(**{**arguments, "protocol_version": ACQUIRE_PROTOCOL_VERSION})
+
+    monkeypatch.setattr(runner_module.messages, "result_completed", stamping_the_other_version)
+
+    # Act
+    result = harness.result()
+
+    # Assert: refused at the worker's own validator, before anything of the generation is uploaded.
+    assert _error_of(result) == ("internal_error", "result_self_check_failed", False, "finalizing")
+    assert "version/unsupported_version" in result["error"]["detail"]
     _assert_only_result_stored(harness, result)
 
 

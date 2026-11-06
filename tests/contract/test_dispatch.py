@@ -60,7 +60,7 @@ ONE_DAY = timedelta(days=1)
 REQUEST_WITH_BOUNDED_EXPIRY = "fixtures/request/P20-claim-expired-exactly-300s-ago.json"
 OTHER_WORKER_AUDIENCE = "worker:another-worker"
 UNHELD_KEY_ID = "test-hub2wk-k9"
-RELEASE_VERSION_NOT_LISTED = "2.1.0"
+VERSION_THE_WORKER_DOES_NOT_LIST = "2.1.0"
 MILLISECOND_EXPIRY = "2030-01-01T00:50:00.123Z"
 MILLISECOND_EXPIRY_MICROSECONDS = 123_000
 # A value no refusal may show, placed in the request's object key.
@@ -391,7 +391,7 @@ def test_accept_dispatch_when_the_message_changed_after_signing_should_refuse_at
             id="claim-expired-one-second-beyond-the-skew",
         ),
         pytest.param(
-            {"/protocol_version": RELEASE_VERSION_NOT_LISTED},
+            {"/protocol_version": VERSION_THE_WORKER_DOES_NOT_LIST},
             Layer.VERSION,
             ReasonCode.UNSUPPORTED_VERSION,
             id="a-version-the-worker-does-not-accept",

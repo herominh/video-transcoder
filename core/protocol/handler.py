@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Mapping
 
 from . import files, messages
@@ -127,7 +127,8 @@ def _unclaimed_report(
         hub_error_code=outcome.hub_error_code,
     )
     context = messages.worker_sender_context(
-        MessageKind.TRANSCODE_UNCLAIMED, dispatch.identity, settings=runtime.settings, now=now
+        MessageKind.TRANSCODE_UNCLAIMED, dispatch.identity, now=now,
+        settings=replace(runtime.settings, accepted_protocol_versions=(dispatch.protocol_version,)),
     )
     return seal_message(report, context, settings=runtime.settings)
 
