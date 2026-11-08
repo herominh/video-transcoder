@@ -1596,6 +1596,24 @@ def test_main_when_the_configuration_is_not_whole_should_raise_settings_invalid_
     assert starter.configurations == []
 
 
+def test_main_when_the_list_lacks_the_first_live_version_should_refuse_before_the_sdk_starts(tmp_path, monkeypatch):
+    # Arrange: the encode endpoint set to the newer live version alone, which would start and then refuse
+    # every dispatch the Hub signs at the first live version
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    env = _changed(_whole_env(tmp_path), {"VH_ACCEPTED_PROTOCOL_VERSIONS": "2.1.0"})
+    starter = _Starter()
+
+    # Act
+    with _logging_nobody_configured(), pytest.raises(SettingsInvalid) as raised:
+        runpod_handler.main(starter, env)
+
+    # Assert
+    assert raised.value.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
+    assert "first live protocol version" in raised.value.rule
+    assert "2.1.0" not in str(raised.value)
+    assert starter.configurations == []
+
+
 def test_entry_point_when_run_as_the_program_should_set_up_the_log_then_import_the_sdk_and_start_it_with_a_handler(
     tmp_path,
 ):

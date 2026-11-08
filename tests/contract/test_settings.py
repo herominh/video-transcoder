@@ -11,7 +11,7 @@ import pytest
 
 from core.protocol import files
 from core.protocol import settings as worker_settings
-from core.protocol.registry import ContractRegistry
+from core.protocol.registry import ContractRegistry, VersionChannel, VersionLine
 from core.protocol.settings import (
     MAX_HUB_TO_WORKER_KEYS,
     SettingsInvalid,
@@ -335,6 +335,30 @@ def test_from_env_when_only_the_first_live_version_is_listed_should_load_while_a
 
     # Assert: the encode endpoint keeps its old value until the owner changes it, unlike the acquire endpoint.
     assert settings.accepted_protocol_versions == ("2.0.0",)
+
+
+@pytest.mark.parametrize("value", ["2.0.0,2.1.0", "2.1.0,2.0.0"], ids=["first-live-first", "first-live-second"])
+def test_from_env_when_the_first_live_version_is_listed_in_either_order_should_load(value):
+    # Act
+    settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS=value))
+
+    # Assert
+    assert settings.accepted_protocol_versions == tuple(value.split(","))
+
+
+def test_from_env_when_the_first_live_version_is_missing_should_refuse_showing_no_value():
+    # Arrange: a newer live version alone; the Hub signs every encode dispatch and its unsigned refusal
+    # at the first live version, which this list would refuse.
+    first_live, *newer_only = ContractRegistry.load().accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)
+    assert newer_only, f"the contract lists only {first_live} as live: there is no list without it to refuse"
+
+    # Act
+    refusal = _refusal(_env(VH_ACCEPTED_PROTOCOL_VERSIONS=",".join(newer_only)))
+
+    # Assert
+    assert refusal.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
+    assert "first live protocol version" in refusal.rule
+    assert [version for version in newer_only if version in str(refusal)] == []
 
 
 def test_from_env_when_every_live_version_is_listed_should_accept_them_in_order():
