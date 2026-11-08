@@ -13,11 +13,14 @@ import pytest
 from core.protocol import files, signing
 from core.protocol.acquire_claim import claim_execution
 from core.protocol.acquire_dispatch import accept_dispatch
+from core.protocol.dispatch import DispatchRefused
+from core.protocol.reasons import Layer, ReasonCode
 from core.protocol.registry import MessageKind, load_registry
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.acquire.support import EXECUTION, PART_SIZE, Scenario, grant_for, wire
 from tests.contract.v2_support import (
-    GRANT_UNENCRYPTED, HUB_KEY, WORKER_KEY, hub_error_answer, signed_answer, signed_carrier,
+    ACQUIRE_PROTOCOL_VERSION, GRANT_UNENCRYPTED, HUB_KEY, PROTOCOL_VERSION, REQUEST_ENCRYPTED, WORKER_KEY,
+    hub_error_answer, modified_fixture, signed_answer, signed_carrier,
 )
 from tests.drive_import.fakes import Fail, Put
 from wrappers.runpod_acquire_handler import JobRefused
@@ -84,8 +87,28 @@ def test_acquire_dispatch_when_not_acceptable_should_fail_before_any_network_wor
     assert not scenario.hub.posts and not scenario.http.requests
 
 
+@pytest.mark.parametrize("version", [PROTOCOL_VERSION, ACQUIRE_PROTOCOL_VERSION])
+def test_acquire_endpoint_when_sent_a_signed_transcode_request_should_refuse_the_kind_and_do_no_work(version: str) -> None:
+    # Arrange: the version is listed, the signature is the Hub's; only the kind is not this endpoint's.
+    scenario = Scenario()
+    request = modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": version})
+    carrier = signed_carrier(request, HUB_KEY)
+    # Act
+    with pytest.raises(DispatchRefused) as refused:
+        accept_dispatch(carrier, settings=scenario.runtime.settings, now=scenario.clock.now())
+    with pytest.raises(JobRefused) as job_refused:
+        scenario.run(carrier)
+    # Assert
+    assert refused.value.verdict is not None
+    assert (refused.value.verdict.layer, refused.value.verdict.reason) == (Layer.VERSION, ReasonCode.UNEXPECTED_MESSAGE_KIND)
+    assert str(job_refused.value) == "the dispatch is refused at validation: version/unexpected_message_kind"
+    assert not scenario.hub.posts and not scenario.http.requests
+
+
 @pytest.mark.parametrize("answer,cause,code", [
-    (signed_answer(files.read_bytes(GRANT_UNENCRYPTED), HUB_KEY), "invalid_answer", None),
+    # An encode grant at the dispatch's version: only the kind is wrong, so only the kind check refuses it.
+    (signed_answer(modified_fixture(GRANT_UNENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION}), HUB_KEY),
+     "invalid_answer", None),
     (HttpAnswer(200, b"{}", None), "invalid_answer", None),
     (HttpAnswer(302, b"", None), "invalid_answer", None),
     (HttpAnswer(413, b"not an envelope", None), "refused", "payload_too_large"),

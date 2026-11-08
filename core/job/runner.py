@@ -902,7 +902,7 @@ class _Execution:
         context = messages.worker_sender_context(
             MessageKind.TRANSCODE_RESULT_COMPLETED,
             grant.identity,
-            settings=settings,
+            settings=replace(settings, accepted_protocol_versions=(dispatch.protocol_version,)),
             now=now,
             source_id=dispatch.source.source_id,
             output_location_id=grant.output_location_id,
@@ -934,7 +934,7 @@ class _Execution:
         context = messages.worker_sender_context(
             MessageKind.TRANSCODE_RESULT_FAILED,
             grant.identity,
-            settings=settings,
+            settings=replace(settings, accepted_protocol_versions=(dispatch.protocol_version,)),
             now=now,
             source_id=dispatch.source.source_id,
         )

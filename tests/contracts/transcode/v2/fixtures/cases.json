@@ -11374,7 +11374,7 @@
       "payload": "fixtures/acquire-results/P80-source-acquire-request-draft.json",
       "context": "fixtures/contexts/ctx-acquire-p30.json",
       "rule": "acquire-version",
-      "purpose": "source acquire request draft",
+      "purpose": "source acquire request at 2.1.0",
       "context_needed": true,
       "expect": {
         "outcome": "accept",
@@ -11402,7 +11402,7 @@
       "payload": "fixtures/acquire-results/N736-source-acquire-request-live-only.json",
       "context": "fixtures/contexts/ctx-acquire-n736.json",
       "rule": "acquire-version",
-      "purpose": "source acquire request live only",
+      "purpose": "source acquire request at 2.1.0 under a context listing only 2.0.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -11416,7 +11416,7 @@
       "payload": "fixtures/acquire-grant/P81-source-acquire-granted-draft.json",
       "context": "fixtures/contexts/ctx-acquire-p35.json",
       "rule": "acquire-version",
-      "purpose": "source acquire granted draft",
+      "purpose": "source acquire granted at 2.1.0",
       "context_needed": true,
       "expect": {
         "outcome": "accept",
@@ -11444,7 +11444,7 @@
       "payload": "fixtures/acquire-grant/N738-source-acquire-granted-live-only.json",
       "context": "fixtures/contexts/ctx-acquire-n738.json",
       "rule": "acquire-version",
-      "purpose": "source acquire granted live only",
+      "purpose": "source acquire granted at 2.1.0 under a context listing only 2.0.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -11458,7 +11458,7 @@
       "payload": "fixtures/acquire-results/P82-source-acquire-result-completed-draft.json",
       "context": "fixtures/contexts/ctx-acquire-p40.json",
       "rule": "acquire-version",
-      "purpose": "source acquire result completed draft",
+      "purpose": "source acquire result completed at 2.1.0",
       "context_needed": true,
       "expect": {
         "outcome": "accept",
@@ -11486,7 +11486,7 @@
       "payload": "fixtures/acquire-results/N740-source-acquire-result-completed-live-only.json",
       "context": "fixtures/contexts/ctx-acquire-n740.json",
       "rule": "acquire-version",
-      "purpose": "source acquire result completed live only",
+      "purpose": "source acquire result completed at 2.1.0 under a context listing only 2.0.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -11500,7 +11500,7 @@
       "payload": "fixtures/acquire-results/P83-source-acquire-result-failed-draft.json",
       "context": "fixtures/contexts/ctx-acquire-p44.json",
       "rule": "acquire-version",
-      "purpose": "source acquire result failed draft",
+      "purpose": "source acquire result failed at 2.1.0",
       "context_needed": true,
       "expect": {
         "outcome": "accept",
@@ -11528,7 +11528,7 @@
       "payload": "fixtures/acquire-results/N742-source-acquire-result-failed-live-only.json",
       "context": "fixtures/contexts/ctx-acquire-n742.json",
       "rule": "acquire-version",
-      "purpose": "source acquire result failed live only",
+      "purpose": "source acquire result failed at 2.1.0 under a context listing only 2.0.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",

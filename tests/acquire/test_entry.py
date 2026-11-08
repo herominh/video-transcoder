@@ -11,9 +11,11 @@ from typing import Any
 import pytest
 
 from core.protocol import files
+from core.protocol import settings as settings_module
 from core.protocol.acquire_claim import claim_execution
 from core.protocol.acquire_dispatch import accept_dispatch, receiver_context
 from core.protocol.claim import Unclaimed
+from core.protocol.registry import ContractRegistry
 from core.protocol.settings import SettingsInvalid
 from tests.acquire.support import SIGNATURE_CANARY, Scenario, environment, wire
 from tests.contract.v2_support import HUB_KEY, RUNTIME_ID, WORKER_KEY, key_forms, signed_carrier
@@ -42,13 +44,36 @@ def test_acquire_entry_when_booting_should_check_the_tree_before_accepting_jobs(
 
 
 def test_acquire_entry_when_configured_with_a_draft_should_refuse_before_sdk_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange: the shipped tree holds no draft, so this test's registry defines one.
+    started: list[Any] = []
+    monkeypatch.setattr(entry, "configure_logging", lambda: None)
+    shipped = ContractRegistry.load()
+    versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.2.0"]}}
+    monkeypatch.setattr(settings_module, "load_registry", lambda: replace(shipped, versions=versions))
+    # Act / Assert
+    with pytest.raises(SettingsInvalid):
+        entry.main(start=started.append, env={**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.2.0"})
+    assert not started
+
+
+def test_acquire_entry_when_the_encode_endpoints_list_is_copied_should_refuse_before_sdk_start(monkeypatch: pytest.MonkeyPatch) -> None:
     # Arrange
     started: list[Any] = []
     monkeypatch.setattr(entry, "configure_logging", lambda: None)
     # Act / Assert
-    with pytest.raises(SettingsInvalid):
-        entry.main(start=started.append, env={**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.1.0"})
+    with pytest.raises(SettingsInvalid, match="every live protocol version"):
+        entry.main(start=started.append, env={**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0"})
     assert not started
+
+
+def test_acquire_entry_when_every_live_version_is_listed_should_reach_the_sdk_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    started: list[Any] = []
+    monkeypatch.setattr(entry, "configure_logging", lambda: None)
+    # Act
+    entry.main(start=started.append, env={**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.0.0,2.1.0"})
+    # Assert
+    assert len(started) == 1
 
 
 def test_acquire_entry_when_started_should_configure_logging_before_boot_and_sdk(monkeypatch: pytest.MonkeyPatch) -> None:

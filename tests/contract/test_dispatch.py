@@ -20,10 +20,14 @@ from core.protocol import files, gate, pipeline, schema, signing
 from core.protocol.dispatch import AcceptedDispatch, DispatchRefused, accept_dispatch
 from core.protocol.reasons import Layer, ReasonCode
 from tests.contract.v2_support import (
+    ACQUIRE_PROTOCOL_VERSION,
+    ACQUIRE_REQUEST,
     FIXTURE_NOW,
     GRANT_ENCRYPTED,
     HUB_KEY,
     HUB_KEY_ID,
+    LIVE_PROTOCOL_VERSIONS,
+    PROTOCOL_VERSION,
     REMOVED,
     REQUEST_ENCRYPTED,
     REQUEST_UNENCRYPTED,
@@ -56,7 +60,7 @@ ONE_DAY = timedelta(days=1)
 REQUEST_WITH_BOUNDED_EXPIRY = "fixtures/request/P20-claim-expired-exactly-300s-ago.json"
 OTHER_WORKER_AUDIENCE = "worker:another-worker"
 UNHELD_KEY_ID = "test-hub2wk-k9"
-RELEASE_VERSION_NOT_LISTED = "2.1.0"
+VERSION_THE_WORKER_DOES_NOT_LIST = "2.1.0"
 MILLISECOND_EXPIRY = "2030-01-01T00:50:00.123Z"
 MILLISECOND_EXPIRY_MICROSECONDS = 123_000
 # A value no refusal may show, placed in the request's object key.
@@ -387,7 +391,7 @@ def test_accept_dispatch_when_the_message_changed_after_signing_should_refuse_at
             id="claim-expired-one-second-beyond-the-skew",
         ),
         pytest.param(
-            {"/protocol_version": RELEASE_VERSION_NOT_LISTED},
+            {"/protocol_version": VERSION_THE_WORKER_DOES_NOT_LIST},
             Layer.VERSION,
             ReasonCode.UNSUPPORTED_VERSION,
             id="a-version-the-worker-does-not-accept",
@@ -407,6 +411,40 @@ def test_accept_dispatch_when_a_correctly_signed_request_fails_validation_should
     # Assert
     assert refusal.step == STEP_VALIDATION
     assert (refusal.verdict.layer, refusal.verdict.reason) == (layer, reason)
+
+
+@pytest.mark.parametrize("version", [PROTOCOL_VERSION, ACQUIRE_PROTOCOL_VERSION])
+def test_accept_dispatch_when_every_live_version_is_listed_should_accept_a_transcode_request_and_keep_its_version(version):
+    # Arrange
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    job_input = signed_carrier(modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": version}), HUB_KEY)
+
+    # Act
+    dispatch = accept_dispatch(job_input, settings=settings, now=FIXTURE_NOW)
+
+    # Assert
+    assert dispatch.protocol_version == version
+
+
+@pytest.mark.parametrize(
+    ("version", "reason"),
+    [
+        pytest.param(ACQUIRE_PROTOCOL_VERSION, ReasonCode.UNEXPECTED_MESSAGE_KIND, id="at-its-own-version"),
+        pytest.param(PROTOCOL_VERSION, ReasonCode.UNKNOWN_MESSAGE_KIND, id="at-a-version-without-the-kind"),
+    ],
+)
+def test_accept_dispatch_when_the_encode_endpoint_is_sent_a_signed_acquire_request_should_refuse_the_kind(version, reason):
+    # Arrange: the version is listed, the signature is the Hub's; only the kind is not this endpoint's.
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    job_input = signed_carrier(modified_fixture(ACQUIRE_REQUEST, {"/protocol_version": version}), HUB_KEY)
+
+    # Act
+    with pytest.raises(DispatchRefused) as raised:
+        accept_dispatch(job_input, settings=settings, now=FIXTURE_NOW)
+
+    # Assert
+    assert raised.value.step == STEP_VALIDATION
+    assert (raised.value.verdict.layer, raised.value.verdict.reason) == (Layer.VERSION, reason)
 
 
 @pytest.mark.parametrize(

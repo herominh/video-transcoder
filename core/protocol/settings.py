@@ -2,8 +2,14 @@
 
 Everything here comes from the worker's own configuration, never from a message:
 
-    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; production
-                                    uses 2.0.0 from the live list, and there is no default
+    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; both RunPod
+                                    endpoints use 2.0.0,2.1.0, an unknown or draft entry refuses the start,
+                                    and there is no default. Listing a version does not accept all its
+                                    kinds: each RunPod entry point accepts only its own family's dispatch.
+                                    Every entry point lists the first live version, which the Hub's
+                                    unsigned last-resort refusal speaks; the acquire entry point also
+                                    refuses a list without every live version, while the encode one
+                                    takes the first live version alone while an image rolls out
     VH_WORKER_AUDIENCE              this worker's audience, `worker:<name>` (the contract audience)
     VH_HUB_TO_WORKER_KEYS           `kid=hex,kid=hex`: 1 to 8 keys the Hub signs with, distinct ids and
                                     distinct keys
@@ -174,6 +180,10 @@ class WorkerSettings(ProtocolSettings):
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> WorkerSettings:
         common = ProtocolSettings.from_env(env)
+        first_live = load_registry().accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)[0]
+        if first_live not in common.accepted_protocol_versions:
+            # Every endpoint lists it: the Hub's unsigned last-resort refusal speaks the first live version.
+            raise SettingsInvalid(VERSIONS_VARIABLE, "must list the first live protocol version, which the Hub's unsigned refusal speaks")
         return cls(**vars(common), storage_profiles=MappingProxyType(_storage_profiles(env)))
 
 
@@ -187,6 +197,10 @@ class AcquireSettings(ProtocolSettings):
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> AcquireSettings:
         common = ProtocolSettings.from_env(env)
+        live_versions = load_registry().accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)
+        if set(common.accepted_protocol_versions) != set(live_versions):
+            # Without the newer version it refuses every request; without the older it cannot read a Hub refusal.
+            raise SettingsInvalid(VERSIONS_VARIABLE, "must list every live protocol version for acquire")
         if common.clock_skew_s != load_registry().clock_skew_seconds:
             raise SettingsInvalid(CLOCK_SKEW_VARIABLE, "must equal the contract clock skew for acquire")
         key = _text(env, ACQUIRE_GOOGLE_KEY_VARIABLE)

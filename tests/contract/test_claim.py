@@ -32,6 +32,8 @@ from core.protocol.reasons import ReasonCode
 from core.protocol.registry import MessageKind, load_registry
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
+    ACQUIRE_GRANT,
+    ACQUIRE_PROTOCOL_VERSION,
     CELL_ID,
     CLAIM_URL,
     FIXTURE_NOW,
@@ -39,8 +41,10 @@ from tests.contract.v2_support import (
     GRANT_UNENCRYPTED,
     HUB_CLAIM_CONTEXT,
     HUB_KEY,
+    LIVE_PROTOCOL_VERSIONS,
     LOG_PROBE,
     MEDIA_KEY_HEX,
+    PROTOCOL_VERSION,
     REQUEST_ENCRYPTED,
     REQUEST_UNENCRYPTED,
     RUNTIME_ID,
@@ -178,6 +182,28 @@ def _claim(
         new_message_id=uuid_source(),
         wall_time_ends_at=clock.monotonic() + wall_time_left_s,
     )
+
+
+def _claim_with_every_live_version_listed(dispatch_version: str, grant_version: str) -> tuple[Grant | Unclaimed, FakeTransport]:
+    """What a worker that lists every live version makes of a dispatch and a validly signed grant at those versions."""
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    clock = FakeClock()
+    dispatch = accepted_dispatch(
+        modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": dispatch_version}), settings=settings
+    )
+    transport = FakeTransport(_changed_grant({"/protocol_version": grant_version}), clock=clock)
+    outcome = claim_execution(
+        dispatch,
+        settings=settings,
+        runtime_id=RUNTIME_ID,
+        transport=transport,
+        clock=clock,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        new_message_id=uuid_source(),
+        wall_time_ends_at=clock.monotonic() + LONGEST_PATIENCE_S,
+    )
+    return outcome, transport
 
 
 def _granted(path: str = GRANT_ENCRYPTED) -> HttpAnswer:
@@ -403,6 +429,60 @@ NOT_A_GRANT_FOR_THIS_RUNTIME = [
         id="one-byte-above-the-limit",
     ),
 ]
+
+
+def test_claim_execution_when_an_acquire_grant_comes_at_the_dispatchs_version_should_end_invalid_at_the_kind_check(caplog):
+    # Arrange: a Hub-signed acquire grant, at 2.1.0 like the encode dispatch: only its kind is wrong.
+    caplog.set_level(logging.INFO, logger=claim_module.__name__)
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    clock = FakeClock()
+    dispatch = accepted_dispatch(
+        modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION}), settings=settings
+    )
+    transport = FakeTransport(signed_answer(files.read_bytes(ACQUIRE_GRANT), HUB_KEY), clock=clock)
+
+    # Act
+    outcome = claim_execution(
+        dispatch,
+        settings=settings,
+        runtime_id=RUNTIME_ID,
+        transport=transport,
+        clock=clock,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        new_message_id=uuid_source(),
+        wall_time_ends_at=clock.monotonic() + LONGEST_PATIENCE_S,
+    )
+
+    # Assert: no Grant, so nothing is handed to a job; one answer read, and no second claim.
+    assert outcome == Unclaimed(CAUSE_INVALID_ANSWER)
+    assert len(transport.calls) == 1
+    assert "validation: version/unexpected_message_kind" in caplog.text
+
+
+@pytest.mark.parametrize("version", [PROTOCOL_VERSION, ACQUIRE_PROTOCOL_VERSION])
+def test_claim_execution_when_every_live_version_is_listed_should_claim_and_accept_a_grant_at_the_dispatchs_version(version):
+    # Act
+    outcome, transport = _claim_with_every_live_version_listed(version, version)
+
+    # Assert
+    assert isinstance(outcome, Grant)
+    assert [claim["protocol_version"] for claim in _sent(transport)] == [version]
+
+
+@pytest.mark.parametrize(
+    ("dispatch_version", "grant_version"),
+    [(PROTOCOL_VERSION, ACQUIRE_PROTOCOL_VERSION), (ACQUIRE_PROTOCOL_VERSION, PROTOCOL_VERSION)],
+)
+def test_claim_execution_when_a_signed_grant_speaks_another_live_version_than_its_dispatch_should_end_invalid_after_one_post(
+    dispatch_version, grant_version
+):
+    # Act
+    outcome, transport = _claim_with_every_live_version_listed(dispatch_version, grant_version)
+
+    # Assert: a valid signature at another listed version does not change the dispatch's version (README section 5).
+    assert outcome == Unclaimed(CAUSE_INVALID_ANSWER)
+    assert len(transport.calls) == 1
 
 
 @pytest.mark.parametrize(("request_path", "answer", "reason"), NOT_A_GRANT_FOR_THIS_RUNTIME)

@@ -47,11 +47,13 @@ from core.protocol.registry import MessageKind
 from core.protocol.settings import SettingsInvalid, WorkerSettings
 from core.protocol.transport import HttpAnswer, HttpsTransport, TransportFailed
 from tests.contract.v2_support import (
+    ACQUIRE_PROTOCOL_VERSION,
     CALLBACK_URL,
     CLAIM_URL,
     GRANT_ENCRYPTED,
     HUB_KEY,
     HUB_UNCLAIMED_POLL_CONTEXT,
+    LIVE_PROTOCOL_VERSIONS,
     LOG_PROBE,
     MEDIA_KEY_HEX,
     REQUEST_ENCRYPTED,
@@ -353,6 +355,32 @@ def _a_grant() -> Grant:
 def _all_a_grant_holds(grant: Grant) -> types.SimpleNamespace:
     """Every field of the grant, in a value of a class that is not Grant."""
     return types.SimpleNamespace(**{field.name: getattr(grant, field.name) for field in dataclasses.fields(grant)})
+
+
+def test_handle_when_a_dispatch_at_the_newer_version_meets_the_hubs_first_version_refusal_should_report_at_its_own_version():
+    # Arrange: the Hub's unsigned refusal speaks 2.0.0 whatever the dispatch's version; the worker lists both.
+    clock = FakeClock()
+    transport = _transport(clock, CLAIM_REFUSED)
+    runtime = dataclasses.replace(
+        _runtime(transport, clock), settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    )
+    job = StandInJob()
+    request = modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION})
+
+    # Act
+    output = handle(signed_carrier(request, HUB_KEY), runtime=runtime, run_job=job)
+
+    # Assert
+    body = output["vh_message"].encode("ascii")
+    report = json.loads(body)
+    hub_context = catalog_context(
+        HUB_UNCLAIMED_POLL_CONTEXT, now=clock(), known_key_ids=[WORKER_KEY_ID],
+        accepted_protocol_versions=[ACQUIRE_PROTOCOL_VERSION],
+    )
+    assert job.calls == []
+    assert pipeline.validate(body, hub_context).accepted
+    assert report["protocol_version"] == ACQUIRE_PROTOCOL_VERSION
+    assert (report["cause"], report[HUB_ERROR_CODE_MEMBER]) == (CAUSE_REFUSED, REFUSAL_CODE)
 
 
 @pytest.mark.parametrize(

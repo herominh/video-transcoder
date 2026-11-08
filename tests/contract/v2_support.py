@@ -25,6 +25,9 @@ from core.protocol.transport import HttpAnswer
 
 FIXTURE_NOW: Final = datetime(2030, 1, 1, tzinfo=timezone.utc)
 PROTOCOL_VERSION: Final = "2.0.0"
+ACQUIRE_PROTOCOL_VERSION: Final = "2.1.0"
+# What both RunPod endpoints set as VH_ACCEPTED_PROTOCOL_VERSIONS: every live protocol version.
+LIVE_PROTOCOL_VERSIONS: Final = "2.0.0,2.1.0"
 WORKER_AUDIENCE: Final = "worker:runpod-test"
 HUB_KEY_ID: Final = "test-hub2wk-k1"
 WORKER_KEY_ID: Final = "test-wk2hub-k1"
@@ -34,6 +37,8 @@ MEDIA_KEY_HEX: Final = "00112233445566778899aabbccddeeff"
 
 REQUEST_ENCRYPTED: Final = "fixtures/request/P01-encrypted-three-renditions.json"
 REQUEST_UNENCRYPTED: Final = "fixtures/request/P02-unencrypted.json"
+ACQUIRE_REQUEST: Final = "fixtures/acquire-request/P30-minimum.json"
+ACQUIRE_GRANT: Final = "fixtures/acquire-grant/P35-one-part.json"
 GRANT_ENCRYPTED: Final = "fixtures/claim-granted/P24-grant-to-the-claiming-runtime.json"
 GRANT_UNENCRYPTED: Final = "fixtures/claim-granted/P27-unencrypted-grant-without-media-key.json"
 UNCLAIMED_REFUSED: Final = "fixtures/unclaimed/P25-refused-with-claim-conflict.json"
