@@ -1,8 +1,10 @@
-"""The Drive transfer's own rules, through a whole acquire: Google's refusals and how they map, the metadata asked
-again before any write, redirects never followed, the download's tries and its resumption, the size and the
-checksums, and the store's PUTs with their tries and ETags. Google and the store are tests/drive_import/fakes.py's
-session; nothing opens a connection. These cases ran through the import/v1 job until its retirement (TD-184) and
-hold the same transfer code, which only the acquire runs now."""
+"""The Drive transfer's own rules, through a whole acquire: Google's refusals and how they map, the metadata asked again
+before any write, redirects never followed, the download's tries and its resumption, the size and the checksums, and
+the store's PUTs with their tries and ETags; and, on transfer() alone under a fake stop line, what a whole acquire
+cannot show (each request's time-outs, the stop line handed, every answer closed, a try that fails after the stop
+line). Google and the store are tests/drive_import/fakes.py's session; nothing opens a connection. These cases ran
+through the import/v1 job until its retirement (TD-184) and hold the same transfer code, which only the acquire runs
+now."""
 
 from __future__ import annotations
 

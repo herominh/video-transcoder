@@ -39,7 +39,7 @@ class Stage(StrEnum):
 
 
 class ImportFailed(Exception):
-    """The job ends as `failed` with `code`, at `stage`. Its text is the two names and nothing else."""
+    """The transfer ends as failed with `code`, at `stage`. Its text is the two names and nothing else."""
 
     def __init__(self, code: Code, stage: Stage) -> None:
         super().__init__(f"{code.value} at {stage.value}")

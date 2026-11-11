@@ -1,4 +1,4 @@
-"""RunPod CPU entry for signed source.acquire requests; v1 remains a separate entry."""
+"""RunPod CPU entry for signed source.acquire requests (protocol 2.1.0)."""
 
 from __future__ import annotations
 

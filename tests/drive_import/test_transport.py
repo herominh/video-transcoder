@@ -1,11 +1,11 @@
-"""The real session (RequestsSession) against a server of the test's own on the loopback address: it follows no
-redirect and reads no redirect's body, reads no proxy from the environment, never reads a PUT's answer body, sends a
-BoundedBody whole with its length or stops it at the stop line, and its watchdog ends at the stop line a request
-that a trickling or silent server would hold far longer, a TLS handshake whose server never answers included, and
-lets no connection whose name resolution or TCP connect straddled the stop line go on, so that the acquire answers
-`deadline` within a moment of it (tests/acquire/test_transport.py drives a whole acquire through this server). The server speaks plain HTTP and, with a throwaway self-signed certificate for
-127.0.0.1 made by the test (`cryptography`) and trusted by the session, HTTPS, the scheme the acquire uses. Nothing leaves
-the host."""
+"""The real session (RequestsSession) against a server of the test's own on the loopback address: it follows no redirect
+and reads no redirect's body, reads no proxy from the environment, never reads a PUT's answer body, sends a
+BoundedBody whole with its length or stops it at the stop line, and its watchdog ends at the stop line a request that
+a trickling or silent server would hold far longer, a TLS handshake whose server never answers included, and lets no
+connection whose name resolution or TCP connect straddled the stop line go on, so that the acquire answers `deadline`
+within a moment of it (tests/acquire/test_transport.py drives a whole acquire through this server). The server speaks
+plain HTTP and, with a throwaway self-signed certificate for 127.0.0.1 made by the test (`cryptography`) and trusted
+by the session, HTTPS, the scheme the acquire uses. Nothing leaves the host."""
 
 from __future__ import annotations
 

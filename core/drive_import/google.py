@@ -239,7 +239,8 @@ def change_at_provider(job: GoogleFile, metadata: Mapping[str, Any]) -> Code | N
 
     In the trash: `file_removed`. Its owner lets viewers no longer download it (`capabilities.canDownload` present
     and not true): `link_not_shared`. Its size, always, and each of the MD5, the SHA-1, the SHA-256 and the head
-    revision the input carries (a value the input does not carry is not compared, however Google answers it now):
+    revision the dispatch carries (a value the dispatch does not carry is not compared, however Google answers it
+    now):
     any difference, a value Google no longer gives included, is `source_changed_at_provider`.
     """
     if metadata.get(TRASHED_FIELD, False) is not False:

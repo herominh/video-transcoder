@@ -327,7 +327,7 @@ class _Transfer:
         return self._written, checksum_verified
 
     def _verified(self) -> str:
-        """The strongest of Google's checksums the input carries, which the whole stream must match."""
+        """The strongest of Google's checksums the dispatch carries, which the whole stream must match."""
         if self._job.expected_sha256 is not None:
             if self._sha256.hexdigest() != self._job.expected_sha256:
                 raise ImportFailed(Code.INTEGRITY_FAILED, Stage.VERIFY)

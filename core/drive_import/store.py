@@ -7,8 +7,9 @@ watchdog when it comes), and is made again after a wait (0.5, 2 and 8 seconds, e
 line) on a 5xx, a 408, a 429 or a transfer that failed; any other answer but a 200 ends the job at once as
 `upload_failed`, a redirect included (none is followed). Its answer's body is never read. Tries used up after the stop
 line has passed are the stop line's: `deadline`.
-A part's 200 must carry the store's ETag in the result's form (acquire-common.schema.json `part_etag`): one pair of surrounding quotes taken off, then 1
-to 128 printable ASCII characters with no space and no `"`; a missing or other one is `upload_failed`.
+A part's 200 must carry the store's ETag: one pair of surrounding quotes taken off, then 1 to 128 printable ASCII
+characters with no space and no `"`; a missing or other one is `upload_failed` (transfer.py also refuses one holding
+`://`, as the result's `part_etag` does).
 """
 
 from __future__ import annotations
