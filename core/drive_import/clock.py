@@ -1,30 +1,26 @@
-"""The import job's time: the clock it is handed, and its stop line.
+"""The Drive transfer's time: the clock it is handed, and its stop line.
 
-The stop line is the writer deadline less a margin (`writes_end_at` − 120 s; the Hub's import design, G-7): no
-request starts and no wait begins once it has passed, every request's time-outs are cut to what is left of it, a
-request body stops giving bytes when it passes (BoundedBody, core/drive_import/transport.py), and the session's
-watchdog, when it comes, shuts every connection of the job's requests (a TLS handshake under way included) and
-latches the session's expiry, so that a read or a write blocked on one ends then, and a connection whose name
-resolution or TCP connect straddled the stop line goes no further once they return (transport.RequestsSession;
-what nothing cuts short is the name resolution itself, which no time-out bounds and which has no socket to shut).
-A failure the job meets once the stop line has passed is the stop line's: the job answers `deadline`. The stop line
-is held on the monotonic clock, so that a step of the wall clock during the job moves it neither way.
+The stop line is the acquire's wall deadline (core/drive_import/acquire.py: the instant its start's wall time
+ends): no request starts and no wait begins once it has passed, every request's time-outs are cut to what is left
+of it, a request body stops giving bytes when it passes (BoundedBody, core/drive_import/transport.py), and the
+session's watchdog, when it comes, shuts every connection of the transfer's requests (a TLS handshake under way
+included) and latches the session's expiry, so that a read or a write blocked on one ends then, and a connection
+whose name resolution or TCP connect straddled the stop line goes no further once they return
+(transport.RequestsSession; what nothing cuts short is the name resolution itself, which no time-out bounds and
+which has no socket to shut). A failure the transfer meets once the stop line has passed is the stop line's: it
+answers `deadline`. The stop line is held on the monotonic clock, so that a step of the wall clock moves it neither
+way.
 """
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from typing import Protocol
 
 from core.drive_import.failure import Code, ImportFailed, Stage
 
-# How long before the writer deadline the job stops starting requests and ends with `deadline`.
-STOP_MARGIN = timedelta(seconds=120)
-
-
 class Clock(Protocol):
-    """What the job reads the time from and waits with."""
+    """What the transfer reads the time from and waits with."""
 
     def now(self) -> datetime:
         """The wall-clock time, aware and in UTC."""
@@ -36,19 +32,6 @@ class Clock(Protocol):
         """Wait `seconds`."""
 
 
-class SystemClock:
-    """The process's own clocks."""
-
-    def now(self) -> datetime:
-        return datetime.now(timezone.utc)
-
-    def monotonic(self) -> float:
-        return time.monotonic()
-
-    def sleep(self, seconds: float) -> None:
-        time.sleep(seconds)
-
-
 class DeadlineReached(Exception):
     """The stop line passed during a request, raised where the request stops: by a request body that had bytes left
     to send (transport.BoundedBody), by a connection of the real session whose setup the stop line overtook (after
@@ -57,17 +40,11 @@ class DeadlineReached(Exception):
 
 
 class StopLine:
-    """The instant, on the monotonic clock, after which the job starts nothing more."""
+    """The instant, on the monotonic clock, after which the transfer starts nothing more."""
 
     def __init__(self, clock: Clock, at_monotonic: float) -> None:
         self._clock = clock
         self._at = at_monotonic
-
-    @classmethod
-    def before(cls, writes_end_at: datetime, clock: Clock) -> StopLine:
-        """The stop line of a job whose writer deadline is `writes_end_at` (aware)."""
-        seconds_left = (writes_end_at - STOP_MARGIN - clock.now()).total_seconds()
-        return cls(clock, clock.monotonic() + seconds_left)
 
     def left_s(self) -> float:
         """Seconds until the stop line; zero or less once it has passed."""

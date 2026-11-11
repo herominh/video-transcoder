@@ -1,5 +1,6 @@
-"""How an import job ends when it does not import: one code of the contract's closed list (README section 4) and the
-stage it ended in, for the log. Neither holds anything of what the job read, sent or was answered."""
+"""How a Drive transfer ends when it does not complete: one code of the closed list the acquire maps to contract
+2.1.0's failures (core/protocol/acquire_messages.py) and the stage it ended in. Neither holds anything of what the
+transfer read, sent or was answered."""
 
 from __future__ import annotations
 
@@ -7,7 +8,7 @@ from enum import StrEnum
 
 
 class Code(StrEnum):
-    """The output's `code` of a failed job (output.schema.json)."""
+    """The code of a failed transfer, which the acquire's failed result carries."""
 
     FILE_REMOVED = "file_removed"
     LINK_NOT_SHARED = "link_not_shared"
@@ -25,7 +26,7 @@ class Code(StrEnum):
 
 
 class Stage(StrEnum):
-    """Where a job is: the log names it, the output never does."""
+    """Where a transfer is: the log names it, and the acquire maps it to the failed result's stage."""
 
     INPUT = "input"
     CONFIGURATION = "configuration"
@@ -33,6 +34,7 @@ class Stage(StrEnum):
     DOWNLOAD = "download"
     VERIFY = "verify"
     UPLOAD = "upload"
+    # The PUT of the acquire's signed result (named for the import/v1 receipt it replaced).
     RECEIPT = "receipt"
 
 

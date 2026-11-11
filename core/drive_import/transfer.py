@@ -1,4 +1,4 @@
-"""Shared Google metadata check and bounded multipart transfer for v1 and acquire."""
+"""The acquire's Google metadata check and bounded multipart transfer (contract 2.1.0)."""
 
 from __future__ import annotations
 
@@ -221,7 +221,7 @@ class _Transfer:
         self._written: list[CompletedPart] = []
 
     def run(self) -> tuple[list[CompletedPart], str]:
-        """Download the whole file and write every part; return the receipt's parts and `checksum_verified`."""
+        """Download the whole file and write every part; return the result's parts and `checksum_verified`."""
         while True:
             response = self._open()
             try:

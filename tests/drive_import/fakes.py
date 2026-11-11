@@ -1,14 +1,11 @@
-"""Shared helpers of the import job's tests: a clock, a Drive file, and one session that stands for Google and the
-store at once. Nothing here opens a connection.
+"""Shared helpers of the Drive transfer's tests (tests/acquire/ and tests/drive_import/): a clock, a Drive file, and
+one session that stands for Google and the store at once. Nothing here opens a connection.
 
-Not a test module. FakeClock moves only when the job waits or a test moves it. DriveFile is the file's bytes, made
-lazily block by block (each block of 1 MiB starts with its own number, so a byte out of place changes every
-checksum), with its checksums computed once. FakeSession answers the job's requests as the test scripts them:
+Not a test module. FakeClock moves only when the transfer waits or a test moves it. DriveFile is the file's bytes,
+made lazily block by block (each block of 1 MiB starts with its own number, so a byte out of place changes every
+checksum), with its checksums computed once. FakeSession answers the transfer's requests as the test scripts them:
 Google's metadata and download by default from the DriveFile, the store's PUTs with a 200 and the body's MD5 as the
 ETag (as S3 answers an UploadPart); every request is recorded, and a PUT's body is read as urllib3 reads one.
-import_input() builds a valid input document for a file, in the shape of the contract's running example, signed with
-the receipt key of the test's settings; signed() signs a document a test changed again, so that it reaches the rules
-after the MAC.
 """
 
 from __future__ import annotations
@@ -25,27 +22,20 @@ from typing import Any
 import requests
 from requests.structures import CaseInsensitiveDict
 
-from core.drive_import import contract
 from core.drive_import.clock import DeadlineReached, StopLine
-from core.drive_import.input_check import PART_SIZE
-from core.drive_import.settings import ImportSettings
+from core.drive_import.transfer import PART_SIZE
 
 START = datetime(2026, 10, 17, 8, 0, 0, tzinfo=timezone.utc)
-# The writer deadline of a test's input, from the clock's start: the stop line is 120 s before it.
-WRITE_WINDOW = timedelta(hours=1)
-STOP_MARGIN_S = 120.0
 
 STORAGE_HOST = "storage.example.invalid"
 BUCKET = "videohub-school-a"
 VIDEO_UUID = "0199f1a0-1111-7000-8000-000000000001"
-JOB_UUID = "0199f1a0-2222-7000-8000-000000000002"
 FILE_ID = "1CanaryFileIdOfTheDriveFile0123xyz"
 RESOURCE_KEY = "0-CanaryResourceKey01"
 HEAD_REVISION = "0BCanaryHeadRevision0123"
 UPLOAD_ID = "upload-canary-1"
 # Values no log line, error text or output may show.
 API_KEY = "CANARY-google-api-key-0123456789abcdef"
-RECEIPT_KEY = "CANARY-receipt-key-0123456789abcdefABCDEF"
 SIGNATURE_CANARY = "CANARY-signature"
 
 GOOGLE_FILES = "https://www.googleapis.com/drive/v3/files/"
@@ -55,16 +45,13 @@ METADATA_URL = (
 )
 MEDIA_URL = f"{GOOGLE_FILES}{FILE_ID}?alt=media&supportsAllDrives=true"
 ORIGINALS = f"https://{STORAGE_HOST}/{BUCKET}/original-videos/{VIDEO_UUID}/"
-RECEIPT_URL = f"{ORIGINALS}import-receipt-{JOB_UUID}.json?X-Amz-Expires=1013&X-Amz-Signature={SIGNATURE_CANARY}-r"
-# Where a redirect a test scripts points: the job must never ask it.
+# Where a redirect a test scripts points: the transfer must never ask it.
 REDIRECT_TARGET = "https://elsewhere.example.invalid/somewhere"
 
 BLOCK_BYTES = 1_048_576
 # The blocks urllib3 reads a file-like request body in.
 BODY_BLOCK_BYTES = 16_384
 MIB = 1_048_576
-# The running example of the tests: three parts, the last one MiB long.
-THREE_PARTS_SIZE = 2 * PART_SIZE + MIB
 
 
 def part_url(n: int) -> str:
@@ -72,23 +59,8 @@ def part_url(n: int) -> str:
     return f"{ORIGINALS}original.mp4?{query}"
 
 
-def settings(**changes: str | None) -> ImportSettings:
-    """The settings of a whole configuration, with `changes` (a None removes the variable)."""
-    env: dict[str, str] = {
-        "GOOGLE_DRIVE_API_KEY": API_KEY,
-        "IMPORT_RECEIPT_KEY": RECEIPT_KEY,
-        "IMPORT_STORAGE_HOST": STORAGE_HOST,
-    }
-    for name, value in changes.items():
-        if value is None:
-            env.pop(name, None)
-        else:
-            env[name] = value
-    return ImportSettings.from_env(env)
-
-
 class FakeClock:
-    """now() and monotonic() move only when the job sleeps or the test advances them; sleeps are recorded."""
+    """now() and monotonic() move only when the transfer sleeps or the test advances them; sleeps are recorded."""
 
     def __init__(self, start: datetime = START) -> None:
         self._now = start
@@ -108,10 +80,6 @@ class FakeClock:
     def advance(self, seconds: float) -> None:
         self._now += timedelta(seconds=seconds)
         self._monotonic += seconds
-
-    def stop_line_in(self) -> float:
-        """Seconds until the stop line of an input built by import_input() with the default window."""
-        return (START + WRITE_WINDOW - timedelta(seconds=STOP_MARGIN_S) - self._now).total_seconds()
 
 
 class DriveFile:
@@ -178,50 +146,6 @@ class DriveFile:
             "trashed": False,
             "capabilities": {"canDownload": True},
         }
-
-
-def import_input(
-    file: DriveFile,
-    *,
-    md5: bool = True,
-    sha1: bool = False,
-    sha256: bool = True,
-    head_revision: bool = True,
-    resource_key: str | None = None,
-    writes_end_at: datetime = START + WRITE_WINDOW,
-) -> dict[str, Any]:
-    """A valid input for `file`, carrying the checksums and head revision asked for."""
-    parts_total = -(-file.size // PART_SIZE)
-    return signed({
-        "contract": "import/v1",
-        "job": JOB_UUID,
-        "file_id": FILE_ID,
-        "resource_key": resource_key,
-        "expected": {
-            "size": file.size,
-            "md5": file.md5 if md5 else None,
-            "sha1": file.sha1 if sha1 else None,
-            "sha256": file.sha256 if sha256 else None,
-            "head_revision_id": HEAD_REVISION if head_revision else None,
-        },
-        "plan": {"part_size": PART_SIZE, "parts_total": parts_total},
-        "parts": [{"n": n, "url": part_url(n)} for n in range(1, parts_total + 1)],
-        "receipt_url": RECEIPT_URL,
-        "writes_end_at": _contract_time(writes_end_at),
-    })
-
-
-def signed(document: dict[str, Any], key: str = RECEIPT_KEY) -> dict[str, Any]:
-    """`document` with the MAC of its other members under `key` (README section 3.1)."""
-    unsigned = {name: value for name, value in document.items() if name != "mac"}
-    return {**unsigned, "mac": contract.input_mac(unsigned, key)}
-
-
-def _contract_time(instant: datetime) -> str:
-    """An aware time as the contract writes the writer deadline: UTC, seconds, a fraction only when there is one."""
-    utc = instant.astimezone(timezone.utc)
-    fraction = f".{utc.microsecond:06d}" if utc.microsecond else ""
-    return utc.strftime("%Y-%m-%dT%H:%M:%S") + fraction + "Z"
 
 
 # --- what the fake answers -----------------------------------------------------------------------------------------
@@ -397,20 +321,16 @@ class FakeSession:
         if isinstance(answer, FakeResponse):
             return self._answer(answer)
         digest = hashlib.md5()
-        seen = bytearray() if url == RECEIPT_URL else None
         try:
             for block in _blocks_of(data):
                 digest.update(block)
                 request.length += len(block)
-                if seen is not None:
-                    seen += block
                 self.clock.advance(answer.seconds_per_block)
         except DeadlineReached:
             # The body stopped giving bytes: the request ends there, as urllib3 lets the error through.
             request.cut = True
             raise
         request.md5 = digest.hexdigest()
-        request.body = bytes(seen) if seen is not None else None
         self.clock.advance(answer.seconds_after)
         headers_out = answer.headers if answer.headers is not None else {"ETag": f'"{request.md5}"'}
         if answer.status == 200 and answer.headers is None:
@@ -427,20 +347,11 @@ class FakeSession:
 
     @property
     def part_puts(self) -> list[Request]:
-        return [r for r in self.requests if r.method == "PUT" and r.url != RECEIPT_URL]
-
-    @property
-    def receipt_puts(self) -> list[Request]:
-        return self.of("PUT", RECEIPT_URL)
+        return self.of("PUT")
 
     @property
     def media_gets(self) -> list[Request]:
         return self.of("GET", MEDIA_URL)
-
-    def receipt(self) -> dict[str, Any]:
-        (put,) = [r for r in self.receipt_puts if r.body is not None]
-        assert put.body is not None
-        return json.loads(put.body.decode("ascii"))
 
     # --- answering -----------------------------------------------------------------------------------------------
 

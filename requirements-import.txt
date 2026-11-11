@@ -1,4 +1,4 @@
-# Direct requirements of the Google Drive import. Dockerfile.import installs requirements-import.lock compiled
+# Direct requirements of the Google Drive acquire. Dockerfile.acquire installs requirements-import.lock compiled
 # from this input, never this file. requests and urllib3 stay pinned exactly: the watchdog's connection classes
 # and the redirect rule rest on their internals, and urllib3 2 refuses a body cut short (enforce_content_length),
 # where 1.26 reads it as a clean end. tests/drive_import/test_transport.py drives the real session at these pins.

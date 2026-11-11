@@ -1,11 +1,10 @@
-"""The Google Drive import job (contract import/v1; the Hub's issue #50 item 3b).
+"""The Google Drive acquire (contract v2, protocol 2.1.0, `source.acquire`; the Hub's issue #51 item 19).
 
-One RunPod job of the import endpoint downloads one Drive file and writes it, part by part, into the multipart
-upload the Hub opened, through the presigned URLs of the job's input, then writes one receipt signed with the
-receipt key. The contract tree lives in tests/contracts/import/v1/ (a byte-identical copy of the Hub's
-laravel/resources/contracts/import/v1/, shipped in the import image at the same relative path); its README.md is
-the normative rule text. contract.verify_import_contract_tree() is the fail-closed start-up check of that tree;
-input_check holds the input's rules beyond its schema; job.run_import() is one job. The entry point is
-wrappers/runpod_import_handler.py. This package imports nothing of the transcode contract (core.protocol), of the
-job runner (core.job) or of the v1 modules, and they import nothing of it (tests/test_runtime_scope.py).
+One RunPod job of the acquire endpoint downloads one Drive file and writes it, part by part, into the multipart
+upload the Hub opened, through the presigned URLs of its claim grant, then writes its signed result through the
+grant's result URL. acquire.handle() is one start (wrappers/runpod_acquire_handler.py is the entry point); the
+transfer itself is transfer.py over google.py, store.py and transport.py, held to the start's wall deadline by
+clock.StopLine. Only acquire.py reaches the contract (core.protocol); the transcode's job runner (core.job) and the
+v1 modules are not reached, and the transcode entry reaches none of this package (tests/test_runtime_scope.py).
+The first Drive import, contract import/v1, is retired on both sides (TD-184).
 """
