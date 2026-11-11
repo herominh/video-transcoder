@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Iterator
+import logging
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import pytest
 import requests
 
-from core.drive_import.transfer import DOWNLOAD_CHUNK_BYTES
-from tests.acquire.support import PART_SIZE, Scenario, grant_for
+from core.drive_import.clock import StopLine
+from core.drive_import.failure import Code, ImportFailed, Stage
+from core.drive_import.transfer import DOWNLOAD_CHUNK_BYTES, Part, TransferPlan, TransferResult, transfer
+from tests.acquire.support import PART_SIZE, SIGNATURE_CANARY, Scenario, grant_for
 from tests.drive_import.fakes import (
-    API_KEY, FILE_ID, METADATA_URL, MEDIA_URL, MIB, REDIRECT_TARGET, RESOURCE_KEY, DriveFile, Fail, FakeResponse, Put,
-    Serve, google_error, json_answer, redirect,
+    API_KEY, FILE_ID, HEAD_REVISION, METADATA_URL, MEDIA_URL, MIB, REDIRECT_TARGET, RESOURCE_KEY, STORAGE_HOST, DriveFile,
+    Fail, FakeClock, FakeResponse, FakeSession, Late, Put, Serve, google_error, json_answer, part_url, redirect,
 )
 
 TWO_PARTS = PART_SIZE + 37
@@ -588,3 +591,205 @@ def test_acquire_when_the_wall_deadline_passes_while_a_part_is_sent_should_cut_i
     assert (outcome["error"]["code"], outcome["error"]["stage"]) == ("deadline", "uploading")
     assert put.cut and put.length < MIB
     assert scenario.http.result_puts == []
+
+
+# --- the stop line, at the transfer itself -----------------------------------------------------------------------
+# A whole acquire answers `deadline` for every failure once its wall deadline has passed, so the transfer's own rule
+# (a try that fails after the stop line is the stop line's, never its own code) is held here, on transfer() alone.
+
+THREE_PARTS = 2 * PART_SIZE + MIB
+STOP_S = 60.0
+
+
+def _transfer(
+    file: DriveFile, *, stop_s: float = STOP_S, script: Callable[[FakeSession, FakeClock], None] = lambda s, c: None,
+) -> tuple[TransferResult | ImportFailed, FakeSession, FakeClock, StopLine]:
+    """One transfer of `file`, its stop line `stop_s` away on a fake clock, after `script` set up the answers."""
+    clock = FakeClock()
+    session = FakeSession(file, clock)
+    script(session, clock)
+    parts = tuple(Part(n, part_url(n)) for n in range(1, -(-file.size // PART_SIZE) + 1))
+    stop_line = StopLine(clock, clock.monotonic() + stop_s)
+    plan = TransferPlan(FILE_ID, None, file.size, file.md5, None, file.sha256, HEAD_REVISION, PART_SIZE, parts, stop_line)
+    try:
+        ended: TransferResult | ImportFailed = transfer(plan, API_KEY, session)
+    except ImportFailed as failure:
+        ended = failure
+    return ended, session, clock, stop_line
+
+
+def _ended_with(ended: object, code: Code, stage: Stage) -> bool:
+    return isinstance(ended, ImportFailed) and (ended.code, ended.stage) == (code, stage)
+
+
+PAST_THE_STOP_LINE_S = STOP_S + 1
+
+
+def test_transfer_when_far_from_its_stop_line_should_give_each_request_its_own_time_outs() -> None:
+    # Arrange: two whole parts and a short last one, the stop line far away
+    file = DriveFile(THREE_PARTS)
+    # Act
+    ended, session, _, _ = _transfer(file, stop_s=3600.0)
+    # Assert: connect 10 s; Google's metadata 30 s and bytes 60 s; a PUT at least 60 s, a second per MiB beyond
+    assert isinstance(ended, TransferResult)
+    assert [request.timeout for request in session.of("GET")] == [(10.0, 30.0), (10.0, 60.0)]
+    assert [request.timeout for request in session.of("PUT")] == [(10.0, 64.0), (10.0, 64.0), (10.0, 60.0)]
+
+
+def test_transfer_when_its_stop_line_is_near_should_cut_every_requests_time_outs_to_what_is_left() -> None:
+    # Act: the stop line 30 s away
+    ended, session, _, _ = _transfer(DriveFile(THREE_PARTS), stop_s=30.0)
+    # Assert
+    assert isinstance(ended, TransferResult)
+    assert {request.timeout for request in session.requests} == {(10.0, 30.0)}
+
+
+def test_transfer_when_it_asks_should_hand_every_request_its_stop_line_and_close_every_answer() -> None:
+    # Act
+    ended, session, _, stop_line = _transfer(DriveFile(THREE_PARTS))
+    # Assert: the session is the caller's to close; every answer is closed by the transfer
+    assert isinstance(ended, TransferResult)
+    assert len(session.stop_lines) == len(session.requests)
+    assert all(given is stop_line for given in session.stop_lines)
+    assert not session.closed
+    assert session.answers and all(answer.closed for answer in session.answers)
+
+
+def test_transfer_when_its_stop_line_has_passed_at_the_start_should_end_deadline_without_a_request() -> None:
+    # Act
+    ended, session, _, _ = _transfer(DriveFile(MIB), stop_s=-1.0)
+    # Assert
+    assert _ended_with(ended, Code.DEADLINE, Stage.INPUT)
+    assert session.requests == []
+
+
+def test_transfer_when_the_metadata_fails_after_the_stop_line_should_end_deadline() -> None:
+    # Arrange: the third try's 503 comes once the clock has passed the stop line
+    def script(session: FakeSession, clock: FakeClock) -> None:
+        session.metadata += [FakeResponse(503), FakeResponse(503), Late(FakeResponse(503), PAST_THE_STOP_LINE_S)]
+
+    # Act
+    ended, session, _, _ = _transfer(DriveFile(MIB), script=script)
+    # Assert: not `download_failed`, though the tries are used up
+    assert _ended_with(ended, Code.DEADLINE, Stage.METADATA)
+    assert session.media_gets == []
+
+
+def test_transfer_when_the_last_download_try_breaks_after_the_stop_line_should_end_deadline() -> None:
+    # Arrange: the second part's third request breaks once the clock has passed the stop line
+    def script(session: FakeSession, clock: FakeClock) -> None:
+        session.media += [
+            Serve(break_after=PART_SIZE + MIB), Serve(break_after=MIB),
+            Serve(break_after=MIB, seconds_before_break=PAST_THE_STOP_LINE_S),
+        ]
+
+    # Act
+    ended, session, _, _ = _transfer(DriveFile(THREE_PARTS), script=script)
+    # Assert
+    assert _ended_with(ended, Code.DEADLINE, Stage.DOWNLOAD)
+    assert len(session.media_gets) == 3
+
+
+@pytest.mark.parametrize("more", [b"", b"x" * MIB], ids=["the-stream-ends-cleanly", "a-chunk-comes-after-it"])
+def test_transfer_when_the_stop_line_passes_while_the_stream_is_read_should_end_deadline_without_writing(
+    more: bytes,
+) -> None:
+    # Arrange: half the file, then the clock passes the stop line; the stream ends there (a body framed by the
+    # connection's close, which the watchdog's shutdown ends without an error) or gives another chunk
+    file = DriveFile(MIB)
+
+    def script(session: FakeSession, clock: FakeClock) -> None:
+        def chunks(chunk_size: int) -> Iterator[bytes]:
+            yield file.bytes(0, MIB // 2)
+            clock.advance(PAST_THE_STOP_LINE_S)
+            if more:
+                yield more
+
+        session.media.append(FakeResponse(200, chunks=chunks))
+
+    # Act
+    ended, session, _, _ = _transfer(file, script=script)
+    # Assert: `deadline`, never `size_short`, and nothing written
+    assert isinstance(ended, ImportFailed) and ended.code is Code.DEADLINE
+    assert session.of("PUT") == []
+
+
+def test_transfer_when_the_last_put_try_fails_after_the_stop_line_should_end_deadline() -> None:
+    # Arrange
+    def script(session: FakeSession, clock: FakeClock) -> None:
+        session.puts[part_url(1)] = [Put(500), Put(500), Put(500), Put(500, seconds_after=PAST_THE_STOP_LINE_S)]
+
+    # Act
+    ended, session, _, _ = _transfer(DriveFile(MIB), script=script)
+    # Assert: not `upload_failed`, though the tries are used up
+    assert _ended_with(ended, Code.DEADLINE, Stage.UPLOAD)
+    assert len(session.of("PUT")) == 4
+
+
+def test_transfer_when_a_wait_before_another_try_would_pass_the_stop_line_should_end_deadline_without_waiting() -> None:
+    # Arrange: the first PUT fails 0.4 s before the stop line
+    def script(session: FakeSession, clock: FakeClock) -> None:
+        session.puts[part_url(1)] = [Put(500, seconds_after=STOP_S - 0.4)]
+
+    # Act
+    ended, session, clock, _ = _transfer(DriveFile(MIB), script=script)
+    # Assert
+    assert _ended_with(ended, Code.DEADLINE, Stage.UPLOAD)
+    assert len(session.of("PUT")) == 1 and clock.slept == []
+
+
+def test_transfer_when_the_stop_line_passes_before_the_last_part_should_end_deadline_and_ask_nothing_more() -> None:
+    # Arrange: the second part's PUT takes the clock past the stop line
+    def script(session: FakeSession, clock: FakeClock) -> None:
+        session.puts[part_url(2)] = [Put(seconds_after=PAST_THE_STOP_LINE_S)]
+
+    # Act
+    ended, session, _, _ = _transfer(DriveFile(THREE_PARTS), script=script)
+    # Assert: what was written stays; nothing more is asked
+    assert isinstance(ended, ImportFailed) and ended.code is Code.DEADLINE
+    assert [put.url for put in session.of("PUT")] == [part_url(1), part_url(2)]
+    assert session.requests[-1].url == part_url(2)
+
+
+# --- what never leaves an acquire --------------------------------------------------------------------------------
+
+# What no log line, log argument or failed result may hold, whatever else it holds.
+NEVER_SHOWN = (API_KEY, FILE_ID, RESOURCE_KEY, SIGNATURE_CANARY, STORAGE_HOST, "https://", "googleapis", "X-Amz",
+               "Google's own text")
+
+
+@pytest.mark.parametrize(
+    ("size", "script", "code"),
+    [
+        pytest.param(TWO_PARTS, lambda http: http.media.extend([Serve(break_after=PART_SIZE + 10), Serve(break_after=10)]),
+                     None, id="completed-after-two-resets"),
+        pytest.param(37, lambda http: http.metadata.extend([Fail(), FakeResponse(503)]), None,
+                     id="metadata-tried-again"),
+        pytest.param(37, lambda http: http.media.append(google_error(403, "downloadQuotaExceeded")), "provider_quota",
+                     id="provider-quota"),
+        pytest.param(37, lambda http: http.metadata.append(google_error(400, "keyInvalid")), "not_configured",
+                     id="key-invalid"),
+        pytest.param(MIB, lambda http: http.media.append(Serve(extra=MIB)), "size_exceeded", id="size-exceeded"),
+        pytest.param(TWO_PARTS, lambda http: http.media.extend(
+            [Serve(break_after=PART_SIZE + 10), Serve(break_after=10), Serve(break_after=10)]),
+            "download_failed", id="three-resets"),
+    ],
+)
+def test_acquire_when_it_ends_in_any_way_should_log_nothing_it_must_keep(
+    caplog: pytest.LogCaptureFixture, size: int, script: Callable[[Any], None], code: str | None,
+) -> None:
+    # Arrange
+    caplog.set_level(logging.DEBUG)
+    scenario = Scenario(size)
+    script(scenario.http)
+    # Act
+    outcome = _outcome(scenario)
+    # Assert: the ending is the one meant; no line or argument shows a secret, a URL or a store's ETag, a failed
+    # result shows neither, and no line carries an error (whose traceback would end with its text)
+    lines = [record.getMessage() for record in caplog.records] + [repr(record.args) for record in caplog.records]
+    etags = tuple(scenario.http.etags_given.values())
+    assert (outcome["error"]["code"] if code else outcome["message_kind"]) == (code or COMPLETED)
+    assert [value for value in (*NEVER_SHOWN, *etags) for line in lines if value in line] == []
+    if code:
+        assert [value for value in (*NEVER_SHOWN, *etags) if value in json.dumps(outcome)] == []
+    assert [record for record in caplog.records if record.exc_info or record.exc_text] == []
