@@ -9,14 +9,13 @@ The RunPod entry point (wrappers/runpod_handler.py) is the other side of that bo
 start of the worker under contract v2 (core.protocol.handler) and the job runner (core.job.runner), and
 none of the v1 worker's modules.
 
-The import endpoint's entry point (wrappers/runpod_import_handler.py; Dockerfile.import) reaches the v1 import
-job and its contract, with the shared transfer modules but no acquire orchestration or core.protocol/core.job.
 The acquire endpoint (wrappers/runpod_acquire_handler.py; Dockerfile.acquire) ships its explicit CPU closure and
-the v2 contract, with no v1 import contract/orchestration. The transcode entry reaches neither Drive endpoint.
+the v2 contract. The transcode entry does not reach it. The Drive import's first contract, import/v1, is retired on
+both sides (TD-184): no entry point, image or contract copy of it remains.
 
-The transcode image's build context leaves out what the shared one does and the import's files too: BuildKit reads
-Dockerfile.runpod.dockerignore in place of .dockerignore for Dockerfile.runpod, so its patterns are the shared
-file's, in their order, followed by the Drive import's exclusions.
+The transcode image's build context leaves out what the shared one does and the Drive acquire's files too: BuildKit
+reads Dockerfile.runpod.dockerignore in place of .dockerignore for Dockerfile.runpod, so its patterns are the shared
+file's, in their order, followed by the Drive acquire's exclusions.
 """
 
 import ast
@@ -30,17 +29,14 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 PROTOCOL_PACKAGE = "core.protocol"
 ENTRY_POINTS = ["core/api.py", "wrappers/modal_app.py", "wrappers/docker_server.py"]
 RUNPOD_ENTRY_POINT = "wrappers/runpod_handler.py"
-IMPORT_ENTRY_POINT = "wrappers/runpod_import_handler.py"
 ACQUIRE_ENTRY_POINT = "wrappers/runpod_acquire_handler.py"
 ACQUIRE_TRANSFER_MODULES = {
     "core.drive_import", "core.drive_import.acquire", "core.drive_import.transfer", "core.drive_import.google",
     "core.drive_import.store", "core.drive_import.transport", "core.drive_import.clock", "core.drive_import.failure",
 }
 IMPORT_PACKAGE = "core.drive_import"
-IMPORT_REQUIREMENTS = "requirements-import.lock"
-IMPORT_MODULE_FILES = (
-    "__init__", "job", "contract", "input_check", "settings", "transfer", "google", "store", "transport", "clock", "failure",
-)
+# The acquire image's hashed lock (its file name is the Drive import's, from before the acquire).
+ACQUIRE_REQUIREMENTS = "requirements-import.lock"
 # A requirement line's distribution name: what comes before a version specifier, an extra or a marker.
 REQUIREMENT_NAME = re.compile(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 JOB_PACKAGE = "core.job"
@@ -50,8 +46,14 @@ V1_MODULES = [
 ]
 SHARED_DOCKERIGNORE = ".dockerignore"
 RUNPOD_DOCKERIGNORE = "Dockerfile.runpod.dockerignore"
-# What the transcode image's build context leaves out beyond the shared one: the files of the import's own image.
-IMPORT_BUILD_EXCLUSIONS = ["core/drive_import/", IMPORT_ENTRY_POINT, ACQUIRE_ENTRY_POINT]
+# What the transcode image's build context leaves out beyond the shared one: the files of the acquire's own image.
+ACQUIRE_BUILD_EXCLUSIONS = ["core/drive_import/", ACQUIRE_ENTRY_POINT]
+# What the import/v1 retirement removed (TD-184): its entry point, its image, its orchestration and its contract.
+RETIRED_IMPORT_V1 = [
+    "wrappers/runpod_import_handler.py", "Dockerfile.import", "Dockerfile.import.dockerignore",
+    "core/drive_import/job.py", "core/drive_import/contract.py", "core/drive_import/input_check.py",
+    "core/drive_import/settings.py", "tests/contracts/import",
+]
 
 
 def _in_package(name: str, package: str) -> bool:
@@ -193,30 +195,12 @@ def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_a_v
     assert sorted(name for name in reachable if name in V1_MODULES) == []
 
 
-def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_the_import_job():
+def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_the_drive_acquire():
     # Act
     reachable = _reachable_modules(REPOSITORY_ROOT / RUNPOD_ENTRY_POINT)
 
     # Assert
     assert sorted(name for name in reachable if _in_package(name, IMPORT_PACKAGE)) == []
-
-
-def test_import_entry_point_when_its_imports_are_followed_should_reach_the_import_job_and_its_contract():
-    # Act
-    reachable = _reachable_modules(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
-
-    # Assert
-    assert {"core.drive_import.job", "core.drive_import.contract", "core.drive_import.input_check"} <= reachable
-
-
-def test_import_entry_point_when_its_imports_are_followed_should_never_reach_the_transcode_or_a_v1_module():
-    # Act
-    reachable = _reachable_modules(REPOSITORY_ROOT / IMPORT_ENTRY_POINT)
-
-    # Assert
-    transcode = [name for name in reachable if _in_package(name, PROTOCOL_PACKAGE) or _in_package(name, JOB_PACKAGE)]
-    assert sorted(transcode) == []
-    assert sorted(name for name in reachable if name in V1_MODULES) == []
 
 
 def test_acquire_entry_when_imported_should_reach_only_the_cpu_module_closure() -> None:
@@ -256,27 +240,25 @@ def _requirements(name: str) -> set[str]:
     return names
 
 
-@pytest.mark.parametrize("entry", [IMPORT_ENTRY_POINT, ACQUIRE_ENTRY_POINT])
-def test_cpu_entry_when_imported_should_need_only_what_the_locked_dependencies_provide(entry: str) -> None:
+def test_acquire_entry_when_imported_should_need_only_what_the_locked_dependencies_provide() -> None:
     # Act: every distribution of these happens to be named as its import is
-    imported = _third_party_imports(REPOSITORY_ROOT / entry)
+    imported = _third_party_imports(REPOSITORY_ROOT / ACQUIRE_ENTRY_POINT)
 
     # Assert
     assert {"requests", "jsonschema", "referencing", "runpod"} <= imported
-    assert sorted(imported - _requirements(IMPORT_REQUIREMENTS)) == []
+    assert sorted(imported - _requirements(ACQUIRE_REQUIREMENTS)) == []
 
 
-@pytest.mark.parametrize("image", ["import", "acquire"])
-def test_cpu_image_when_installing_requirements_should_use_only_the_hashed_lock(image):
+def test_acquire_image_when_installing_requirements_should_use_only_the_hashed_lock():
     # Arrange
-    dockerfile = REPOSITORY_ROOT / f"Dockerfile.{image}"
+    dockerfile = REPOSITORY_ROOT / "Dockerfile.acquire"
 
     # Act
     instructions = dockerfile.read_text(encoding="utf-8").splitlines()
 
     # Assert
-    assert f"COPY {IMPORT_REQUIREMENTS} ." in instructions
-    assert f"RUN pip install --no-cache-dir --require-hashes --no-deps -r {IMPORT_REQUIREMENTS}" in instructions
+    assert f"COPY {ACQUIRE_REQUIREMENTS} ." in instructions
+    assert f"RUN pip install --no-cache-dir --require-hashes --no-deps -r {ACQUIRE_REQUIREMENTS}" in instructions
     assert not any("requirements-import.txt" in line for line in instructions if not line.startswith("#"))
 
 
@@ -287,19 +269,11 @@ def _ignore_patterns(name: str) -> list[str]:
     return [line.strip() for line in lines if not line.startswith("#") and line.strip()]
 
 
-def test_import_dockerignore_when_read_should_include_only_the_lock_and_the_files_the_image_copies():
-    assert _ignore_patterns("Dockerfile.import.dockerignore") == [
-        "*", f"!{IMPORT_REQUIREMENTS}", "!core/__init__.py",
-        *[f"!core/drive_import/{name}.py" for name in IMPORT_MODULE_FILES],
-        f"!{IMPORT_ENTRY_POINT}", "!tests/contracts/import/v1/", "**/__pycache__", "**/*.pyc",
-    ]
-
-
 def test_acquire_dockerignore_when_read_should_include_only_the_lock_and_the_files_the_image_copies():
     # Arrange
     expected = [
         "*",
-        f"!{IMPORT_REQUIREMENTS}",
+        f"!{ACQUIRE_REQUIREMENTS}",
         "!core/__init__.py",
         "!core/failure.py",
         "!core/protocol/",
@@ -318,13 +292,13 @@ def test_acquire_dockerignore_when_read_should_include_only_the_lock_and_the_fil
     assert patterns == expected
 
 
-def test_runpod_dockerignore_when_read_beside_the_shared_one_should_hold_its_patterns_and_the_import_exclusions_only():
+def test_runpod_dockerignore_when_read_beside_the_shared_one_should_hold_its_patterns_and_the_acquire_exclusions_only():
     # Act
     shared = _ignore_patterns(SHARED_DOCKERIGNORE)
     runpod = _ignore_patterns(RUNPOD_DOCKERIGNORE)
 
     # Assert: a pattern added to one file alone shows here (their order matters, `!` patterns among them)
-    assert runpod == shared + IMPORT_BUILD_EXCLUSIONS
+    assert runpod == shared + ACQUIRE_BUILD_EXCLUSIONS
 
 
 def test_acquire_image_when_inspected_should_copy_exactly_the_cpu_runtime_and_v2_contract() -> None:
@@ -348,10 +322,10 @@ def test_acquire_image_when_inspected_should_copy_exactly_the_cpu_runtime_and_v2
     assert "ffmpeg" not in dockerfile.lower().split("from", 1)[1]
 
 
-def _context_files(image: str) -> set[str]:
-    # These two contexts are closed allowlists, asserted above; no general Docker glob interpreter is needed.
+def _acquire_context_files() -> set[str]:
+    # The context is a closed allowlist, asserted above; no general Docker glob interpreter is needed.
     paths: set[str] = set()
-    for pattern in _ignore_patterns(f"Dockerfile.{image}.dockerignore"):
+    for pattern in _ignore_patterns("Dockerfile.acquire.dockerignore"):
         if not pattern.startswith("!"):
             continue
         source = REPOSITORY_ROOT / pattern[1:]
@@ -361,59 +335,44 @@ def _context_files(image: str) -> set[str]:
     return paths
 
 
-@pytest.mark.parametrize("image,entry,contract", [
-    ("import", IMPORT_ENTRY_POINT, "tests/contracts/import/v1/"),
-    ("acquire", ACQUIRE_ENTRY_POINT, "tests/contracts/transcode/v2/"),
-])
-def test_cpu_image_when_context_is_applied_should_contain_its_entry_dependency_closure_and_only_its_contract(
-    image: str, entry: str, contract: str,
+def test_acquire_image_when_context_is_applied_should_contain_its_entry_dependency_closure_and_only_its_contract(
 ) -> None:
-    context = _context_files(image)
-    sources = {line.split()[1] for line in (REPOSITORY_ROOT / f"Dockerfile.{image}").read_text().splitlines()
+    context = _acquire_context_files()
+    sources = {line.split()[1] for line in (REPOSITORY_ROOT / "Dockerfile.acquire").read_text().splitlines()
                if line.startswith("COPY ")}
     copied = {path for path in context if any(path == source or source.endswith("/") and path.startswith(source)
                                             for source in sources)}
     assert copied == context
     dependencies = {_module_path(name).relative_to(REPOSITORY_ROOT).as_posix()
-                    for name in _reachable_modules(REPOSITORY_ROOT / entry)}
+                    for name in _reachable_modules(REPOSITORY_ROOT / ACQUIRE_ENTRY_POINT)}
     assert dependencies <= copied
+    contract = REPOSITORY_ROOT / "tests/contracts/transcode/v2/"
     assert {path for path in copied if path.startswith("tests/")} == {
-        path.relative_to(REPOSITORY_ROOT).as_posix() for path in (REPOSITORY_ROOT / contract).rglob("*") if path.is_file()
+        path.relative_to(REPOSITORY_ROOT).as_posix() for path in contract.rglob("*") if path.is_file()
     }
-    if image == "import":
-        assert {path for path in copied if path.endswith(".py")} == dependencies
-    else:
-        assert not any(path.startswith("core/job/") for path in copied)
-        assert {path for path in copied if path.startswith("core/drive_import/")} == {
-            _module_path(name).relative_to(REPOSITORY_ROOT).as_posix() for name in ACQUIRE_TRANSFER_MODULES
-        }
-
-
-def test_import_image_when_inspected_should_retain_the_v1_entry_and_contract_with_the_shared_transfer() -> None:
-    dockerfile = (REPOSITORY_ROOT / "Dockerfile.import").read_text()
-    assert {line.split()[1] for line in dockerfile.splitlines() if line.startswith("COPY ")} == {
-        IMPORT_REQUIREMENTS, "core/__init__.py", "core/drive_import/", "tests/contracts/import/v1/", IMPORT_ENTRY_POINT,
+    assert not any(path.startswith("core/job/") for path in copied)
+    assert {path for path in copied if path.startswith("core/drive_import/")} == {
+        _module_path(name).relative_to(REPOSITORY_ROOT).as_posix() for name in ACQUIRE_TRANSFER_MODULES
     }
-    assert 'CMD ["python3", "/app/wrappers/runpod_import_handler.py"]' in dockerfile
-    assert "core/drive_import/transfer.py" in _context_files("import")
 
 
-def test_cpu_images_when_building_and_pushing_should_use_distinct_image_names() -> None:
-    names = []
-    for image in ("import", "acquire"):
-        dockerfile = (REPOSITORY_ROOT / f"Dockerfile.{image}").read_text()
-        build = re.search(r"^# Build: .* -f (\S+) -t (\S+) \.$", dockerfile, re.MULTILINE)
-        push = re.search(r"^# Push:\s+docker push (\S+):latest$", dockerfile, re.MULTILINE)
-        assert build and push
-        assert build[1] == f"Dockerfile.{image}"
-        assert build[2] == push[1] == f"yourdockerhub/video-transcoder-{image}"
-        names.append(build[2])
-    assert names[0] != names[1]
+def test_acquire_image_when_building_and_pushing_should_name_its_own_image() -> None:
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile.acquire").read_text()
+    build = re.search(r"^# Build: .* -f (\S+) -t (\S+) \.$", dockerfile, re.MULTILINE)
+    push = re.search(r"^# Push:\s+docker push (\S+):latest$", dockerfile, re.MULTILINE)
+    assert build and push
+    assert build[1] == "Dockerfile.acquire"
+    assert build[2] == push[1] == "yourdockerhub/video-transcoder-acquire"
+
+
+@pytest.mark.parametrize("path", RETIRED_IMPORT_V1)
+def test_retired_import_v1_when_the_repository_is_read_should_have_left_nothing_behind(path: str) -> None:
+    assert not (REPOSITORY_ROOT / path).exists()
 
 
 def test_cpu_lock_when_read_should_pin_every_dependency_with_sha256_hashes() -> None:
     # Arrange
-    lock = (REPOSITORY_ROOT / IMPORT_REQUIREMENTS).read_text()
+    lock = (REPOSITORY_ROOT / ACQUIRE_REQUIREMENTS).read_text()
     logical = lock.replace("\\\n", " ")
 
     # Act

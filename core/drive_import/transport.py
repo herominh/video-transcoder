@@ -1,4 +1,4 @@
-"""What the import job sends its requests through: a small session interface, its real implementation over
+"""What the acquire sends its requests through: a small session interface, its real implementation over
 `requests`, and the request body that stops at the stop line.
 
 The job calls only `get(url, headers, timeout, stream, stop_line=...)` and `put(url, data, headers, timeout,

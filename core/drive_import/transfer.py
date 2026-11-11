@@ -1,4 +1,4 @@
-"""Shared Google metadata check and bounded multipart transfer for v1 and acquire."""
+"""The acquire's Google metadata check and bounded multipart transfer (contract 2.1.0)."""
 
 from __future__ import annotations
 
@@ -221,7 +221,7 @@ class _Transfer:
         self._written: list[CompletedPart] = []
 
     def run(self) -> tuple[list[CompletedPart], str]:
-        """Download the whole file and write every part; return the receipt's parts and `checksum_verified`."""
+        """Download the whole file and write every part; return the result's parts and `checksum_verified`."""
         while True:
             response = self._open()
             try:
@@ -327,7 +327,7 @@ class _Transfer:
         return self._written, checksum_verified
 
     def _verified(self) -> str:
-        """The strongest of Google's checksums the input carries, which the whole stream must match."""
+        """The strongest of Google's checksums the dispatch carries, which the whole stream must match."""
         if self._job.expected_sha256 is not None:
             if self._sha256.hexdigest() != self._job.expected_sha256:
                 raise ImportFailed(Code.INTEGRITY_FAILED, Stage.VERIFY)

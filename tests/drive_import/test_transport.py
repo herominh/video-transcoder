@@ -1,11 +1,11 @@
-"""The real session (RequestsSession) against a server of the test's own on the loopback address: it follows no
-redirect and reads no redirect's body, reads no proxy from the environment, never reads a PUT's answer body, sends a
-BoundedBody whole with its length or stops it at the stop line, and its watchdog ends at the stop line a request
-that a trickling or silent server would hold far longer, a TLS handshake whose server never answers included, and
-lets no connection whose name resolution or TCP connect straddled the stop line go on, so that the job answers
-`deadline` within a moment of it. The server speaks plain HTTP and, with a throwaway self-signed certificate for
-127.0.0.1 made by the test (`cryptography`) and trusted by the session, HTTPS, the scheme the job uses. Nothing leaves
-the host."""
+"""The real session (RequestsSession) against a server of the test's own on the loopback address: it follows no redirect
+and reads no redirect's body, reads no proxy from the environment, never reads a PUT's answer body, sends a
+BoundedBody whole with its length or stops it at the stop line, and its watchdog ends at the stop line a request that
+a trickling or silent server would hold far longer, a TLS handshake whose server never answers included, and lets no
+connection whose name resolution or TCP connect straddled the stop line go on, so that the acquire answers `deadline`
+within a moment of it (tests/acquire/test_transport.py drives a whole acquire through this server). The server speaks
+plain HTTP and, with a throwaway self-signed certificate for 127.0.0.1 made by the test (`cryptography`) and trusted
+by the session, HTTPS, the scheme the acquire uses. Nothing leaves the host."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,12 +31,11 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from core.drive_import import google, store
-from core.drive_import.clock import DeadlineReached, StopLine, SystemClock
+from core.drive_import import store
+from core.drive_import.clock import DeadlineReached, StopLine
 from core.drive_import.failure import Code, ImportFailed, Stage
-from core.drive_import.job import run_import
 from core.drive_import.transport import TRANSFER_ERRORS, BoundedBody, RequestsSession, read_small_answer
-from tests.drive_import.fakes import MIB, DriveFile, FakeClock, import_input, settings
+from tests.drive_import.fakes import MIB, DriveFile, FakeClock
 
 TIMEOUT = (5.0, 5.0)
 # A read time-out far longer than any test waits: only the watchdog can end a read before it.
@@ -299,13 +297,26 @@ class _TickingClock(FakeClock):
         return super().monotonic()
 
 
+class _ProcessClock:
+    """The process's own clocks, as the acquire's runtime gives them."""
+
+    def now(self) -> dt.datetime:
+        return dt.datetime.now(dt.timezone.utc)
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
 def _far_stop_line() -> StopLine:
-    clock = SystemClock()
+    clock = _ProcessClock()
     return StopLine(clock, clock.monotonic() + 3600.0)
 
 
 def _near_stop_line() -> StopLine:
-    clock = SystemClock()
+    clock = _ProcessClock()
     return StopLine(clock, clock.monotonic() + STOP_LINE_S)
 
 
@@ -596,83 +607,6 @@ def test_session_when_its_stop_line_has_passed_should_refuse_a_request_before_re
     assert len(seen.requests) == 1
 
 
-def _drive_on_loopback(monkeypatch: pytest.MonkeyPatch, base: str) -> None:
-    monkeypatch.setattr(google, "FILES_URL", base + "/drive/v3/files/")
-
-
-def _input_whose_stop_line_is_near(clock: SystemClock) -> dict[str, Any]:
-    # The writer deadline 121 s away, so the stop line 1 s away.
-    return import_input(ONE, writes_end_at=clock.now() + timedelta(seconds=120 + STOP_LINE_S))
-
-
-DEADLINE_OUTPUT = {"contract": "import/v1", "status": "failed", "code": "deadline"}
-
-
-@pytest.mark.parametrize(
-    "behaviour",
-    [pytest.param("metadata-trickles", id="the-metadata-trickles"), pytest.param("media-trickles", id="the-download")],
-)
-def test_run_import_when_google_trickles_past_the_stop_line_should_answer_deadline_at_the_stop_line(
-    monkeypatch, session, server_tls, behaviour
-):
-    # Arrange: Google stands on the loopback server
-    clock = SystemClock()
-    document = _input_whose_stop_line_is_near(clock)
-
-    # Act
-    with _loopback_server(behaviour, tls=server_tls) as (base, seen):
-        _drive_on_loopback(monkeypatch, base)
-        started = time.monotonic()
-        output = run_import(document, settings(), session, clock)
-        elapsed = time.monotonic() - started
-
-    # Assert: the job ended with the stop line, and wrote nothing
-    assert output == DEADLINE_OUTPUT
-    assert elapsed < ENDED_WITHIN_S
-    assert [method for method, _, _ in seen.requests if method == "PUT"] == []
-
-
-def test_run_import_when_the_name_resolution_straddles_the_stop_line_should_answer_deadline(
-    monkeypatch, session, server_tls
-):
-    # Arrange
-    clock = SystemClock()
-    document = _input_whose_stop_line_is_near(clock)
-
-    # Act
-    with _loopback_server(tls=server_tls) as (base, seen):
-        _drive_on_loopback(monkeypatch, base)
-        _resolving_slowly(monkeypatch, HELD_S)
-        started = time.monotonic()
-        output = run_import(document, settings(), session, clock)
-        elapsed = time.monotonic() - started
-
-    # Assert: no request reached Google's stand-in
-    assert output == DEADLINE_OUTPUT
-    assert elapsed < HELD_S + 1.0
-    assert seen.requests == []
-
-
-def test_run_import_when_googles_tls_handshake_is_held_past_the_stop_line_should_answer_deadline(
-    monkeypatch, session, tls
-):
-    # Arrange
-    clock = SystemClock()
-    document = _input_whose_stop_line_is_near(clock)
-
-    # Act
-    with _loopback_server(tls=tls, handshake_delay=HELD_HANDSHAKE_S) as (base, seen):
-        _drive_on_loopback(monkeypatch, base)
-        started = time.monotonic()
-        output = run_import(document, settings(), session, clock)
-        elapsed = time.monotonic() - started
-
-    # Assert
-    assert output == DEADLINE_OUTPUT
-    assert elapsed < ENDED_WITHIN_S
-    assert seen.requests == []
-
-
 # --- answers that end their connection: http.client hands the socket over to them -----------------------------------
 
 
@@ -708,31 +642,6 @@ def test_watchdog_when_an_answer_that_ends_its_connection_trickles_should_end_it
     # one framed by the close ends where the shutdown closed it)
     assert elapsed < ENDED_WITHIN_S
     assert read < DECLARED_LENGTH
-
-
-@pytest.mark.parametrize("framing", HANDED_OVER)
-@pytest.mark.parametrize(
-    "behaviour",
-    [pytest.param("metadata-trickles", id="the-metadata"), pytest.param("media-trickles", id="the-download")],
-)
-def test_run_import_when_google_trickles_an_answer_that_ends_its_connection_should_answer_deadline_at_the_stop_line(
-    monkeypatch, session, server_tls, behaviour, framing
-):
-    # Arrange
-    clock = SystemClock()
-    document = _input_whose_stop_line_is_near(clock)
-
-    # Act
-    with _loopback_server(behaviour, tls=server_tls, framing=framing) as (base, seen):
-        _drive_on_loopback(monkeypatch, base)
-        started = time.monotonic()
-        output = run_import(document, settings(), session, clock)
-        elapsed = time.monotonic() - started
-
-    # Assert
-    assert output == DEADLINE_OUTPUT
-    assert elapsed < ENDED_WITHIN_S
-    assert [method for method, _, _ in seen.requests if method == "PUT"] == []
 
 
 # --- a connect over several addresses ---------------------------------------------------------------------------------
@@ -795,22 +704,6 @@ def test_connect_when_every_address_is_silent_should_share_the_stop_line_and_sta
     assert connects.started != [] and max(connects.started) < stop_line_at
 
 
-def test_run_import_when_googles_addresses_are_all_silent_should_answer_deadline_at_the_stop_line(monkeypatch, session):
-    # Arrange: urllib3 would give each address the whole time-out the job asks (cut to the stop line: about 1 s)
-    _silent_addresses(monkeypatch)
-    _drive_on_loopback(monkeypatch, f"https://{SILENT_HOST}")
-    clock = SystemClock()
-
-    # Act
-    started = time.monotonic()
-    output = run_import(_input_whose_stop_line_is_near(clock), settings(), session, clock)
-    elapsed = time.monotonic() - started
-
-    # Assert
-    assert output == DEADLINE_OUTPUT
-    assert elapsed < ENDED_WITHIN_S
-
-
 def test_watchdog_when_requests_end_before_the_stop_line_should_leave_them_whole(session):
     # Act: a request whose stop line is near, but which the server answers at once
     with _loopback_server() as (base, _):
@@ -837,6 +730,18 @@ def test_close_when_a_watchdog_is_armed_should_let_its_timer_go():
     # Assert: the session's timer was armed, and its close let it go
     assert timers_before != []
     assert [thread for thread in timers_before if thread.is_alive()] == []
+
+
+def test_close_when_no_request_armed_a_watchdog_should_end_without_a_timer():
+    # Arrange
+    made = RequestsSession()
+    timers_before = [thread for thread in threading.enumerate() if isinstance(thread, threading.Timer)]
+
+    # Act
+    made.close()
+
+    # Assert: closing armed nothing
+    assert [thread for thread in threading.enumerate() if isinstance(thread, threading.Timer)] == timers_before
 
 
 # --- the bounded body ----------------------------------------------------------------------------------------------

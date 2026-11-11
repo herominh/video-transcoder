@@ -1,7 +1,7 @@
-"""Google Drive, as the import job asks it: the file's metadata again before the first write (the Hub's import
+"""Google Drive, as the acquire asks it: the file's metadata again before the first write (the Hub's import
 design, G-10), and the file's bytes (G-17).
 
-Both requests go to one host of this module's own, built from the input's file id alone (valid by the schema:
+Both requests go to one host of this module's own, built from the dispatch's file id alone (valid by the schema:
 letters, digits, `-` and `_`), the key in the `X-Goog-Api-Key` header and never in a URL, the link's resource key in
 `X-Goog-Drive-Resource-Keys` when there is one, and the bytes asked as they are stored (`Accept-Encoding: identity`;
 a 200 or a 206 in a content coding is refused, and an error document in one is never read); no redirect is followed
@@ -239,7 +239,8 @@ def change_at_provider(job: GoogleFile, metadata: Mapping[str, Any]) -> Code | N
 
     In the trash: `file_removed`. Its owner lets viewers no longer download it (`capabilities.canDownload` present
     and not true): `link_not_shared`. Its size, always, and each of the MD5, the SHA-1, the SHA-256 and the head
-    revision the input carries (a value the input does not carry is not compared, however Google answers it now):
+    revision the dispatch carries (a value the dispatch does not carry is not compared, however Google answers it
+    now):
     any difference, a value Google no longer gives included, is `source_changed_at_provider`.
     """
     if metadata.get(TRASHED_FIELD, False) is not False:

@@ -19,7 +19,7 @@ from core.protocol.acquire_dispatch import accept_dispatch
 from tests.acquire.support import Scenario, wire
 from tests.contract.v2_support import HUB_KEY, RUNTIME_ID, signed_carrier
 from tests.drive_import.test_transport import (
-    ENDED_WITHIN_S, ONE, STOP_LINE_S, _Tls, _loopback_server, tls,
+    ENDED_WITHIN_S, HANDED_OVER, ONE, STOP_LINE_S, _Tls, _loopback_server, tls,
 )
 
 DNS_STOP_S = 0.1
@@ -106,3 +106,29 @@ def test_acquire_when_a_peer_holds_io_should_close_at_the_wall_deadline(
     assert error["stage"] == ("uploading" if phase == "put" else "downloading")
     assert elapsed < ENDED_WITHIN_S
     assert not any("acquire-result" in path for _, path, _ in seen.requests)
+
+
+@pytest.mark.parametrize("framing", HANDED_OVER)
+@pytest.mark.parametrize("phase", ["metadata-trickles", "media-trickles"])
+def test_acquire_when_google_trickles_an_answer_that_ends_its_connection_should_close_at_the_wall_deadline(
+    phase: str, framing: str, monkeypatch: pytest.MonkeyPatch, tls: _Tls,
+) -> None:
+    # Arrange: http.client hands the connection's socket over to such an answer; the watchdog must still reach it
+    scenario = Scenario(ONE.size)
+    runtime = replace(scenario.runtime, monotonic=time.monotonic, sleep=time.sleep)
+    with _loopback_server(phase, tls=tls, framing=framing) as (base, seen):
+        monkeypatch.setattr(google, "FILES_URL", base + "/drive/v3/files/")
+        session = LocalSession(base, str(tls.certificate))
+        authority = claimed(scenario, STOP_LINE_S)
+        started = time.monotonic()
+        # Act
+        try:
+            report = run_acquire(authority, runtime, session)
+        finally:
+            session.close()
+        elapsed = time.monotonic() - started
+    # Assert
+    error = json.loads(report.body)["error"]
+    assert (error["code"], error["stage"]) == ("deadline", "downloading")
+    assert elapsed < ENDED_WITHIN_S
+    assert [method for method, _, _ in seen.requests if method == "PUT"] == []
