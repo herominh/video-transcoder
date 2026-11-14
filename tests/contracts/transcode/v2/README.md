@@ -913,17 +913,17 @@ Catalog counts are calculated from `cases.json`; positive and negative ids conti
 and `N149`, without renumbering old cases (two to four digits). The acquire groups are
 `acquire-request`, `acquire-grant`, `acquire-results`, `acquire-contexts`, `acquire-version`,
 `acquire-semantics`, `acquire-bounds`, `acquire-carriers`, named by `rule`. The capability groups
-(`2.2.0`, ids `P112` to `P156` and `N945` to `N1526`, payloads under `fixtures/capabilities-request/`,
+(`2.2.0`, ids `P112` to `P157` and `N945` to `N1527`, payloads under `fixtures/capabilities-request/`,
 `fixtures/capabilities-granted/` and `fixtures/capabilities-version/`) are `capabilities-request` (12
 cases: every stage, the heartbeat, source only, put only with 1 and 128 objects, both, a null and a set
 duration, the worker's self-check, the minimal and the maximal escaped request),
-`capabilities-granted` (18: their answers for both roles, both expiry bounds, a URL dated at the skew
+`capabilities-granted` (19: their answers for both roles, both expiry bounds, a URL dated at the skew
 bound or before the sending, a put URL the receiver's clock already sees expired, escapes decoded once
-and a security token, the minimal and the maximal escaped answer), `capabilities-contexts` (144: a valid row and the absent and null case of every
+and a security token, an allowed name escaped once, the minimal and the maximal escaped answer), `capabilities-contexts` (144: a valid row and the absent and null case of every
 required field, for each of the four role and kind pairs), `capabilities-version` (21: both kinds at
 `2.0.0` and `2.1.0`, both at `2.2.0` under the live lists, the four acquire kinds at `2.2.0`, the eight
 encode-family kinds at `2.2.0` with their `2.0.0` shapes, a `hub.error` carrying a reserved capability
-code, the manifest at `1.0.0` and at `2.2.0`), `capabilities-semantics` (121: the S checks of both
+code, the manifest at `1.0.0` and at `2.2.0`), `capabilities-semantics` (122: the S checks of both
 kinds, every branch of K1 to K5 and every K5 URL rule, the list of query names included) and `capabilities-bounds` (311: the absent, null,
 wrong-type and both bound negatives of every member of both kinds, the URL refusals of the schema,
 closed objects and enums, the parse layer, the request's cap exactly, both caps one byte over, and 23
