@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any, Mapping, TYPE_CHECKING
-from urllib.parse import unquote_plus
 
+from .presigned_urls import MS_PER_SECOND, signed_until_ms, split
 from .reasons import ReasonCode
 from .registry import ContractRegistry, Role
 
@@ -13,12 +12,6 @@ if TYPE_CHECKING:
     from .context import TrustedContext
 
 PART_SIZE = 67_108_864
-MS_PER_SECOND = 1_000
-SIGV4_MAX_SECONDS = 604_800
-BUCKET = re.compile(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]")
-BAD_PERCENT = re.compile(r"%(?![0-9a-fA-F]{2})")
-SIGV4_DATE = re.compile(r"[0-9]{8}T[0-9]{6}Z")
-DECIMAL_SECONDS = re.compile(r"[1-9][0-9]{0,5}")
 REQUEST = "source.acquire.request"
 GRANT = "source.acquire.granted"
 
@@ -39,41 +32,8 @@ def plan(document: Mapping[str, Any], kind: str, context: TrustedContext, regist
     return None
 
 
-def _split(url: str, host: str) -> tuple[str, str, dict[str, str]] | None:
-    # Compare the complete authority and raw path. Decode each query name/value exactly once.
-    if not url.startswith("https://") or any(c in url for c in "\\#[]"):
-        return None
-    authority, slash, rest = url[len("https://"):].partition("/")
-    if authority != host or not slash:
-        return None
-    path, question, query = rest.partition("?")
-    bucket, slash, key = path.partition("/")
-    if not slash or not BUCKET.fullmatch(bucket) or "%" in path or not question or not query or BAD_PERCENT.search(query):
-        return None
-    params: dict[str, str] = {}
-    for pair in query.split("&"):
-        name, equals, value = pair.partition("=")
-        if not equals or not name:
-            return None
-        name, value = unquote_plus(name, encoding="latin-1"), unquote_plus(value, encoding="latin-1")
-        if name in params:
-            return None
-        params[name] = value
-    return bucket, key, params
-
-
 def _expiry_valid(params: Mapping[str, str], deadline_ms: int, context: TrustedContext) -> bool:
-    from .semantic import parse_timestamp_ms
-
-    date, seconds = params.get("X-Amz-Date", ""), params.get("X-Amz-Expires", "")
-    if not SIGV4_DATE.fullmatch(date) or not DECIMAL_SECONDS.fullmatch(seconds):
-        return False
-    stamp = f"{date[:4]}-{date[4:6]}-{date[6:8]}T{date[9:11]}:{date[11:13]}:{date[13:15]}.000Z"
-    date_ms = parse_timestamp_ms(stamp)
-    duration = int(seconds)
-    return (date_ms is not None and date_ms <= context.now_ms + context.skew_ms
-            and duration <= SIGV4_MAX_SECONDS and date_ms + duration * MS_PER_SECOND == deadline_ms
-            and deadline_ms > context.now_ms)
+    return signed_until_ms(params, context) == deadline_ms and deadline_ms > context.now_ms
 
 
 def urls(document: Mapping[str, Any], kind: str, context: TrustedContext, registry: ContractRegistry) -> tuple[ReasonCode, str] | None:
@@ -92,7 +52,7 @@ def urls(document: Mapping[str, Any], kind: str, context: TrustedContext, regist
     host = context.value("expect.acquire_storage_host")
     target = context.value("expect.acquire_destination")["object_key"]
     for index, part in enumerate(parts):
-        parsed = _split(part["url"], host)
+        parsed = split(part["url"], host)
         if parsed is None:
             return ReasonCode.ACQUIRE_URL_INVALID, f"/upload/parts/{index}/url"
         named_bucket, key, params = parsed
@@ -105,7 +65,7 @@ def urls(document: Mapping[str, Any], kind: str, context: TrustedContext, regist
         if not valid:
             return ReasonCode.ACQUIRE_URL_INVALID, f"/upload/parts/{index}/url"
         bucket, upload_id = named_bucket, named_upload
-    parsed = _split(document["upload"]["result_url"], host)
+    parsed = split(document["upload"]["result_url"], host)
     result_key = f"{document['output']['prefix']}/acquire-result-{document['identity']['execution_id']}.json"
     if parsed is None:
         return ReasonCode.ACQUIRE_URL_INVALID, "/upload/result_url"

@@ -220,6 +220,60 @@
       "key_id": "test-hub2wk-k1",
       "value": "hmac-sha256=f062326dfd389a0377194e2dad369a4892187b678c694accc5a393d065437e11",
       "valid": false
+    },
+    {
+      "id": "V23",
+      "category": "valid",
+      "purpose": "Capability execution.capabilities.request valid",
+      "message_file": "signing/messages/V23-capabilities.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=f43d04af41e65cbbce65667504ea59be0c8cdc370d7b9fe8126f333e44ad4ae9",
+      "valid": true
+    },
+    {
+      "id": "V24",
+      "category": "body_byte_changed",
+      "purpose": "Capability execution.capabilities.request body_byte_changed",
+      "message_file": "signing/messages/V24-capabilities.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=f43d04af41e65cbbce65667504ea59be0c8cdc370d7b9fe8126f333e44ad4ae9",
+      "valid": false
+    },
+    {
+      "id": "V25",
+      "category": "other_direction_key",
+      "purpose": "Capability execution.capabilities.request other_direction_key",
+      "message_file": "signing/messages/V25-capabilities.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=f43d04af41e65cbbce65667504ea59be0c8cdc370d7b9fe8126f333e44ad4ae9",
+      "valid": false
+    },
+    {
+      "id": "V26",
+      "category": "valid",
+      "purpose": "Capability execution.capabilities.granted valid",
+      "message_file": "signing/messages/V26-capabilities.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=f371103559109d3b1eece18f6626a33ec6f6ecefa025da86e3dee74aeae30be2",
+      "valid": true
+    },
+    {
+      "id": "V27",
+      "category": "body_byte_changed",
+      "purpose": "Capability execution.capabilities.granted body_byte_changed",
+      "message_file": "signing/messages/V27-capabilities.bin",
+      "key_id": "test-hub2wk-k1",
+      "value": "hmac-sha256=f371103559109d3b1eece18f6626a33ec6f6ecefa025da86e3dee74aeae30be2",
+      "valid": false
+    },
+    {
+      "id": "V28",
+      "category": "other_direction_key",
+      "purpose": "Capability execution.capabilities.granted other_direction_key",
+      "message_file": "signing/messages/V28-capabilities.bin",
+      "key_id": "test-wk2hub-k1",
+      "value": "hmac-sha256=f371103559109d3b1eece18f6626a33ec6f6ecefa025da86e3dee74aeae30be2",
+      "valid": false
     }
   ],
   "carrier_examples": [

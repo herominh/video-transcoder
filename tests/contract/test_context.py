@@ -22,6 +22,8 @@ MANIFEST = "generation.manifest"
 CLAIM = "transcode.claim"
 GRANT = "transcode.claim.granted"
 UNCLAIMED = "transcode.unclaimed"
+CAPABILITY_REQUEST = "execution.capabilities.request"
+CAPABILITY_GRANTED = "execution.capabilities.granted"
 
 MESSAGE_GATE = ["accepted_protocol_versions"]
 SIGNED_ENVELOPE = [*MESSAGE_GATE, "expected_audience", "known_key_ids", "now", "clock_skew_s"]
@@ -88,6 +90,17 @@ REQUIRED_FIELDS: dict[tuple[str, str, str], list[str]] = {
        for kind, fields in RECEIVER_REQUIREMENTS.items()},
     **{("worker_sender", kind, "storage" if kind == MANIFEST else "push"): fields
        for kind, fields in RECEIVER_REQUIREMENTS.items()},
+    **{(role, CAPABILITY_REQUEST, "push"): [*SIGNED_ENVELOPE, *EXECUTION_IDENTITY, "expect.runtime_id", "last_capability_seq"]
+       for role in ("hub_receiver", "worker_sender")},
+    **{(role, CAPABILITY_GRANTED, "push"): [
+        *SIGNED_ENVELOPE,
+        *EXECUTION_IDENTITY,
+        "expect.runtime_id",
+        "expect.capability_request",
+        "expect.capability_storage_host",
+        "expect.capability_output",
+        "expect.capability_source",
+    ] for role in ("hub_sender", "worker_receiver")},
 }
 REQUIREMENT_CASES = [
     (role, kind, channel, field)
@@ -101,13 +114,16 @@ def _complete_context(role: str, kind: str, channel: str) -> dict[str, Any]:
     push = files.read_json("fixtures/contexts/ctx-hub-push.json")
     storage = files.read_json("fixtures/contexts/ctx-hub-storage.json")
     grant = files.read_json("fixtures/contexts/ctx-worker-claim-grant.json")
+    capability = files.read_json("fixtures/contexts/ctx-cap-granted-heartbeat.json")
+    capability_fields = {name: value for name, value in capability["expect"].items() if name.startswith("capability_")}
     return {
         **push,
         "role": role,
         "channel": channel,
         "accepted_message_kinds": [kind],
         "accepted_manifest_versions": storage["accepted_manifest_versions"],
-        "expect": {**push["expect"], "runtime_id": grant["expect"]["runtime_id"]},
+        "last_capability_seq": 4,
+        "expect": {**push["expect"], "runtime_id": grant["expect"]["runtime_id"], **capability_fields},
     }
 
 

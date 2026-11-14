@@ -371,7 +371,7 @@ def test_from_env_when_every_live_version_is_listed_should_accept_them_in_order(
 
 @pytest.mark.parametrize("value", ["2.2.0", "2.0.0,2.2.0"], ids=["alone", "beside-a-live-version"])
 def test_from_env_when_an_entry_is_a_draft_version_should_refuse_the_start(monkeypatch, value):
-    # Arrange: the shipped tree holds no draft, so this test's registry defines one.
+    # Arrange: this test's registry defines its own draft, whatever draft the shipped tree lists.
     shipped = ContractRegistry.load()
     versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.2.0"]}}
     registry = dataclasses.replace(shipped, versions=versions)

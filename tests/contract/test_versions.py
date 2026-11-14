@@ -1,4 +1,5 @@
-"""Every live version is accepted, and no version is a draft; a draft would be supported only by a context built for tests."""
+"""Every live version is accepted, and 2.2.0 (the capability exchange) is the one draft, supported only by a context
+built for tests."""
 
 from dataclasses import replace
 
@@ -10,8 +11,11 @@ from core.protocol.context import TrustedContext
 from core.protocol.reasons import Layer, ReasonCode
 from core.protocol.registry import ContractRegistry, MessageKind, VersionChannel, VersionLine
 
-POSITIVE_CASES = [case for case in files.read_json("fixtures/cases.json")["cases"]
-                  if case["expect"]["outcome"] == "accept" and "carrier" not in case]
+_POSITIVES = [case for case in files.read_json("fixtures/cases.json")["cases"]
+              if case["expect"]["outcome"] == "accept" and "carrier" not in case]
+DRAFT_POSITIVE_CASES = [case for case in _POSITIVES
+                        if files.read_json(case["payload"]).get("protocol_version") == "2.2.0"]
+POSITIVE_CASES = [case for case in _POSITIVES if case not in DRAFT_POSITIVE_CASES]
 
 
 def test_live_versions_when_loaded_should_be_exactly_both_protocol_minors_and_manifest_1():
@@ -28,7 +32,7 @@ def test_live_versions_when_loaded_should_be_exactly_both_protocol_minors_and_ma
     assert live == (("2.0.0", "2.1.0"), ("1.0.0",))
 
 
-def test_draft_versions_when_loaded_should_be_empty():
+def test_draft_versions_when_loaded_should_list_only_the_capability_minor():
     # Arrange
     registry = ContractRegistry.load()
 
@@ -39,7 +43,7 @@ def test_draft_versions_when_loaded_should_be_empty():
     )
 
     # Assert
-    assert drafts == ((), ())
+    assert drafts == (("2.2.0",), ())
 
 
 @pytest.mark.parametrize("case", POSITIVE_CASES, ids=[case["id"] for case in POSITIVE_CASES])
@@ -60,6 +64,22 @@ def test_live_message_when_validated_under_live_context_should_be_accepted(case)
 
     # Assert
     assert verdict.accepted
+
+
+@pytest.mark.parametrize("case", DRAFT_POSITIVE_CASES, ids=[case["id"] for case in DRAFT_POSITIVE_CASES])
+def test_draft_message_when_validated_under_live_context_should_be_refused_as_unsupported_version(case):
+    # Arrange: a positive of the 2.2.0 draft, read by a context that lists only what production accepts.
+    context_data = files.read_json(case["context"])
+    context_data["accepted_protocol_versions"] = list(
+        ContractRegistry.load().accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)
+    )
+
+    # Act
+    verdict = pipeline.validate(files.read_bytes(case["payload"]), TrustedContext.from_dict(context_data))
+
+    # Assert
+    assert (verdict.layer, verdict.reason, verdict.instance_path) == (
+        Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION, "/protocol_version")
 
 
 @pytest.mark.parametrize(
@@ -92,4 +112,4 @@ def test_draft_version_when_listed_only_in_a_test_registry_should_need_a_draft_c
     # Assert
     assert (refused.layer, refused.reason) == (Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION)
     assert accepted is kind
-    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == ()
+    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == (("2.2.0",) if line is VersionLine.PROTOCOL else ())

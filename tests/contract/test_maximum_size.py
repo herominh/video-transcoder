@@ -299,6 +299,12 @@ def _maximality_gaps(value: Any, node: dict, base_uri: str, pointer: str, gaps: 
         matching = [(uri, branch) for uri, branch in branches if _matches_type(branch, value)]
         for uri, branch in matching[:1]:
             _maximality_gaps(value, branch, uri, pointer, gaps)
+    if node.get("if") == {"type": "null"} and "else" in node:
+        # A nullable object (README section 6): null leaves its definition unreached.
+        if value is None:
+            gaps.append(f"{pointer}: null where a value is allowed")
+        else:
+            _maximality_gaps(value, node["else"], base_uri, pointer, gaps)
     if isinstance(value, str) and "maxLength" in node and "enum" not in node and "const" not in node:
         if len(value) != node["maxLength"]:
             gaps.append(f"{pointer}: string of {len(value)} below maxLength {node['maxLength']}")

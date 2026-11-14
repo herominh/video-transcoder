@@ -209,9 +209,10 @@ def test_acquire_signature_when_direction_domain_or_exact_bytes_change_should_re
     assert not signing.verify(raw, key, wrong_domain)
 
 
-def test_fixture_sizes_when_measured_should_apply_the_exception_only_to_acquire_grant_payloads():
+def test_fixture_sizes_when_measured_should_apply_the_exception_only_to_acquire_and_capability_grant_payloads():
     # Arrange
-    grant_payloads = {case["payload"] for case in CATALOG if case["payload"].startswith("fixtures/acquire-grant/")}
+    grant_payloads = {case["payload"] for case in CATALOG
+                      if case["payload"].startswith(("fixtures/acquire-grant/", "fixtures/capabilities-granted/"))}
     # Act / Assert
     for path in files.list_tree_files():
         if path.startswith("fixtures/"):

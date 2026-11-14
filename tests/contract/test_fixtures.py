@@ -13,13 +13,20 @@ CATALOG_FILE = "fixtures/cases.json"
 CATALOG_SCHEMA_FILE = "schemas/fixture-catalog.schema.json"
 PAYLOAD_DIRECTORIES = (
     "request", "progress", "result-completed", "result-failed", "hub-error", "manifest", "claim", "claim-granted",
-    "unclaimed", "acquire-request", "acquire-grant", "acquire-results",
+    "unclaimed", "acquire-request", "acquire-grant", "acquire-results", "capabilities-request", "capabilities-granted",
+    "capabilities-version",
 )
 # README section 14: an S7 case also fails the equality check of the aliased id where its row runs one (S13 for
 # N45, S15 for N91); N126, whose row runs no S15, fails S21 instead. Every other negative fails its pinned check
 # alone: the S7 cases of a row that compares no identity (N90, N92, N93) and N132, whose runtime id no equality
 # check of its row reads.
-S7_COMPANION_CHECK = {"N45": "S13", "N91": "S15", "N126": "S21", "N747": "A1"}
+S7_COMPANION_CHECK = {
+    "N45": "S13", "N91": "S15", "N126": "S21", "N747": "A1",
+    "N1101": "S15", "N1102": "S29", "N1103": "S8", "N1131": "S15", "N1132": "S29",
+}
+# A capability URL's date plus its expiry is a whole second, so a URL expiry that is no real instant (S1) or not a
+# whole second (K4) also fails K5 (README section 14).
+URL_EXPIRY_COMPANION_CHECK = {"N1125": "S1", "N1126": "S1", "N1161": "K4", "N1164": "K4"}
 
 CATALOG: dict[str, Any] = files.read_json(CATALOG_FILE)
 POSITIVE_CASES = [case for case in CATALOG["cases"] if case["expect"]["outcome"] == "accept"]
@@ -151,6 +158,9 @@ def test_negative_fixture_when_evaluated_should_violate_only_its_own_rule(case):
         companion = S7_COMPANION_CHECK.get(case["id"])
         if case["id"] == "N767":
             assert first.check == "S18" and [other.check for other in others] == ["A4"]
+            return
+        if case["id"] in URL_EXPIRY_COMPANION_CHECK:
+            assert first.check == URL_EXPIRY_COMPANION_CHECK[case["id"]] and [other.check for other in others] == ["K5"]
             return
         assert companion is None or first.check == "S7"
         assert [other.check for other in others] == ([] if companion is None else [companion]), others

@@ -11,7 +11,7 @@ from . import files
 
 
 class MessageKind(str, Enum):
-    """The thirteen kinds of the contract; generation.manifest is a stored document, the others are messages."""
+    """The fifteen kinds of the contract; generation.manifest is a stored document, the others are messages."""
 
     TRANSCODE_REQUEST = "transcode.request"
     TRANSCODE_PROGRESS = "transcode.progress"
@@ -28,6 +28,9 @@ class MessageKind(str, Enum):
     SOURCE_ACQUIRE_RESULT_COMPLETED = "source.acquire.result.completed"
     SOURCE_ACQUIRE_RESULT_FAILED = "source.acquire.result.failed"
 
+    EXECUTION_CAPABILITIES_REQUEST = "execution.capabilities.request"
+    EXECUTION_CAPABILITIES_GRANTED = "execution.capabilities.granted"
+
     @property
     def schema_file(self) -> str:
         return _SCHEMA_FILES[self]
@@ -38,6 +41,8 @@ _SCHEMA_FILES: Mapping[MessageKind, str] = {
     MessageKind.SOURCE_ACQUIRE_GRANTED: "schemas/source-acquire-granted.schema.json",
     MessageKind.SOURCE_ACQUIRE_RESULT_COMPLETED: "schemas/source-acquire-result-completed.schema.json",
     MessageKind.SOURCE_ACQUIRE_RESULT_FAILED: "schemas/source-acquire-result-failed.schema.json",
+    MessageKind.EXECUTION_CAPABILITIES_REQUEST: "schemas/execution-capabilities-request.schema.json",
+    MessageKind.EXECUTION_CAPABILITIES_GRANTED: "schemas/execution-capabilities-granted.schema.json",
     MessageKind.TRANSCODE_REQUEST: "schemas/transcode-request.schema.json",
     MessageKind.TRANSCODE_PROGRESS: "schemas/transcode-progress.schema.json",
     MessageKind.TRANSCODE_RESULT_COMPLETED: "schemas/transcode-result-completed.schema.json",
@@ -50,6 +55,16 @@ _SCHEMA_FILES: Mapping[MessageKind, str] = {
 }
 
 KNOWN_KINDS: frozenset[str] = frozenset(kind.value for kind in MessageKind)
+
+CAPABILITY_KINDS: frozenset[str] = frozenset(
+    {MessageKind.EXECUTION_CAPABILITIES_REQUEST.value, MessageKind.EXECUTION_CAPABILITIES_GRANTED.value}
+)
+
+# The one protocol version a kind exists at (README section 5); a kind absent here exists at every version.
+REQUIRED_PROTOCOL_VERSION: Mapping[str, str] = {
+    **{kind.value: "2.1.0" for kind in MessageKind if kind.value.startswith("source.acquire.")},
+    **{kind: "2.2.0" for kind in CAPABILITY_KINDS},
+}
 
 
 class Role(str, Enum):

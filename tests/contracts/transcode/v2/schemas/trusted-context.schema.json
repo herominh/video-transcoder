@@ -90,7 +90,7 @@
     "accepted_message_kinds": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 13,
+      "maxItems": 15,
       "uniqueItems": true,
       "items": {
         "type": "string",
@@ -107,7 +107,9 @@
           "source.acquire.request",
           "source.acquire.granted",
           "source.acquire.result.completed",
-          "source.acquire.result.failed"
+          "source.acquire.result.failed",
+          "execution.capabilities.request",
+          "execution.capabilities.granted"
         ]
       }
     },
@@ -147,6 +149,18 @@
       ]
     },
     "last_event_seq": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2147483647
+        }
+      ]
+    },
+    "last_capability_seq": {
       "anyOf": [
         {
           "type": "null"
@@ -439,6 +453,124 @@
                   }
                 }
               ]
+            }
+          ]
+        },
+        "capability_request": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "seq",
+                "stage",
+                "source",
+                "put"
+              ],
+              "properties": {
+                "seq": {
+                  "$ref": "capabilities-common.schema.json#/$defs/capability_seq"
+                },
+                "stage": {
+                  "$ref": "common.schema.json#/$defs/stage"
+                },
+                "source": {
+                  "type": "boolean"
+                },
+                "put": {
+                  "anyOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "lifetime_seconds",
+                        "paths"
+                      ],
+                      "properties": {
+                        "lifetime_seconds": {
+                          "$ref": "capabilities-common.schema.json#/$defs/put_lifetime_seconds"
+                        },
+                        "paths": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 128,
+                          "items": {
+                            "$ref": "common.schema.json#/$defs/rel_path"
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "capability_storage_host": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 253,
+              "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$",
+              "not": {
+                "pattern": "[\\x00-\\x1f\\x7f]"
+              }
+            }
+          ]
+        },
+        "capability_output": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bucket",
+                "prefix"
+              ],
+              "properties": {
+                "bucket": {
+                  "$ref": "common.schema.json#/$defs/bucket"
+                },
+                "prefix": {
+                  "$ref": "common.schema.json#/$defs/object_key"
+                }
+              }
+            }
+          ]
+        },
+        "capability_source": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bucket",
+                "object_key"
+              ],
+              "properties": {
+                "bucket": {
+                  "$ref": "common.schema.json#/$defs/bucket"
+                },
+                "object_key": {
+                  "$ref": "common.schema.json#/$defs/object_key"
+                }
+              }
             }
           ]
         }

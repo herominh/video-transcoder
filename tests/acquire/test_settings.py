@@ -96,7 +96,7 @@ def test_acquire_settings_when_the_live_versions_are_listed_in_another_order_sho
 def test_acquire_settings_when_an_entry_is_a_draft_version_should_refuse_the_start(
     value: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Arrange: the shipped tree holds no draft, so this test's registry defines one.
+    # Arrange: this test's registry defines its own draft, whatever draft the shipped tree lists.
     shipped = ContractRegistry.load()
     versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.2.0"]}}
     monkeypatch.setattr(settings_module, "load_registry", lambda: replace(shipped, versions=versions))

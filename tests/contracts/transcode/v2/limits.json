@@ -13,7 +13,9 @@
     "source.acquire.request": 4096,
     "source.acquire.granted": 2097152,
     "source.acquire.result.completed": 65536,
-    "source.acquire.result.failed": 4096
+    "source.acquire.result.failed": 4096,
+    "execution.capabilities.request": 32768,
+    "execution.capabilities.granted": 2097152
   },
   "carrier_max_bytes": {
     "runpod.input": 8448,
@@ -24,5 +26,6 @@
   "max_tokens": 277507,
   "clock_skew_seconds": 300,
   "max_segments_per_rendition": 3600,
-  "storage_call_margin_seconds": 600
+  "storage_call_margin_seconds": 600,
+  "capability_closure_margin_seconds": 60
 }

@@ -44,7 +44,7 @@ def test_acquire_entry_when_booting_should_check_the_tree_before_accepting_jobs(
 
 
 def test_acquire_entry_when_configured_with_a_draft_should_refuse_before_sdk_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Arrange: the shipped tree holds no draft, so this test's registry defines one.
+    # Arrange: this test's registry defines its own draft, whatever draft the shipped tree lists.
     started: list[Any] = []
     monkeypatch.setattr(entry, "configure_logging", lambda: None)
     shipped = ContractRegistry.load()

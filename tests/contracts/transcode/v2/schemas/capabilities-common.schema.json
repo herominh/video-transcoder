@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/capabilities-common.schema.json",
+  "title": "Transcode contract v2: execution capability definitions (2.2.0)",
+  "$defs": {
+    "capability_seq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "media_duration_ms": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 21600000
+        }
+      ]
+    },
+    "put_lifetime_seconds": {
+      "type": "integer",
+      "minimum": 60,
+      "maximum": 300
+    },
+    "object_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "content_md5": {
+      "type": "string",
+      "minLength": 24,
+      "maxLength": 24,
+      "pattern": "^[A-Za-z0-9+/]{22}==$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      }
+    },
+    "put_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "size_bytes",
+        "md5"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/rel_path"
+        },
+        "size_bytes": {
+          "$ref": "capabilities-common.schema.json#/$defs/object_size"
+        },
+        "md5": {
+          "$ref": "capabilities-common.schema.json#/$defs/content_md5"
+        }
+      }
+    },
+    "put_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "lifetime_seconds",
+        "objects"
+      ],
+      "properties": {
+        "lifetime_seconds": {
+          "$ref": "capabilities-common.schema.json#/$defs/put_lifetime_seconds"
+        },
+        "objects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "capabilities-common.schema.json#/$defs/put_object"
+          }
+        }
+      }
+    },
+    "presigned_url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^https://[\\x21-\\x7e]+$",
+      "not": {
+        "pattern": "[\\x00-\\x1f\\x7f]"
+      },
+      "allOf": [
+        {
+          "not": {
+            "pattern": "[\\x5c#\\x5b\\x5d]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "^https://[^/]*@"
+          }
+        }
+      ]
+    },
+    "granted_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "url"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "common.schema.json#/$defs/rel_path"
+        },
+        "url": {
+          "$ref": "capabilities-common.schema.json#/$defs/presigned_url"
+        }
+      }
+    },
+    "granted_put": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expires_at",
+        "objects"
+      ],
+      "properties": {
+        "expires_at": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "objects": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "items": {
+            "$ref": "capabilities-common.schema.json#/$defs/granted_object"
+          }
+        }
+      }
+    },
+    "granted_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expires_at",
+        "url"
+      ],
+      "properties": {
+        "expires_at": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        },
+        "url": {
+          "$ref": "capabilities-common.schema.json#/$defs/presigned_url"
+        }
+      }
+    }
+  }
+}
