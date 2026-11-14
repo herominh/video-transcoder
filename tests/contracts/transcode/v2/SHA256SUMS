@@ -1,4 +1,4 @@
-646c06053740b7c2a11342ce526d8e2775629a75068bbf773924ea0160fe970b  README.md
+b82c9451a6887f24b1ff2341f9b03ed73292aa17c11985b69aef7ec439d2aaec  README.md
 b23a6273880c5e6d83d017551c808741fb5ba8be3d0b185c83a3dc7a155ac953  artifact-kinds.json
 846753e7a7b81bf83cdbc4f7b7025a944f11be172f6159e8a7b71391e3247e21  carriers/runpod-acquire-output.schema.json
 5b7b9201a68f27d1a8d531fd9ee8a83ae730828fda53599e5626fe73d1ec314f  carriers/runpod-input.schema.json
@@ -935,11 +935,11 @@ cc186de507abbac61c5de35042c18dbf0b909ee0e97b3214ebc7d759a6a9ef7c  fixtures/capab
 2affded5f4c95de9476a9fcecc2bb9e7d7bf27aa2969e98128e3550e8575a706  fixtures/capabilities-granted/N1175-put-url-with-an-empty-segment.json
 0326892741d15699338e876f0ce0bda39207efe649e12f1091a4bd3718051e89  fixtures/capabilities-granted/N1176-put-url-without-a-query.json
 585ca436bd0133a5f6bec43f340bf7a6c10d29370cc20db2524cf56fe92a2b19  fixtures/capabilities-granted/N1177-put-url-with-an-empty-query.json
-45a8e9f63998f4907934ce6993ba0e1bb11342d55beac27519feb979f990712b  fixtures/capabilities-granted/N1178-put-url-query-member-without-a-value-sign.json
+10e681ecb4d2f0939aae0b21bd3992c6fedccf532defcc4724f2ba81c9734041  fixtures/capabilities-granted/N1178-put-url-query-member-without-a-value-sign.json
 76583a4167030084f3965782d76dffef1ded3905431c4b30643f37f8e0da1083  fixtures/capabilities-granted/N1179-put-url-query-member-without-a-name.json
 64b57b884beea164bb47146d5ee45052ee28fa803c9748d1eb5f63a12a296697  fixtures/capabilities-granted/N1180-put-url-with-a-repeated-query-member.json
 ea44f89617d09a8c12e23905dfbce86fdc98c1f8d65749c2817e493d6a08d87b  fixtures/capabilities-granted/N1181-put-url-repeating-a-member-once-decoded.json
-10be8611ea98aaa64cd13def4b021a3c807cc41dfe3816e56e0e766accb58e9e  fixtures/capabilities-granted/N1182-put-url-with-an-invalid-escape.json
+88044726dd05385e039c9d750348719e8ea310125a0894702a877eb6d3129250  fixtures/capabilities-granted/N1182-put-url-with-an-invalid-escape.json
 4951358cc5f3c875dbae1a9d3c406eabe070be73c03c26fe094adbf498e3ad0c  fixtures/capabilities-granted/N1183-put-url-naming-an-upload.json
 bf7b8cbb022f83bc8b15ed365a27333f7f9eb6a7c36d78aba7ecd6aefd91a625  fixtures/capabilities-granted/N1184-put-url-naming-a-part.json
 d77a01ee8881964efb7073d3b8f24b6d039eb5328e31dc20a7409e7f31b93b18  fixtures/capabilities-granted/N1185-put-url-with-an-acl-header-parameter.json
@@ -1129,6 +1129,7 @@ fcb7a909a325c93a8ec468e01fa675445c7c73b38ca02103f5a8e1e41774653f  fixtures/capab
 64be6acc0f80c02b37b34af7d41d70dd6c2c110d7cc96e0e03a70e3e2489993b  fixtures/capabilities-granted/N1498-put-url-user-information.json
 432c1129d014955a81f9215dd5eedb2991181008d2d9d1d20d46dba383d5641e  fixtures/capabilities-granted/N1499-source-url-user-information.json
 b15ae442f3e95dfd40e6a9826765506ac70f00d269fd2b0a4a280ce71a26957f  fixtures/capabilities-granted/N1503-answer-one-byte-over-its-cap.json
+a62f55405adf1dd5ea191dd5ae3ec90b78114f40cb257b3218326b3a6bec5d00  fixtures/capabilities-granted/N1527-put-url-naming-an-allowed-parameter-in-other-capitals.json
 00c4f598f3ba571d66897c74b5686e2299355e149014ff233fcea09f06669e12  fixtures/capabilities-granted/P124-heartbeat-answer-at-probing.json
 87c8004bc1eddd8c1ec7710ea73c136d74ff4e5646d17e8786c79ae7d6cc9d6f  fixtures/capabilities-granted/P125-source-only-answer-at-downloading.json
 61978ecfc3f4e809418fd3fce1cac2a6d61d22d33e98257b7660ae8ae510f0a8  fixtures/capabilities-granted/P126-put-only-answer-one-object-at-finalizing.json
@@ -1149,6 +1150,7 @@ d117b95daede41874ce5eb5b9dfea583249e70e989e22f094466ffb7062a59ca  fixtures/capab
 b00816b86b8ee1f2cefb86d99bc9d5c153852d0bcc27d832b31f18196cead068  fixtures/capabilities-granted/P141-heartbeat-answer-at-uploading.json
 954b0700af77388ce0aac7f7743b7324b9d52dcf40bfe45ca00d2adb5d288571  fixtures/capabilities-granted/P144-row-granted-worker-valid.json
 954b0700af77388ce0aac7f7743b7324b9d52dcf40bfe45ca00d2adb5d288571  fixtures/capabilities-granted/P145-row-granted-hub-valid.json
+b1e53d77939c1ecb6955848a4abd51cb0a6aa9e23833c7877dab52404292b242  fixtures/capabilities-granted/P157-put-url-naming-an-allowed-parameter-escaped-once.json
 2e320361f1030f241575e663692834d58fb78c7f17986af3ec0d5424c8684459  fixtures/capabilities-request/N1096-request-sent-at-no-real-instant.json
 dda7434b80f919683b8220bc1cff5d8dfe324e6ec98ad130afc7ca71609ec994  fixtures/capabilities-request/N1097-request-audience-of-another-cell.json
 9eece1a562b5686dc3845b4e7452b4d0bf5cee21d851e498189bc4bf99f1072a  fixtures/capabilities-request/N1098-request-key-id-unknown.json
@@ -1343,7 +1345,7 @@ a67f4e79fb30c24d97a223d5c9f10bf77414937b772f25c10c460bc15bb454f1  fixtures/capab
 00d8b60ea0d52ec280ea39a6fafc49ad07685fad7a171abc4cd088bfb71070f5  fixtures/capabilities-version/P153-transcode-unclaimed-at-2-2-0-its-2-0-0-shape-unchanged.json
 29d8af8be87438ba4542182fe5ecd1d657d310ab466eca44bf96102d6e61dc94  fixtures/capabilities-version/P154-hub-error-at-2-2-0-carrying-a-reserved-capability-code.json
 1190eb521bdec10baedbdd01f9ae843a25f676be943a32fce5b603ac147189d8  fixtures/capabilities-version/P155-generation-manifest-keeps-1-0-0-beside-protocol-2-2-0.json
-e921d9ac9ecd87f89053b85833a2118b81f12b2894e13a6e4a584c8480da344d  fixtures/cases.json
+2c2522682d80205601bdffa3eedb413d2c8511603b9109c7a3d6c061a15d2a9a  fixtures/cases.json
 a69ae37f297f205545e686caf87db6819c281bddfb514818956acb2f4e46003d  fixtures/claim-granted/N122-another-runtime-id.json
 3c94efa61a18da0ea6fb557e8d60ddbac114e2cf3241bc205c945eeace087165  fixtures/claim-granted/N123-prefix-not-ending-in-generation.json
 5711412992e827719907382b7dd42311d80af0232cac90aca0ca847c8393400b  fixtures/claim-granted/N124-generation-not-execution.json
@@ -2213,6 +2215,7 @@ a0e27754b1def7039d37ec29a5b819656d2c38f212f2485334c4f4a26ca15c80  fixtures/conte
 602e652f80b0ff564444c26994d43f836faec7d12d1e5949f7cdf6ec5d3a016b  fixtures/contexts/ctx-cap-n1524.json
 6b3b01132ba1decbfe57545974ffa01ff8186e85be135a77b32ae5958d4f9f3a  fixtures/contexts/ctx-cap-n1525.json
 470724889cf3cb03b591d74e92f48865eb2b27d5061797231132ac6caaca85d1  fixtures/contexts/ctx-cap-n1526.json
+d75bd4217f73ee16e06b32a62eaf8c9ba2b571de941b5be99e167571a431bfd5  fixtures/contexts/ctx-cap-n1527.json
 9648117cfed7439349d0f86d06a7c787ea3d03b6fae02ebf8a54221e1b1cfa44  fixtures/contexts/ctx-cap-n945.json
 4ae5e145556c1d40ff175bfa0747ec1b2cb10d292ed3abc2506fb11f4b36df4c  fixtures/contexts/ctx-cap-n946.json
 e63a197b44e844330bf08ded809e0c08e27a0ad7f25fc506f481fe32d27332a7  fixtures/contexts/ctx-cap-n947.json
@@ -2301,6 +2304,7 @@ f12c5ff189bfac635cd6e276cedd290bd697e1883e50c13c0433f674f9aae64b  fixtures/conte
 148fb23aa0cb3fe49026857da5903dccde0d8df9bd843c2c0915fabe49eab262  fixtures/contexts/ctx-cap-p153.json
 6e2573684a43d9036211683df500cdf1875bc95972079cd5dc2e90bf4f66cfe6  fixtures/contexts/ctx-cap-p154.json
 bdc0fdc6e789b31fb525ab8f2885de99e77e2e899f6a999edc0257f0b04b01dc  fixtures/contexts/ctx-cap-p155.json
+d75bd4217f73ee16e06b32a62eaf8c9ba2b571de941b5be99e167571a431bfd5  fixtures/contexts/ctx-cap-p157.json
 feba82f9b86f95d0a0791534d352668637982696f635f4d477c84e9aa8341da6  fixtures/contexts/ctx-cap-request-last-1.json
 f674d0a5b91f08db66955a2d8b23bb286131ee3df009e08b8cec6f6a681496e8  fixtures/contexts/ctx-cap-request-worker.json
 a7a72e8e372946ffd2c87e76ebe2d7a310dcf2fc8b4db83d2c1de6461dda01fd  fixtures/contexts/ctx-cap-request.json

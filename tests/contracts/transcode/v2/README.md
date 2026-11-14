@@ -1309,8 +1309,14 @@ messages (sections 7 to 9).
 1. The capability route is served only over TLS and never redirects a plain-HTTP request to HTTPS. A
    request that reached the Hub without TLS, on its own connection or as its trusted TLS terminator
    reports, is never decided: it is answered `hub.error` `capability_refused` and nothing of its body is
-   used, as the claim route answers `claim_refused` (15.2). Every response of the route, a `hub.error`
-   included, carries `Cache-Control: no-store`.
+   used, as the claim route answers `claim_refused` (15.2). That refusal is not a backstop: a request
+   that travelled in cleartext is never decided, so its `seq` is never recorded, and a captured copy
+   sent again over TLS within the skew can still be answered. Only the runtime's own rule 3 (the
+   `https` address from its trusted configuration, the certificate verified, no redirect) keeps a
+   request off a cleartext path. Where TLS ends before the capability core (a reverse proxy or a CDN in
+   front of the Hub), that terminator and its link to the core (a private network, or TLS again) are
+   part of the trusted path, and a deployment names both in its runbook (B14). Every response of the
+   route, a `hub.error` included, carries `Cache-Control: no-store`.
 2. It answers only an authenticated, fully validated request of the runtime it granted. The
    validator's K1 reads a context built before the dispatch's lock is taken, so the core compares `seq`
    again with the recorded one under that lock and records the new one in the same transaction; a

@@ -23543,6 +23543,34 @@
         "reason": "context_invalid",
         "instance_path": null
       }
+    },
+    {
+      "id": "N1527",
+      "payload": "fixtures/capabilities-granted/N1527-put-url-naming-an-allowed-parameter-in-other-capitals.json",
+      "context": "fixtures/contexts/ctx-cap-n1527.json",
+      "rule": "capabilities-semantics",
+      "purpose": "put URL naming an allowed parameter in other capitals",
+      "context_needed": true,
+      "expect": {
+        "outcome": "reject",
+        "layer": "semantic",
+        "reason": "capability_url_invalid",
+        "instance_path": "/put/objects/0/url"
+      }
+    },
+    {
+      "id": "P157",
+      "payload": "fixtures/capabilities-granted/P157-put-url-naming-an-allowed-parameter-escaped-once.json",
+      "context": "fixtures/contexts/ctx-cap-p157.json",
+      "rule": "capabilities-granted",
+      "purpose": "put URL naming an allowed parameter escaped once",
+      "context_needed": true,
+      "expect": {
+        "outcome": "accept",
+        "layer": null,
+        "reason": null,
+        "instance_path": null
+      }
     }
   ]
 }
