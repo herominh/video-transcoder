@@ -32,7 +32,7 @@
       "put": {
         "lifetime_seconds": 180,
         "paths": [
-          "/thumbnail.jpg"
+          "thumbnail.jpg"
         ]
       }
     },
@@ -43,7 +43,7 @@
     },
     "capability_source": {
       "bucket": "test-source-bucket",
-      "object_key": "test/sources/source-0001.mp4"
+      "object_key": "/test/sources/a.mp4"
     }
   }
 }

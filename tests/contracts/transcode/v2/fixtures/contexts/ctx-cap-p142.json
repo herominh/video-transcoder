@@ -1,6 +1,6 @@
 {
   "context_version": 1,
-  "role": "worker_sender",
+  "role": "hub_receiver",
   "channel": "push",
   "accepted_message_kinds": [
     "execution.capabilities.request"

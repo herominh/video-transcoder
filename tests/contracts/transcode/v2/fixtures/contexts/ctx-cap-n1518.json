@@ -1,6 +1,6 @@
 {
   "context_version": 1,
-  "role": "hub_receiver",
+  "role": "worker_receiver",
   "channel": "push",
   "accepted_message_kinds": [
     "execution.capabilities.granted"
@@ -32,7 +32,7 @@
       "put": {
         "lifetime_seconds": 180,
         "paths": [
-          "thumbnail.jpg"
+          "/thumbnail.jpg"
         ]
       }
     },

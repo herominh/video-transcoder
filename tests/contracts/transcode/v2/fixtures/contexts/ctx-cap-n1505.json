@@ -28,7 +28,7 @@
     "capability_request": {
       "seq": 5,
       "stage": "transcoding",
-      "source": "true",
+      "source": false,
       "put": {
         "lifetime_seconds": 180,
         "paths": [
@@ -36,7 +36,7 @@
         ]
       }
     },
-    "capability_storage_host": "store.example.invalid",
+    "capability_storage_host": "store.example.invalid:443",
     "capability_output": {
       "bucket": "test-output-bucket",
       "prefix": "test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555"

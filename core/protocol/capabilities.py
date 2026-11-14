@@ -20,6 +20,11 @@ SOURCE_SIGNED_HEADERS = "host"
 # A put URL stores only the bytes its declared MD5 names.
 PUT_SIGNED_HEADERS = "content-md5;host"
 WHOLE_SECOND = "000"
+# The query parameters the Hub's SigV4 query presign writes, the only ones a capability URL may hold.
+SIGNED_QUERY_PARAMETERS = frozenset({
+    "X-Amz-Algorithm", "X-Amz-Content-Sha256", "X-Amz-Credential", "X-Amz-Date",
+    "X-Amz-Expires", "X-Amz-Security-Token", "X-Amz-SignedHeaders", "X-Amz-Signature",
+})
 
 Finding = Optional[tuple[ReasonCode, str]]
 
@@ -103,8 +108,7 @@ def _url_valid(url: str, context: TrustedContext, bucket: str, key: str, expires
         return False
     named_bucket, named_key, params = parsed
     expires_ms = _ms(expires_at)
-    return (named_bucket == bucket and named_key == key
-            and "uploadId" not in params and "partNumber" not in params
+    return (named_bucket == bucket and named_key == key and set(params) <= SIGNED_QUERY_PARAMETERS
             and params.get("X-Amz-SignedHeaders") == signed_headers
             and expires_ms is not None and signed_until_ms(params, context) == expires_ms)
 

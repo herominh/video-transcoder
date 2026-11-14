@@ -26,7 +26,7 @@
     "execution_fence": 2,
     "runtime_id": "88888888-8888-7888-8888-888888888888",
     "capability_request": {
-      "seq": 5,
+      "seq": 0,
       "stage": "transcoding",
       "source": false,
       "put": {
@@ -34,8 +34,7 @@
         "paths": [
           "thumbnail.jpg"
         ]
-      },
-      "extra": 1
+      }
     },
     "capability_storage_host": "store.example.invalid",
     "capability_output": {

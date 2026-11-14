@@ -16,16 +16,25 @@ CATALOG = files.read_json("fixtures/cases.json")["cases"]
 MAXIMA = [case for case in CATALOG
           if case["rule"].startswith("capabilities-") and case["purpose"].startswith("maximal escaped")]
 CONTEXT_ROWS = [case for case in CATALOG if case["rule"] == "capabilities-contexts" and case["purpose"].endswith("valid")]
-# The measured bytes of the catalog's maximal escaped instances (README section 13).
+# The measured bytes of the catalog's maximal escaped instances, which pass K5 too (README section 13).
 MEASURED_MAXIMA = {
     MessageKind.EXECUTION_CAPABILITIES_REQUEST: 29_062,
     MessageKind.EXECUTION_CAPABILITIES_GRANTED: 959_619,
 }
-# What the schema alone allows beyond them, its longest version and audience strings, and the bytes that makes.
+# The schema-only worst cases: the longest version and audience strings, and every URL of the answer 4,096
+# characters of the costliest schema-valid character after `https://` (`/`, written `\/`). They need not pass K5.
 SCHEMA_MAXIMA = {
     MessageKind.EXECUTION_CAPABILITIES_REQUEST: 29_080,
-    MessageKind.EXECUTION_CAPABILITIES_GRANTED: 959_634,
+    MessageKind.EXECUTION_CAPABILITIES_GRANTED: 1_076_500,
 }
+URL_SCHEME = "https://"
+COSTLIEST_URL_CHARACTER = "/"
+MD5_LENGTH = 24
+MAX_SAFE_INTEGER = 9_007_199_254_740_991
+MAX_SEQ = 2_147_483_647
+MAX_DURATION_MS = 21_600_000
+MAX_LIFETIME_SECONDS = 300
+MAX_OBJECT_BYTES = 67_108_864
 LONGEST_VERSION = "9999.9999.9999-draft"
 LONGEST_AUDIENCE = "worker:a" + "9" * 39
 URL_LENGTH = 4_096
@@ -46,11 +55,17 @@ def _schema_maximal(case):
     document = files.read_json(case["payload"])
     document["protocol_version"] = LONGEST_VERSION
     document["audience"] = LONGEST_AUDIENCE
-    return document, MessageKind(document["message_kind"])
+    kind = MessageKind(document["message_kind"])
+    if kind is MessageKind.EXECUTION_CAPABILITIES_GRANTED:
+        costliest = URL_SCHEME + COSTLIEST_URL_CHARACTER * (URL_LENGTH - len(URL_SCHEME))
+        document["source"]["url"] = costliest
+        for item in document["put"]["objects"]:
+            item["url"] = costliest
+    return document, kind
 
 
 @pytest.mark.parametrize("case", MAXIMA, ids=lambda case: case["id"])
-def test_capability_maximum_when_measured_should_fill_every_array_and_string_and_fit_its_cap(case):
+def test_capability_maximum_when_measured_should_hold_every_member_at_its_bound_and_fit_its_cap(case):
     # Arrange
     raw = files.read_bytes(case["payload"])
     registry = load_registry()
@@ -58,17 +73,25 @@ def test_capability_maximum_when_measured_should_fill_every_array_and_string_and
     document = gate.parse(raw, registry.max_json_depth, registry.max_tokens)
     kind = MessageKind(document["message_kind"])
     # Assert
+    assert document["seq"] == MAX_SEQ
+    assert all(document["identity"][fence] == MAX_SAFE_INTEGER
+               for fence in ("placement_epoch", "lifecycle_revision", "execution_fence"))
     assert len(document["put"]["objects"]) == OBJECTS
     assert all(len(item["path"]) == PATH_LENGTH for item in document["put"]["objects"])
     if kind is MessageKind.EXECUTION_CAPABILITIES_GRANTED:
         assert all(len(item["url"]) == URL_LENGTH for item in document["put"]["objects"])
         assert len(document["source"]["url"]) == URL_LENGTH
+    else:
+        assert document["media_duration_ms"] == MAX_DURATION_MS
+        assert document["put"]["lifetime_seconds"] == MAX_LIFETIME_SECONDS
+        assert all(item["size_bytes"] == MAX_OBJECT_BYTES and len(item["md5"]) == MD5_LENGTH
+                   for item in document["put"]["objects"])
     assert len(raw) == MEASURED_MAXIMA[kind]
     assert len(raw) <= registry.max_bytes(kind)
 
 
 @pytest.mark.parametrize("case", MAXIMA, ids=lambda case: case["id"])
-def test_capability_maximum_when_widened_to_the_schema_alone_should_reach_each_bound_and_still_fit(case):
+def test_capability_maximum_when_widened_to_the_schema_alone_should_reach_each_bound_and_fit_its_cap(case):
     # Arrange
     document, kind = _schema_maximal(case)
     uri = schema.SCHEMA_BASE_URI + kind.schema_file
@@ -83,24 +106,40 @@ def test_capability_maximum_when_widened_to_the_schema_alone_should_reach_each_b
     assert len(raw) <= load_registry().max_bytes(kind)
 
 
-def test_capability_caps_when_read_should_be_the_contracts_and_leave_the_others_unchanged():
+ALL_MAX_BYTES = {
+    "transcode.request": 4_096, "transcode.progress": 4_096, "transcode.result.completed": 16_384,
+    "transcode.result.failed": 16_384, "hub.error": 2_048, "generation.manifest": 8_388_608,
+    "transcode.claim": 4_096, "transcode.claim.granted": 4_096, "transcode.unclaimed": 4_096,
+    "source.acquire.request": 4_096, "source.acquire.granted": 2_097_152, "source.acquire.result.completed": 65_536,
+    "source.acquire.result.failed": 4_096, "execution.capabilities.request": 32_768,
+    "execution.capabilities.granted": 2_097_152,
+}
+ALL_CARRIER_MAX_BYTES = {"runpod.input": 8_448, "runpod.output": 33_024, "runpod.acquire.output": 131_328}
+
+
+def test_byte_caps_when_read_should_be_every_cap_the_contract_states():
     # Arrange
     registry = load_registry()
-    # Act / Assert
-    assert registry.max_bytes(MessageKind.EXECUTION_CAPABILITIES_REQUEST) == 32_768
-    assert registry.max_bytes(MessageKind.EXECUTION_CAPABILITIES_GRANTED) == 2_097_152
-    assert registry.max_bytes(MessageKind.TRANSCODE_CLAIM_GRANTED) == 4_096
-    assert registry.max_bytes(MessageKind.SOURCE_ACQUIRE_GRANTED) == 2_097_152
+    # Act
+    max_bytes = {kind.value: registry.max_bytes(kind) for kind in MessageKind}
+    # Assert
+    assert max_bytes == ALL_MAX_BYTES
+    assert dict(registry.limits["max_bytes"]) == ALL_MAX_BYTES
+    assert dict(registry.limits["carrier_max_bytes"]) == ALL_CARRIER_MAX_BYTES
     assert registry.max_tokens == 277_507
     assert registry.limits["capability_closure_margin_seconds"] == 60
 
 
+# The kinds that exist at one protocol version only, by their literal names (README section 5).
+SINGLE_VERSION_KINDS = {
+    "source.acquire.request": "2.1.0", "source.acquire.granted": "2.1.0",
+    "source.acquire.result.completed": "2.1.0", "source.acquire.result.failed": "2.1.0",
+    "execution.capabilities.request": "2.2.0", "execution.capabilities.granted": "2.2.0",
+}
+
+
 def _existence(kind, version):
-    if kind.value.startswith("execution.capabilities."):
-        return version == "2.2.0"
-    if kind.value.startswith("source.acquire."):
-        return version == "2.1.0"
-    return True
+    return SINGLE_VERSION_KINDS.get(kind.value, version) == version
 
 
 VERSIONED_KINDS = [(kind, version) for kind in MessageKind if kind is not MessageKind.GENERATION_MANIFEST

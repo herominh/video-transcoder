@@ -34,11 +34,12 @@
         "paths": [
           "thumbnail.jpg"
         ]
-      }
+      },
+      "extra": 1
     },
     "capability_storage_host": "store.example.invalid",
     "capability_output": {
-      "bucket": "Test-output-bucket",
+      "bucket": "test-output-bucket",
       "prefix": "test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555"
     },
     "capability_source": {

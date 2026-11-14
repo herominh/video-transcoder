@@ -36,13 +36,12 @@
         ]
       }
     },
-    "capability_storage_host": "Store.example.invalid",
+    "capability_storage_host": "store.example.invalid",
     "capability_output": {
       "bucket": "test-output-bucket",
       "prefix": "test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555"
     },
     "capability_source": {
-      "bucket": "test-source-bucket",
       "object_key": "test/sources/source-0001.mp4"
     }
   }

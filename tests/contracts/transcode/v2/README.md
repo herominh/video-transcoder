@@ -270,9 +270,12 @@ location. The worker reaches a location through `bucket` and the access profile 
 configuration holds under `credential_ref` (endpoint and credentials); nothing in a message names
 an endpoint or a credential. It resolves both targets only after the grant (section 15.1). The
 grant's `output.location_id` names the same location as the dispatch's `output` (S18 compares
-them), so the output bucket is the dispatch's. A `credential_ref` its configuration does not hold
-ends the execution with `transcode.result.failed`, error class `configuration_error`, code
-`unknown_credential_ref`, before it reads the source. No semantic check reads `bucket` or
+them), so the output bucket is the dispatch's. At `2.0.0` and `2.1.0` a `credential_ref` its
+configuration does not hold ends the execution with `transcode.result.failed`, error class
+`configuration_error`, code `unknown_credential_ref`, before it reads the source. At `2.2.0`
+`credential_ref` is validated by its schema only and no access profile is looked up: the runtime
+reaches both locations through the URLs of the capability exchange alone (section 15.4, runtime
+rule 1). No semantic check reads `bucket` or
 `credential_ref`: the schema bounds them, the Hub's own record is the source of truth, and the
 worker checks nothing beyond the schema.
 
@@ -474,8 +477,10 @@ The Hub sender pins every part URL and the result URL to `expect.acquire_bucket`
 the trusted destination location. The worker receiver checks only that all URLs share one bucket,
 since its accepted request carries no bucket and it holds no trusted bucket. A mismatch fails
 `acquire_url_invalid` at the first offending URL in the pointer order above.
-Reject repeated query parameter names and invalid percent escapes. Parse query values once; never
-decode or normalize the path. Require SigV4 X-Amz-Date and X-Amz-Expires exactly once: Date is a
+Reject repeated query parameter names and invalid percent escapes. Decode each query name and
+value exactly once, as `application/x-www-form-urlencoded` does: percent-decoding, with `+` read as
+a space; names and values compare as the decoded bytes, so a name repeated only once decoded is a
+repeated name. Never decode or normalize the path. Require SigV4 X-Amz-Date and X-Amz-Expires exactly once: Date is a
 real YYYYMMDDTHHMMSSZ instant no later than context.now plus skew, Expires is canonical decimal
 seconds 1–604,800, and their sum equals W in section 15.2 with W > context.now. Other SigV4 signing
 parameters are opaque, bounded by the URL length. Both URL kinds are PUT-only capabilities because
@@ -534,16 +539,23 @@ user information or fragment. Its path, unescaped and never decoded or normalize
 `/{bucket}/{key}`: for `/source/url`, `expect.capability_source.bucket` and
 `expect.capability_source.object_key`; for a put object, `expect.capability_output.bucket` and
 `{expect.capability_output.prefix}/{path}` with that object's own `path`. It has a nonempty well-formed
-query: no repeated parameter name, after decoding included; valid percent escapes; each name and value
-decoded exactly once. It names no `uploadId` and no `partNumber`. `X-Amz-Date` and `X-Amz-Expires`
+query: valid percent escapes; each name and value decoded exactly once, as A5 defines it
+(`application/x-www-form-urlencoded`: percent-decoding, `+` read as a space, names and values compared
+as the decoded bytes); no repeated parameter name, after decoding included. After decoding, every
+parameter name is one of exactly `X-Amz-Algorithm`, `X-Amz-Content-Sha256`, `X-Amz-Credential`,
+`X-Amz-Date`, `X-Amz-Expires`, `X-Amz-Security-Token`, `X-Amz-SignedHeaders` and `X-Amz-Signature`,
+compared case-sensitively; a URL holding any other name is refused, so no `uploadId`, `partNumber`,
+ACL, version or sub-resource parameter can ride on a capability. This list is the one the Hub's
+signer writes (the S3 SigV4 query presign). `X-Amz-Date` and `X-Amz-Expires`
 appear exactly once: the date is a real `YYYYMMDDTHHMMSSZ` instant no later than `context.now` plus the
 skew, the expiry canonical decimal seconds 1 to 604,800, and their sum equals the member's
 `expires_at` (`/source/expires_at` or `/put/expires_at`). `X-Amz-SignedHeaders` appears exactly once,
 and its decoded value is exactly `host` for the source URL and exactly `content-md5;host` for a put
-object. Every other SigV4 parameter is opaque, bounded by the URL's length.
+object. The values of the names K5 does not read stay opaque, bounded by the URL's length.
 
 A put URL is a PUT-only capability for that one key and that one `Content-MD5`; the source URL is a
-GET-only capability for the one original. No method is ever inferred from a parameter. The runtime
+GET-only capability for the one original. That rests on the signature, the path rule, the
+signed-headers rule and the list of names above, together. No method is ever inferred from a parameter. The runtime
 never follows a redirect and never logs a parsing exception that holds a URL. Deliberately not checked
 against the receiver's clock: that a URL has not expired. The store's clock decides, and a runtime
 whose clock runs ahead must not refuse a valid answer; only S4, S5 and the date bound above read
@@ -573,7 +585,7 @@ it, never taken from the message. `schemas/trusted-context.schema.json` is exact
 | `known_key_ids` | up to 8 distinct key ids, or null | the keys valid for this direction |
 | `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`, `acquire_destination`, `acquire_external`, `acquire_plan`, `acquire_limits`, `acquire_expires_at`, `acquire_storage_host`, `acquire_bucket`, `acquire_upload_id`, `capability_request {seq, stage, source, put}` (`put` null or `{lifetime_seconds, paths}`), `capability_storage_host`, `capability_output {bucket, prefix}`, `capability_source {bucket, object_key}`; each optional and nullable |
 | `last_event_seq` | integer 0 to 2,147,483,647 or null | highest accepted progress sequence of the execution |
-| `last_capability_seq` | integer 0 to 2,147,483,647 or null | highest accepted capability request sequence of the execution (0: none received yet) |
+| `last_capability_seq` | integer 0 to 2,147,483,647 or null | the highest capability request `seq` the Hub recorded for the execution (0: none yet); for the worker sender, the highest `seq` it has sent |
 
 ### 9.2 Construction
 
@@ -677,7 +689,8 @@ for progress and results (`placement_epoch` and `lifecycle_revision` as dispatch
 `execution_fence` as granted, the `runtime_id` of the grant), never the video's current revision:
 whether an execution may still be issued a capability is the Hub's decision after validation (section
 15.4), not a validation verdict. `last_capability_seq` is the highest `seq` the Hub recorded for the
-execution, 0 before the first request.
+execution, 0 before the first request; for the worker sender, the highest `seq` it has sent, 0 before
+its first.
 
 The record rules apply to both encode and acquire:
 
@@ -775,8 +788,8 @@ key line.
   `carriers/runpod-acquire-output.schema.json`, the same closed value with `vh_message` length
   2-65,536 and raw cap `runpod.acquire.output` 131,328. Failed and unclaimed acquire messages may
   use it but retain their 4,096-byte inner cap. The HTTP callback raw outer cap is 65,536, followed
-  by the selected kind's cap; the claim request stays 4,096. Only an acquire grant answer reader
-  permits 2,097,152. Encode output and encode grant limits are unchanged.
+  by the selected kind's cap; the claim request stays 4,096. Only the acquire grant's and the
+  capability answer's readers permit 2,097,152. Encode output and encode grant limits are unchanged.
 * Acquire requests use the Hub-to-worker key and existing input carrier; RunPod wraps that value
   in `input`. Raw nested requests are refused. The reused claim uses the worker-to-Hub key.
   Acquire grants are signed raw HTTP 200 bodies, `Cache-Control: no-store`, only to the granted
@@ -786,8 +799,11 @@ key line.
   there is no new key family.
 * The capability exchange (`2.2.0`) uses the same HTTP carrier and the same signing domain, with no
   new key family: a request is the body of an HTTP request signed with a worker-to-Hub key, its answer
-  the raw body of a `200` response signed with a Hub-to-worker key and `Cache-Control: no-store`, sent
-  only to the runtime whose request it answers; neither travels in a RunPod carrier or a stored result.
+  the raw body of a `200` response signed with a Hub-to-worker key, sent only to the runtime whose
+  request it answers; neither travels in a RunPod carrier or a stored result. As for the claim, the
+  capability address is the worker's trusted configuration, `https` only, its certificate verified and
+  no redirect followed; the route is served only over TLS, never redirects plain HTTP, and every
+  response it gives, a `hub.error` included, carries `Cache-Control: no-store` (section 15.4).
   Its HTTP readers and their caps are the Hub's capability route (a later slice) and the worker's
   capability client: only a reader of this one answer permits 2,097,152 bytes, as only the acquire
   grant's reader does for that kind.
@@ -822,12 +838,15 @@ key line.
 
 A runtime judges a Hub response that is neither a valid `hub.error` nor the expected
 success response by its HTTP status alone. A claim succeeds only with the signed,
-accepted grant of section 15.1; a callback succeeds on a 2xx response, including the
+accepted grant of section 15.1; a capability request succeeds only with the signed,
+accepted answer of section 15.4; a callback succeeds on a 2xx response, including the
 empty duplicate answer above.
 
 * `429`, `502`, `503`, `504`: a temporary refusal, retried with backoff, honouring a
   `Retry-After` expressed in seconds. A claim retry never starts at or after
-  `claim.expires_at`; a callback retry never starts at or after the runtime's write
+  `claim.expires_at`; a capability request is asked again as a new message (15.4,
+  runtime rule 2) and never at or after the runtime's copy of `lease.expires_at` (15.4,
+  runtime rule 6); a callback retry never starts at or after the runtime's write
   deadline (15.1 rule 8). A delay that reaches that bound ends retries.
 * `413`: a permanent refusal, treated as `payload_too_large`.
 * Any other status: `invalid_answer`.
@@ -846,14 +865,17 @@ without a valid `hub.error` is `unreachable`; a non-envelope `413` is reported a
 completed 65,536 and failed 4,096; `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
 `max_segments_per_rendition` 3,600, `storage_call_margin_seconds` 600 (15.1, rule 8; 15.2); capability
 request 32,768 and answer 2,097,152, and `capability_closure_margin_seconds` 60 (section 15.4, Hub rule
-6), which no validator reads. The worst case of every kind (every string at its maximum length
+7), which no validator reads. The worst case of every kind (every string at its maximum length
 in the costliest characters, every integer at its maximum, every array full, every optional member
 present, `/` written as `\/`) passes its schema and fits its limit; both suites build it, prove it
-maximal against the schema's bounds, and measure it. The capability maxima are catalog positives,
-measured on both sides: the request with 128 objects of 128-character paths and the escaped maximal MD5
-is 29,062 bytes (945 tokens), the answer with 128 put URLs and a source URL of 4,096 characters each,
-`/` escaped wherever it may stand, 959,619 bytes (699 tokens); with the longest version and audience
-strings the schema alone allows they are 29,080 and 959,634 bytes. `max_tokens` needs no change.
+maximal against the schema's bounds, and measure it. Both suites measure two capability maxima of each
+kind. The maximal positives of the catalog, which pass K5 as well: the request with 128 objects of
+128-character paths, every integer at its maximum and the escaped maximal MD5 is 29,062 bytes (945
+tokens), and the answer with 128 put URLs and a source URL of 4,096 characters each, `/` escaped
+wherever K5 lets it stand, 959,619 bytes (699 tokens). The schema-only maxima, which need not pass K5:
+the same with the longest version and audience strings the schema allows, and in the answer every URL
+`https://` followed by 4,088 `/` (the costliest schema-valid character, written `\/`), are 29,080 and
+1,076,500 bytes. `max_tokens` needs no change.
 
 **Writer convention.** Senders serialize compactly: no insignificant whitespace, only the escapes
 JSON requires (optionally `/` as `\/`), integers as integer literals. The byte limits are guaranteed
@@ -891,21 +913,21 @@ Catalog counts are calculated from `cases.json`; positive and negative ids conti
 and `N149`, without renumbering old cases (two to four digits). The acquire groups are
 `acquire-request`, `acquire-grant`, `acquire-results`, `acquire-contexts`, `acquire-version`,
 `acquire-semantics`, `acquire-bounds`, `acquire-carriers`, named by `rule`. The capability groups
-(`2.2.0`, ids `P112` to `P155` and `N945` to `N1518`, payloads under `fixtures/capabilities-request/`,
+(`2.2.0`, ids `P112` to `P156` and `N945` to `N1526`, payloads under `fixtures/capabilities-request/`,
 `fixtures/capabilities-granted/` and `fixtures/capabilities-version/`) are `capabilities-request` (12
 cases: every stage, the heartbeat, source only, put only with 1 and 128 objects, both, a null and a set
 duration, the worker's self-check, the minimal and the maximal escaped request),
-`capabilities-granted` (17: their answers for both roles, both expiry bounds, a URL dated at the skew
-bound or before the sending, a put URL the receiver's clock already sees expired, the minimal and the
-maximal escaped answer), `capabilities-contexts` (144: a valid row and the absent and null case of every
+`capabilities-granted` (18: their answers for both roles, both expiry bounds, a URL dated at the skew
+bound or before the sending, a put URL the receiver's clock already sees expired, escapes decoded once
+and a security token, the minimal and the maximal escaped answer), `capabilities-contexts` (144: a valid row and the absent and null case of every
 required field, for each of the four role and kind pairs), `capabilities-version` (21: both kinds at
 `2.0.0` and `2.1.0`, both at `2.2.0` under the live lists, the four acquire kinds at `2.2.0`, the eight
 encode-family kinds at `2.2.0` with their `2.0.0` shapes, a `hub.error` carrying a reserved capability
-code, the manifest at `1.0.0` and at `2.2.0`), `capabilities-semantics` (113: the S checks of both
-kinds, every branch of K1 to K5 and every K5 URL rule) and `capabilities-bounds` (311: the absent, null,
+code, the manifest at `1.0.0` and at `2.2.0`), `capabilities-semantics` (121: the S checks of both
+kinds, every branch of K1 to K5 and every K5 URL rule, the list of query names included) and `capabilities-bounds` (311: the absent, null,
 wrong-type and both bound negatives of every member of both kinds, the URL refusals of the schema,
-closed objects and enums, the parse layer, both caps exactly and one byte over, and 23 invalid
-contexts). Context-construction
+closed objects and enums, the parse layer, the request's cap exactly, both caps one byte over, and 23
+invalid contexts). Context-construction
 cases use outcome `context_invalid` or `context_incomplete`, layer `context`, the matching
 snake-case reason, and the missing field as a pointer for incomplete (null for invalid). They
 never run the message pipeline. A carrier case additionally names `carrier`: check its raw cap,
@@ -1251,41 +1273,70 @@ messages (sections 7 to 9).
 2. It asks only after its claim was granted (15.1, rule 3), with the execution identity and the
    `runtime_id` of its claim, `seq` strictly increasing from 1, one request at a time. A retry after a
    lost answer is a new message (`message_id`, `sent_at`, `seq` and signature), never the same bytes.
-3. It declares for every object its path relative to the granted prefix, its exact size and the base64
+3. The capability address comes from the worker's trusted configuration, never from a message. It is an
+   `https` URL: the runtime refuses any other scheme, verifies the Hub's certificate and follows no
+   redirect, because the answer carries URLs that are write capabilities. An answer it does not accept
+   (a signature that does not verify, a verdict other than accepted at `worker_receiver`, K3 to K5
+   included) is discarded unused: no URL of it is used.
+4. It declares for every object its path relative to the granted prefix, its exact size and the base64
    MD5 of its bytes, and sends the PUT with exactly that `Content-MD5`. A path keeps the size and MD5 it
    was first declared with.
-4. It uses a URL only for the object it was granted for, and never after the URL's expiry counted from
-   the instant it sent the request, on a monotonic clock. It asks again for a URL it could not use in
-   time: renewal is asking again.
-5. `put` null with `source` false is the heartbeat. A runtime sends a request at least every 180 seconds
-   while it works. When it cannot obtain an accepted answer before `lease.expires_at` (counted the same
-   monotonic way), or the Hub answers `lease_expired`, `stage_budget_exceeded` or `capability_refused`,
-   it stops: it starts no further write, ends its work, and reports its failed result (15.1 rules 8 and
-   9 unchanged; the stored result needs a live URL like every write).
-6. `stage` is the stage it is in; stages only move forward, in the order `probing`, `downloading`,
+5. It uses a URL only for the object it was granted for, and only before the duration `expires_at`
+   minus the answer's `sent_at` has passed since the instant it **sent** the request, on a monotonic
+   clock. It asks again for a URL it could not use in time: renewal is asking again.
+6. `put` null with `source` false is the heartbeat. A runtime sends a request at least every 180 seconds
+   while it works. Its lease ends, by its own count, once `lease.expires_at` minus the answer's
+   `sent_at` has passed since the instant it sent the request that answer answers, on the same monotonic
+   clock. When it cannot obtain an accepted answer before its lease ends, or the Hub answers
+   `lease_expired`, `stage_budget_exceeded` or `capability_refused`, it stops: it starts no further
+   write and asks for no further URL, ends its work, and reports its failed result (15.1 rules 8 and 9
+   unchanged). A stopped runtime may still store its result (15.1 rule 9) through a URL it already holds
+   and whose expiry has not passed; it writes nothing else.
+7. A `hub.error` whose `retryable` is true, or an answer that section 12 ("Answers that are not a
+   hub.error") says to retry, is asked again as a new message (rule 2), with the claim's backoff and
+   its reading of `Retry-After` (15.1, rule 6), never at or after the end of its lease (rule 6). Every
+   other `hub.error`, every other status and an answer it does not accept (rule 3) end the work as
+   rule 6 does.
+8. `stage` is the stage it is in; stages only move forward, in the order `probing`, `downloading`,
    `transcoding`, `finalizing`, `uploading`. `media_duration_ms` is null until the probe admitted the
    source, then the admitted duration, unchanged afterwards.
-7. The manifest and the stored result are objects like the others, at their fixed keys (15.1 rule 9),
+9. The manifest and the stored result are objects like the others, at their fixed keys (15.1 rule 9),
    asked for last.
-8. URLs, request bodies and answers are never logged, persisted, or put in an error or a message.
+10. URLs, request bodies and answers are never logged, persisted, or put in an error or a message.
 
 **The Hub.**
 
-1. It answers only an authenticated, fully validated request of the runtime it granted; a `seq` at or
-   below the recorded one is `stale_capability_sequence`.
-2. It issues only while the execution runs for that runtime before its hard deadline, its lease is
+1. The capability route is served only over TLS and never redirects a plain-HTTP request to HTTPS. A
+   request that reached the Hub without TLS, on its own connection or as its trusted TLS terminator
+   reports, is never decided: it is answered `hub.error` `capability_refused` and nothing of its body is
+   used, as the claim route answers `claim_refused` (15.2). Every response of the route, a `hub.error`
+   included, carries `Cache-Control: no-store`.
+2. It answers only an authenticated, fully validated request of the runtime it granted. The
+   validator's K1 reads a context built before the dispatch's lock is taken, so the core compares `seq`
+   again with the recorded one under that lock and records the new one in the same transaction; a
+   `seq` at or below the recorded one is `stale_capability_sequence`.
+3. It issues only while the execution runs for that runtime before its hard deadline, its lease is
    live, its stage is inside its budget, and its result could still be published (the organization is
    active, the placement epoch and the video's lifecycle revision are the recorded ones, and the fence is
    the video's newest encode fence). Otherwise it answers `hub.error` `capability_refused`,
    `lease_expired` or `stage_budget_exceeded`, each final.
-3. It records every declared object and the newest expiry it will sign **before** it signs, signs with
-   no transaction open at absolute whole-second expiries (put: now plus the asked lifetime; source: the
-   hard deadline), rechecks the execution after signing, and only then answers. A signing failure is a
-   retryable `internal_error` and changes no reservation; the recorded expiry stands.
-4. A path asked again with another size or MD5 is `capability_conflict`; more distinct paths or bytes
+4. It records every declared object and the newest expiry it will sign **before** it signs, signs with
+   no transaction open at absolute whole-second expiries, rechecks the execution after signing, and only
+   then answers. The put expiry is the instant the Hub records the request, truncated to its second,
+   plus the asked lifetime; the source expiry is the hard deadline truncated to its second. When an
+   expiry so computed is not after the answer's `sent_at`, the Hub answers `capability_refused`. A
+   signing failure is a retryable `internal_error` and changes no reservation; the recorded expiry
+   stands.
+5. A path asked again with another size or MD5 is `capability_conflict`; more distinct paths or bytes
    than the dispatch's limits allow is `capability_limit_exceeded`.
-5. Every accepted request moves the lease to its length from now, never past the hard deadline.
-6. The Hub publishes a `2.2.0` generation only after its closure: the newest put expiry it recorded plus
-   `limits.json` `capability_closure_margin_seconds` (60), and the store's listing of the prefix equal
-   to the recorded objects and the manifest. The seal is the Hub's, and a later slice builds it.
-   `write_deadline_at` (15.2, "The last write") stays the bound a deletion and a cleanup wait for.
+6. Every accepted request moves the lease to its length from now, never past the hard deadline. A lease
+   the Hub answers ends at least 600 seconds after the answer's `sent_at`, or at the execution's hard
+   deadline when that is sooner: the runtime's 180-second heartbeat (runtime rule 6) rests on it.
+7. The Hub publishes a `2.2.0` generation only after its closure: the newest put expiry it recorded plus
+   `limits.json` `capability_closure_margin_seconds` (60), and the store's listing of the prefix in
+   agreement with the record. The stored result (`result.json`) is no artifact and its write may fail
+   without holding back the report (15.1 rule 9), so the listing may lack it: the listing holds every
+   other recorded object, the manifest included, at its recorded size, and nothing that is not
+   recorded; the stored result, when listed, has its recorded size. The seal is the Hub's, and a later
+   slice builds it. `write_deadline_at` (15.2, "The last write") stays the bound a deletion and a
+   cleanup wait for.

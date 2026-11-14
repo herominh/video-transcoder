@@ -1,6 +1,6 @@
 {
   "context_version": 1,
-  "role": "hub_receiver",
+  "role": "worker_receiver",
   "channel": "push",
   "now": "2030-01-01T00:00:00.000Z",
   "clock_skew_s": 300,
@@ -8,12 +8,11 @@
     "2.2.0"
   ],
   "accepted_message_kinds": [
-    "transcode.unclaimed"
+    "transcode.claim.granted"
   ],
-  "expected_audience": "hub:cell-test-a",
+  "expected_audience": "worker:runpod-test",
   "known_key_ids": [
-    "test-wk2hub-k1",
-    "test-wk2hub-k2"
+    "test-hub2wk-k1"
   ],
   "expect": {
     "org_uuid": "11111111-1111-7111-8111-111111111111",
@@ -22,6 +21,12 @@
     "placement_epoch": 7,
     "lifecycle_revision": 3,
     "attempt_id": "33333333-3333-7333-8333-333333333333",
-    "dispatch_id": "44444444-4444-7444-8444-444444444444"
+    "dispatch_id": "44444444-4444-7444-8444-444444444444",
+    "output_location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
+    "encryption": {
+      "mode": "aes-128",
+      "media_key_id": "77777777-7777-7777-8777-777777777777"
+    },
+    "runtime_id": "88888888-8888-7888-8888-888888888888"
   }
 }

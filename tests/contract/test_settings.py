@@ -1,5 +1,6 @@
 """The worker's v2 configuration loads only when every variable holds, and never shows a key or a secret."""
 
+import dataclasses
 import re
 import traceback
 from dataclasses import FrozenInstanceError
@@ -369,9 +370,12 @@ def test_from_env_when_every_live_version_is_listed_should_accept_them_in_order(
 
 
 @pytest.mark.parametrize("value", ["2.2.0", "2.0.0,2.2.0"], ids=["alone", "beside-a-live-version"])
-def test_from_env_when_an_entry_is_a_draft_version_should_refuse_the_start(value):
-    # Arrange: the shipped tree lists 2.2.0, the capability exchange, as its one draft.
-    assert ContractRegistry.load().accepted_versions(VersionLine.PROTOCOL, VersionChannel.DRAFT) == ("2.2.0",)
+def test_from_env_when_an_entry_is_a_draft_version_should_refuse_the_start(monkeypatch, value):
+    # Arrange: this test's registry defines its own draft, whatever draft the shipped tree lists.
+    shipped = ContractRegistry.load()
+    versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.2.0"]}}
+    registry = dataclasses.replace(shipped, versions=versions)
+    monkeypatch.setattr(worker_settings, "load_registry", lambda: registry)
 
     # Act
     refusal = _refusal(_env(VH_ACCEPTED_PROTOCOL_VERSIONS=value))

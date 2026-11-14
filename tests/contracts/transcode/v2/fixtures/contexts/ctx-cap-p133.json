@@ -5,7 +5,7 @@
   "accepted_message_kinds": [
     "execution.capabilities.granted"
   ],
-  "now": "2030-01-01T00:05:00.000Z",
+  "now": "2030-01-01T00:00:00.000Z",
   "clock_skew_s": 300,
   "accepted_protocol_versions": [
     "2.2.0"

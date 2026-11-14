@@ -28,7 +28,7 @@
     "capability_request": {
       "seq": 5,
       "stage": "transcoding",
-      "source": false,
+      "source": "true",
       "put": {
         "lifetime_seconds": 180,
         "paths": [
@@ -42,6 +42,7 @@
       "prefix": "test/media/22222222-2222-7222-8222-222222222222/55555555-5555-7555-8555-555555555555"
     },
     "capability_source": {
+      "bucket": "test-source-bucket",
       "object_key": "test/sources/source-0001.mp4"
     }
   }
