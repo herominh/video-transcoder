@@ -91,6 +91,7 @@ class TrustedContext:
     known_key_ids: tuple[str, ...] | None
     expect: Mapping[str, Any] | None = field(repr=False)
     last_event_seq: int | float | None
+    last_capability_seq: int | float | None
     _construction: InitVar[object] = None
 
     def __post_init__(self, _construction: object) -> None:
@@ -118,6 +119,11 @@ class TrustedContext:
             if expect.get(name) is not None:
                 for member in members:
                     expect[name][member] = int(expect[name][member])
+        answered = expect.get("capability_request")
+        if answered is not None:
+            answered["seq"] = int(answered["seq"])
+            if answered["put"] is not None:
+                answered["put"]["lifetime_seconds"] = int(answered["put"]["lifetime_seconds"])
         if snapshot.get("now") is not None and parse_timestamp_ms(snapshot["now"]) is None:
             raise ContextInvalid("context `now` is not a real calendar instant")
         expiry = (snapshot.get("expect") or {}).get("acquire_expires_at")
@@ -167,6 +173,7 @@ class TrustedContext:
             known_key_ids=_tuple_or_none(snapshot.get("known_key_ids")),
             expect=_frozen(snapshot.get("expect")),
             last_event_seq=snapshot.get("last_event_seq"),
+            last_capability_seq=snapshot.get("last_capability_seq"),
             _construction=_FROM_DICT,
         )
 

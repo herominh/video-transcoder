@@ -1,4 +1,5 @@
-"""Every live version is accepted, and no version is a draft; a draft would be supported only by a context built for tests."""
+"""Every live version is accepted, and 2.2.0 (the capability exchange) is the one draft, supported only by a context
+built for tests."""
 
 from dataclasses import replace
 
@@ -28,7 +29,7 @@ def test_live_versions_when_loaded_should_be_exactly_both_protocol_minors_and_ma
     assert live == (("2.0.0", "2.1.0"), ("1.0.0",))
 
 
-def test_draft_versions_when_loaded_should_be_empty():
+def test_draft_versions_when_loaded_should_list_only_the_capability_minor():
     # Arrange
     registry = ContractRegistry.load()
 
@@ -39,7 +40,7 @@ def test_draft_versions_when_loaded_should_be_empty():
     )
 
     # Assert
-    assert drafts == ((), ())
+    assert drafts == (("2.2.0",), ())
 
 
 @pytest.mark.parametrize("case", POSITIVE_CASES, ids=[case["id"] for case in POSITIVE_CASES])
@@ -59,7 +60,11 @@ def test_live_message_when_validated_under_live_context_should_be_accepted(case)
     verdict = pipeline.validate(files.read_bytes(case["payload"]), live_context)
 
     # Assert
-    assert verdict.accepted
+    raw_version = files.read_json(case["payload"]).get("protocol_version")
+    if raw_version == "2.2.0":
+        assert verdict.reason is ReasonCode.UNSUPPORTED_VERSION
+    else:
+        assert verdict.accepted
 
 
 @pytest.mark.parametrize(
@@ -92,4 +97,4 @@ def test_draft_version_when_listed_only_in_a_test_registry_should_need_a_draft_c
     # Assert
     assert (refused.layer, refused.reason) == (Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION)
     assert accepted is kind
-    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == ()
+    assert ContractRegistry.load().accepted_versions(line, VersionChannel.DRAFT) == (("2.2.0",) if line is VersionLine.PROTOCOL else ())

@@ -1,0 +1,1 @@
+{"protocol_version":"2.2.0","message_kind":"hub.error","message_id":"99999999-9999-7999-8999-000000000012","sent_at":"2029-12-31T23:59:59.000Z","error":{"code":"lease_expired","message":"The execution's lease expired.","retryable":false},"request_message_id":"99999999-9999-7999-8999-000000000120"}

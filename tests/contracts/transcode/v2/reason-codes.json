@@ -432,6 +432,86 @@
       "retryable": false,
       "reserved": false,
       "first_unit": "item19"
+    },
+    {
+      "code": "stale_capability_sequence",
+      "layer": "semantic",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item11"
+    },
+    {
+      "code": "duplicate_capability_path",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item11"
+    },
+    {
+      "code": "capability_answer_mismatch",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item11"
+    },
+    {
+      "code": "capability_expiry_invalid",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item11"
+    },
+    {
+      "code": "capability_url_invalid",
+      "layer": "semantic",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": false,
+      "first_unit": "item11"
+    },
+    {
+      "code": "capability_refused",
+      "layer": "capability",
+      "http_status": 403,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "item11"
+    },
+    {
+      "code": "lease_expired",
+      "layer": "capability",
+      "http_status": 403,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "item11"
+    },
+    {
+      "code": "stage_budget_exceeded",
+      "layer": "capability",
+      "http_status": 403,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "item11"
+    },
+    {
+      "code": "capability_conflict",
+      "layer": "capability",
+      "http_status": 409,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "item11"
+    },
+    {
+      "code": "capability_limit_exceeded",
+      "layer": "capability",
+      "http_status": 422,
+      "retryable": false,
+      "reserved": true,
+      "first_unit": "item11"
     }
   ]
 }

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/execution-capabilities-granted.schema.json",
+  "title": "Transcode contract v2: execution-capabilities-granted",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "runtime_id",
+    "seq",
+    "lease",
+    "stage",
+    "source",
+    "put"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "execution.capabilities.granted"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "runtime_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "seq": {
+      "$ref": "capabilities-common.schema.json#/$defs/capability_seq"
+    },
+    "lease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expires_at"
+      ],
+      "properties": {
+        "expires_at": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        }
+      }
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "ends_at"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "common.schema.json#/$defs/stage"
+        },
+        "ends_at": {
+          "$ref": "common.schema.json#/$defs/timestamp"
+        }
+      }
+    },
+    "source": {
+      "if": {
+        "type": "null"
+      },
+      "else": {
+        "$ref": "capabilities-common.schema.json#/$defs/granted_source"
+      }
+    },
+    "put": {
+      "if": {
+        "type": "null"
+      },
+      "else": {
+        "$ref": "capabilities-common.schema.json#/$defs/granted_put"
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # Transcode contract v2
 
-Protocols `2.0.0` and `2.1.0` live, generation manifest `1.0.0`. **This file is normative.** The Hub
+Protocols `2.0.0` and `2.1.0` live, protocol `2.2.0` a draft, generation manifest `1.0.0`. **This file is normative.** The Hub
 validator (PHP, `App\Protocol\Transcode`) and the worker validator (Python, `tests/contract/` in the
 worker repository) both implement exactly the rules below. When a fixture and this file disagree,
 this file wins and the fixture is a bug. `versions.json` lists the versions accepted in production; every fixture is synthetic.
@@ -16,10 +16,11 @@ encoding, trailing newline): both repositories mark it `-text` in `.gitattribute
 | `README.md` | this rule text |
 | `SHA256SUMS` | `<sha256>  <relative path>\n` for every other file, sorted by path bytes, LF endings |
 | `versions.json` | accepted versions per line (`protocol`, `manifest`) and channel (`draft`, `live`) |
-| `limits.json` | byte limits per kind and carrier, `max_json_depth`, `max_tokens`, `clock_skew_seconds`, `max_segments_per_rendition`, `storage_call_margin_seconds` |
+| `limits.json` | byte limits per kind and carrier, `max_json_depth`, `max_tokens`, `clock_skew_seconds`, `max_segments_per_rendition`, `storage_call_margin_seconds`, `capability_closure_margin_seconds` |
 | `reason-codes.json` | every reason code: layer, HTTP status, retryable, reserved, first unit |
 | `artifact-kinds.json` | active and reserved artifact kinds per manifest version |
 | `schemas/common.schema.json` | shared `$defs` |
+| `schemas/acquire-common.schema.json`, `schemas/capabilities-common.schema.json` | the `$defs` of the acquire (`2.1.0`) and of the capability exchange (`2.2.0`) |
 | `schemas/<kind>.schema.json` | one JSON Schema 2020-12 document per kind (section 7) |
 | `schemas/trusted-context.schema.json` | the trusted context (section 9) |
 | `schemas/fixture-catalog.schema.json` | validates `fixtures/cases.json` |
@@ -48,7 +49,7 @@ verdict `{accepted, layer, reason, instance_path}`. Layers run in this order; th
 | 3 | `version` (L2) | version, then kind; selects the schema |
 | 4 | `size` (L0 b) | raw byte count against the selected kind's limit |
 | 5 | `schema` (L3) | JSON Schema 2020-12 of the selected kind |
-| 6 | `semantic` (L4) | checks S1-S31, then applicable A1-A7, against the trusted context (A8 is L3) |
+| 6 | `semantic` (L4) | checks S1-S31, then applicable A1-A7 or K1-K5, against the trusted context (A8 is L3) |
 
 * An accepted verdict has `layer`, `reason` and `instance_path` all null.
 * L1 yields `parse` / `malformed_json`, except its token budget, which yields `size` /
@@ -137,25 +138,31 @@ In this order:
 
 1. The version field is absent, not a string, or not in the accepted versions:
    `version` / `unsupported_version`, pointer `/protocol_version` (manifest: `/manifest_version`).
-2. The kind field is absent, not a string, or not one of the thirteen known kinds (`transcode.request`,
+2. The kind field is absent, not a string, or not one of the fifteen known kinds (`transcode.request`,
    `transcode.progress`, `transcode.result.completed`, `transcode.result.failed`, `hub.error`,
    `generation.manifest`, `transcode.claim`, `transcode.claim.granted`, `transcode.unclaimed`, `source.acquire.request`,
-   `source.acquire.granted`, `source.acquire.result.completed`, `source.acquire.result.failed`),
-   or an acquire kind at a version other than exactly `2.1.0`:
+   `source.acquire.granted`, `source.acquire.result.completed`, `source.acquire.result.failed`,
+   `execution.capabilities.request`, `execution.capabilities.granted`), or a kind at a version other than
+   the one version that kind exists at (an acquire kind exists at exactly `2.1.0`, a capability kind at
+   exactly `2.2.0`; every other kind at every known version):
    `version` / `unknown_message_kind`, pointer `/message_kind`
    (manifest: `/document_kind`).
 3. The kind is known but not in `accepted_message_kinds`: `version` / `unexpected_message_kind`, same
    pointer as 2.
 
 Versions match by exact string: `2.0.0` is not `2.0.0-draft`. There is no version negotiation.
-The eight existing protocol kinds are available at `2.0.0` and `2.1.0`; `generation.manifest`
-keeps manifest version `1.0.0`. An acquire kind at accepted `2.0.0` is `unknown_message_kind`,
-before the accepted-kind check. Listing a version does not accept all its kinds: a context names its kinds, so
+The eight existing protocol kinds are available at `2.0.0`, `2.1.0` and `2.2.0`, with unchanged shapes;
+`generation.manifest` keeps manifest version `1.0.0`. An acquire kind at accepted `2.0.0` or `2.2.0`, and
+a capability kind at accepted `2.0.0` or `2.1.0`, is `unknown_message_kind`, before the accepted-kind
+check. A validator decides this from the kind alone: each kind names the one version it requires, or
+none. Listing a version does not accept all its kinds: a context names its kinds, so
 a runtime that lists both live versions accepts as a dispatch only its own family's request (the encode endpoint
 `transcode.request`, the acquire endpoint `source.acquire.request`).
 A dispatch, claim, grant, unclaimed report and terminal result use the dispatch's recorded protocol
 version (a null historical version means `2.0.0`); the context lists only that version. A valid
-signature at another supported version cannot change it. Progress keeps the dispatch's version too.
+signature at another supported version cannot change it. Progress keeps the dispatch's version too, and
+so does every message of the capability exchange (section 15.4): only a dispatch recorded at `2.2.0`
+has one.
 `hub.error` is unsigned, may speak any live version, and a runtime reads it under its whole list.
 
 ## 6. L3: schema
@@ -175,6 +182,8 @@ signature at another supported version cannot change it. Progress keeps the disp
 | `source.acquire.granted` | `schemas/source-acquire-granted.schema.json` |
 | `source.acquire.result.completed` | `schemas/source-acquire-result-completed.schema.json` |
 | `source.acquire.result.failed` | `schemas/source-acquire-result-failed.schema.json` |
+| `execution.capabilities.request` | `schemas/execution-capabilities-request.schema.json` |
+| `execution.capabilities.granted` | `schemas/execution-capabilities-granted.schema.json` |
 
 * JSON Schema draft 2020-12. Every schema file of `schemas/` and `carriers/` is registered locally
   under its `$id` before validation. A `$ref` that names anything else must fail; nothing is ever
@@ -197,6 +206,10 @@ signature at another supported version cannot change it. Progress keeps the disp
   verdict's `instance_path`. A wrapper error (`properties`, `items`, `additionalProperties` with a
   schema, `$ref`, `allOf`, `if`/`then`/`else`) is followed down to the error it wraps; `anyOf`, `oneOf`, `not`, `contains` and
   `propertyNames` are reported at their own instance (jsonschema reports them that way natively).
+* A nullable object (the `put` of `execution.capabilities.request`, the `source` and `put` of
+  `execution.capabilities.granted`) is written `if` `{"type": "null"}` `else` its definition, never as an
+  `anyOf`: a violation inside it is then reported at its own member (`/put/lifetime_seconds`), like any
+  other wrapped error, and a negative holds its one violation in jsonschema's flattened report too.
 * Parity at L3 is on `accepted`, `layer` and `reason`. The pointer is **diagnostic**: on a document
   with several violations the two libraries may name different instances, so no decision may use it
   (B07's `hub.error.pointer` is informative). Each catalog L3 negative holds exactly one violation,
@@ -219,6 +232,8 @@ signature at another supported version cannot change it. Progress keeps the disp
 | `source.acquire.granted` | Hub to worker (HTTP response body) | 2,097,152 | envelope, execution identity, runtime id, output location and source prefix, part PUT URLs and result PUT URL |
 | `source.acquire.result.completed` | worker to Hub | 65,536 | envelope, execution identity, bytes, checksum mode, ordered opaque part ETags |
 | `source.acquire.result.failed` | worker to Hub | 4,096 | envelope, execution identity, typed acquire error |
+| `execution.capabilities.request` | worker to Hub (HTTP request body) | 32,768 | envelope, execution identity, `runtime_id`, `seq`, `stage`, `media_duration_ms`, `source` (whether a read URL of the original is asked), `put` (null, or the asked lifetime and 1 to 128 declared objects) |
+| `execution.capabilities.granted` | Hub to worker (HTTP response body) | 2,097,152 | envelope, execution identity, `runtime_id`, `seq`, `lease`, `stage` with its end, `source` (null, or a GET URL and its expiry), `put` (null, or one PUT URL per declared object and their expiry) |
 
 Envelope = `protocol_version`, `message_kind`, `message_id`, `sent_at`, `audience`, `key_id`.
 Identity = `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`,
@@ -230,8 +245,10 @@ manifest identity is `org_uuid`, `video_uuid`, `source_id`, `attempt_id`, `dispa
 **Secrets and free text.** No field of any kind is defined to carry a media key, a storage credential
 or a presigned URL, with two exceptions: `transcode.claim.granted` `media_key.key_hex`, the
 generation's 16-byte AES-128 key in lowercase hex, which the Hub sends only for an encrypted dispatch
-and only in the body of the claim response to the runtime it grants (section 15); and
-`source.acquire.granted.upload`, whose PUT URLs travel only in that signed TLS claim response.
+and only in the body of the claim response to the runtime it grants (section 15);
+`source.acquire.granted.upload`, whose PUT URLs travel only in that signed TLS claim response; and
+`execution.capabilities.granted` `source.url` and `put.objects[].url`, which travel only in that signed
+TLS response to the runtime whose request it answers (section 15.4), under the same rules.
 No request, result, provider output or stored result carries these URLs. Never persist a grant body
 or full URLs, even encrypted, or attach them to tracing. Keep URLs and bootstrap-bearing claim
 bodies out of exception messages and causes, HTTP debug logs, metrics labels and structured context.
@@ -278,6 +295,18 @@ shape of a reason code, not the enum of this version, so this kind's schema does
 a later version adds a code (a worker still accepts only a `hub.error` whose code its own version
 lists; any other answer is `invalid_answer`). The claim kinds carry no `ext`. Section 15 holds the rules of the exchange.
 
+The capability kinds (`2.2.0`) use the local `capabilities-common.schema.json` definitions. `seq` is
+1 to 2,147,483,647; `media_duration_ms` is null or 1 to 21,600,000; a request's `put` is null or
+`{lifetime_seconds, objects}` with `lifetime_seconds` 60 to 300 and 1 to 128 objects `{path, size_bytes,
+md5}`: `path` a common `rel_path` (relative to the granted prefix), `size_bytes` 1 to 67,108,864 (64 MiB,
+one single PUT), `md5` the base64 of the 16-byte MD5 of the object's bytes, exactly 24 characters
+`^[A-Za-z0-9+/]{22}==$`. An answer carries `lease.expires_at`, `stage {name, ends_at}`, `source` null or
+`{expires_at, url}` and `put` null or `{expires_at, objects}` with 1 to 128 objects `{path, url}`; a URL
+has the bounds and refusals of the acquire's `presigned_put_url` (1 to 4,096 characters, `https://`, no
+backslash, `#`, bracket or user information), defined again in that file. Every object is closed, every
+member required, nullable members included, and neither kind carries `ext`. A request carries no
+bucket, prefix, URL, credential or expiry; an answer no generation, media key or bucket.
+
 Acquire uses the local `acquire-common.schema.json` definitions: Google file ids are 10-128
 characters, resource keys null or 1-128, and the required nullable MD5, SHA-1, SHA-256 and revision
 facts stay in `external.expected`. Size is 1-10,737,418,240 bytes; parts are 67,108,864 bytes,
@@ -309,13 +338,13 @@ chosen by the rule in the table.
 
 | # | Fails when | Reason | Pointer |
 |---|---|---|---|
-| S1 | a timestamp of the kind is not a real instant (8.1) | `invalid_timestamp` | the first invalid of `/sent_at`, `/claim/expires_at` (request), `/created_at` (manifest) |
+| S1 | a timestamp of the kind is not a real instant (8.1) | `invalid_timestamp` | the first invalid of `/sent_at`, `/claim/expires_at` (request), `/created_at` (manifest), then on `execution.capabilities.granted` `/lease/expires_at`, `/stage/ends_at`, `/source/expires_at` (when `source` is not null), `/put/expires_at` (when `put` is not null) |
 | S2 | `audience != context.expected_audience` | `audience_mismatch` | `/audience` |
 | S3 | `key_id` not in `context.known_key_ids` | `unknown_key_id` | `/key_id` |
 | S4 | `sent_at_ms > now_ms + skew_ms` | `timestamp_in_future` | `/sent_at` |
 | S5 | `sent_at_ms < now_ms - skew_ms` (channel `push` only) | `timestamp_out_of_tolerance` | `/sent_at` |
 | S6 | `claim.expires_at_ms <= sent_at_ms`, or `now_ms > claim.expires_at_ms + skew_ms` | `dispatch_expired` | `/claim/expires_at` |
-| S7 | one of these ids equals `identity.video_uuid`, checked in this order: `identity.attempt_id`, `identity.dispatch_id`, `identity.execution_id` (when present), the source id (`/source/source_id` on request and results when the `source` block is present; `/identity/source_id` on the manifest), `identity.org_uuid`, the runtime id (`/claim/runtime_id` on the claim; `/runtime_id` on the claim grant and on `transcode.unclaimed`) | `identity_aliases_video_uuid` | the pointer of the first aliasing id |
+| S7 | one of these ids equals `identity.video_uuid`, checked in this order: `identity.attempt_id`, `identity.dispatch_id`, `identity.execution_id` (when present), the source id (`/source/source_id` on request and results when the `source` block is present; `/identity/source_id` on the manifest; none on the capability kinds), `identity.org_uuid`, the runtime id (`/claim/runtime_id` on the claim; `/runtime_id` on the claim grant, on `transcode.unclaimed` and on both capability kinds) | `identity_aliases_video_uuid` | the pointer of the first aliasing id |
 | S8 | `identity.org_uuid != expect.org_uuid` | `org_mismatch` | `/identity/org_uuid` |
 | S9 | `identity.video_uuid != expect.video_uuid` | `video_mismatch` | `/identity/video_uuid` |
 | S10 | `identity.owning_cell_id != expect.owning_cell_id` | `cell_mismatch` | `/identity/owning_cell_id` |
@@ -361,6 +390,8 @@ self-check of its own dispatch and of its own claim grant.
 | `worker_receiver` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S18 S21 S29 S30 S31 |
 | `hub_sender` | `transcode.claim.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S18 S21 S29 S30 S31 |
 | `hub_receiver`, `worker_sender` | `transcode.unclaimed` | `push`, `poll` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 |
+| `hub_receiver`, `worker_sender` | `execution.capabilities.request` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S29 K1 K2 |
+| `hub_sender`, `worker_receiver` | `execution.capabilities.granted` | `push` | S1 S2 S3 S4 S5 S7 S8 S9 S10 S11 S12 S13 S14 S15 S16 S29 K3 K4 K5 |
 
 For the claim grant the worker's `expect` is the identity of the dispatch it accepted, the
 dispatch's `output.location_id` and `encryption`, and the `runtime_id` it sent; the worker learns
@@ -478,6 +509,50 @@ SHA-256 is preferred, then MD5, otherwise `none`; SHA-1 is metadata comparison o
 Retryability describes the failure and never authorizes a second dispatch. Claim errors and
 unclaimed causes are unchanged; validation reasons are not failed-result error codes.
 
+### 8.5 Capability checks (`2.2.0`)
+
+Here request and answer mean `execution.capabilities.request` and `execution.capabilities.granted`; the
+rows are in 8.3. Both are one HTTP exchange of a granted execution, on the `push` channel only, and both
+sides know the execution: the worker runs S15 and S16 on an answer, with the `execution_id` and fence of
+its claim grant, and the Hub runs them on a request against the execution it recorded. Applicable S
+checks keep numerical order; K checks follow them.
+
+| # | Fails when | Reason | Pointer |
+|---|---|---|---|
+| K1 | request: `seq <= context.last_capability_seq` | `stale_capability_sequence` | `/seq` |
+| K2 | request: `put` is not null and an object's `path` equals an earlier object's | `duplicate_capability_path` | `/put/objects/<j>/path` of the first such later occurrence |
+| K3 | answer: the first failing of, in order: (a) `seq != expect.capability_request.seq`; (b) `stage.name != expect.capability_request.stage`; (c) `source` is null while the request's `source` is true, or not null while it is false; (d) `put` is null while the request's `put` is not, or the reverse; (e) `put.objects` has another length than the request's `put.paths`; (f) for the first `i`, `put.objects[i].path != paths[i]` | `capability_answer_mismatch` | (a) `/seq`; (b) `/stage/name`; (c) `/source`; (d) `/put`; (e) `/put/objects`; (f) `/put/objects/<i>/path` |
+| K4 | answer: the first failing of, in order: (a) `lease.expires_at_ms <= sent_at_ms`; (b) `stage.ends_at_ms <= sent_at_ms`; (c) with `source`: `source.expires_at` is not a whole second (its millisecond part is not `000`), or `<= sent_at_ms`, or `> sent_at_ms + 86,400,000`; (d) with `put`: `put.expires_at` is not a whole second, or `<= sent_at_ms`, or `> sent_at_ms + expect.capability_request.put.lifetime_seconds * 1000` | `capability_expiry_invalid` | (a) `/lease/expires_at`; (b) `/stage/ends_at`; (c) `/source/expires_at`; (d) `/put/expires_at` |
+| K5 | answer: a URL breaks the URL rules below; the first bad one in the order `/source/url`, then `/put/objects/<i>/url` in array order | `capability_url_invalid` | that URL's pointer |
+
+An instant that is not real is S1's: K4 compares only real instants, so it never runs ahead of S1's
+verdict. K4 (d) reads the request's `put`, which K3 (d) has already shown is not null.
+
+**K5 URL rules.** They are A5's rules (section 8.4) generalized to one object per URL, read by the same
+parser on each side. A URL has HTTPS and exactly the host `expect.capability_storage_host`, no port,
+user information or fragment. Its path, unescaped and never decoded or normalized, is exactly
+`/{bucket}/{key}`: for `/source/url`, `expect.capability_source.bucket` and
+`expect.capability_source.object_key`; for a put object, `expect.capability_output.bucket` and
+`{expect.capability_output.prefix}/{path}` with that object's own `path`. It has a nonempty well-formed
+query: no repeated parameter name, after decoding included; valid percent escapes; each name and value
+decoded exactly once. It names no `uploadId` and no `partNumber`. `X-Amz-Date` and `X-Amz-Expires`
+appear exactly once: the date is a real `YYYYMMDDTHHMMSSZ` instant no later than `context.now` plus the
+skew, the expiry canonical decimal seconds 1 to 604,800, and their sum equals the member's
+`expires_at` (`/source/expires_at` or `/put/expires_at`). `X-Amz-SignedHeaders` appears exactly once,
+and its decoded value is exactly `host` for the source URL and exactly `content-md5;host` for a put
+object. Every other SigV4 parameter is opaque, bounded by the URL's length.
+
+A put URL is a PUT-only capability for that one key and that one `Content-MD5`; the source URL is a
+GET-only capability for the one original. No method is ever inferred from a parameter. The runtime
+never follows a redirect and never logs a parsing exception that holds a URL. Deliberately not checked
+against the receiver's clock: that a URL has not expired. The store's clock decides, and a runtime
+whose clock runs ahead must not refuse a valid answer; only S4, S5 and the date bound above read
+`context.now`.
+
+New reason entries: `stale_capability_sequence` (409), `duplicate_capability_path`,
+`capability_answer_mismatch`, `capability_expiry_invalid` and `capability_url_invalid` (422), each layer
+`semantic`, retryable false, reserved false, first unit `item11`.
+
 ## 9. The trusted context
 
 The context carries what the validating side knows from its own records; identity is compared with
@@ -490,14 +565,15 @@ it, never taken from the message. `schemas/trusted-context.schema.json` is exact
 | `context_version` | integer 1 | required |
 | `role` | `hub_receiver`, `hub_sender`, `worker_receiver`, `worker_sender` | required |
 | `channel` | `push`, `poll`, `dispatch`, `storage` | required; selects message or manifest (2.1) and the freshness rule |
-| `accepted_message_kinds` | 1 to 13 distinct kinds | required |
+| `accepted_message_kinds` | 1 to 15 distinct kinds | required |
 | `now` | timestamp or null | injected clock |
 | `clock_skew_s` | integer 0 to 600 or null | `limits.json` `clock_skew_seconds` (300) in production |
 | `accepted_protocol_versions`, `accepted_manifest_versions` | up to 8 distinct versions, or null | from `versions.json` (`live`; `draft` in tests only); may be empty |
 | `expected_audience` | audience or null | the receiver's own audience (a sender self-check: the target's) |
 | `known_key_ids` | up to 8 distinct key ids, or null | the keys valid for this direction |
-| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`, `acquire_destination`, `acquire_external`, `acquire_plan`, `acquire_limits`, `acquire_expires_at`, `acquire_storage_host`, `acquire_bucket`, `acquire_upload_id`; each optional and nullable |
+| `expect` | object or null | recorded identity: `org_uuid`, `video_uuid`, `owning_cell_id`, `placement_epoch`, `lifecycle_revision`, `attempt_id`, `dispatch_id`, `execution_id`, `execution_fence`, `source_id`, `source_location_id`, `output_location_id`, `profile {id, version, sha256}`, `encryption {mode, media_key_id}`, `renditions`, `max_artifact_count`, `runtime_id`, `acquire_destination`, `acquire_external`, `acquire_plan`, `acquire_limits`, `acquire_expires_at`, `acquire_storage_host`, `acquire_bucket`, `acquire_upload_id`, `capability_request {seq, stage, source, put}` (`put` null or `{lifetime_seconds, paths}`), `capability_storage_host`, `capability_output {bucket, prefix}`, `capability_source {bucket, object_key}`; each optional and nullable |
 | `last_event_seq` | integer 0 to 2,147,483,647 or null | highest accepted progress sequence of the execution |
+| `last_capability_seq` | integer 0 to 2,147,483,647 or null | highest accepted capability request sequence of the execution (0: none received yet) |
 
 ### 9.2 Construction
 
@@ -526,9 +602,10 @@ The invalid-context error is a separate type from `ContextIncomplete` (Python: `
 
 The schema judges the context as a JSON document: the root, `expect`, `expect.profile` and
 `expect.encryption`, `expect.acquire_destination`, `expect.acquire_external`, its `expected`,
-`expect.acquire_plan` and `expect.acquire_limits` are objects (an empty one is `{}`), and
+`expect.acquire_plan`, `expect.acquire_limits`, `expect.capability_request`, its `put`,
+`expect.capability_output` and `expect.capability_source` are objects (an empty one is `{}`), and
 `accepted_message_kinds`, both version
-lists, `known_key_ids` and `expect.renditions` are arrays. An implementation whose native map cannot
+lists, `known_key_ids`, `expect.renditions` and `expect.capability_request.put.paths` are arrays. An implementation whose native map cannot
 tell the two apart (a PHP array) builds that document explicitly, never by a JSON round trip: an empty
 PHP array at an object position is `{}`, and a PHP array that is not a list (`array_is_list`) where an
 array is required is an invalid context. PHP also builds a context from a decoded object
@@ -561,6 +638,8 @@ reads it, whatever the channel:
 | `worker_sender` | `source.acquire.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence` |
 | `hub_receiver` | `source.acquire.result.completed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.acquire_destination`, `expect.acquire_external`, `expect.acquire_plan`, `expect.acquire_limits`, `expect.acquire_expires_at` |
 | `hub_receiver` | `source.acquire.result.failed` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence` |
+| `hub_receiver`, `worker_sender` | `execution.capabilities.request` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.runtime_id`, `last_capability_seq` |
+| `hub_sender`, `worker_receiver` | `execution.capabilities.granted` | `accepted_protocol_versions`, `expected_audience`, `known_key_ids`, `now`, `clock_skew_s`, `expect.org_uuid`, `expect.video_uuid`, `expect.owning_cell_id`, `expect.placement_epoch`, `expect.lifecycle_revision`, `expect.attempt_id`, `expect.dispatch_id`, `expect.execution_id`, `expect.execution_fence`, `expect.runtime_id`, `expect.capability_request`, `expect.capability_storage_host`, `expect.capability_output`, `expect.capability_source` |
 
 `expect.acquire_storage_host` is a lowercase DNS hostname, 1-253 characters, with 1-63
 character alphanumeric labels and only interior hyphens; no scheme, path, port, user information
@@ -568,6 +647,15 @@ or trailing dot. `expect.acquire_bucket` reuses the common bucket definition and
 trusted destination location for the Hub sender only; it is never a wire member.
 `expect.acquire_upload_id` is 1-1,024 non-space printable ASCII characters,
 refuses `://`, and comes from the source row for the Hub sender only. It is never a wire member.
+
+`expect.capability_request` is the request the answer answers, closed: `seq` (`capability_seq`),
+`stage` (common `stage`), `source` (boolean) and `put`, null or `{lifetime_seconds, paths}` with
+`lifetime_seconds` 60 to 300 and 1 to 128 common `rel_path` values in the request's order. The Hub
+sender takes it from the request it validated, the worker receiver from the request it sent.
+`expect.capability_storage_host` has exactly the definition and rules of `expect.acquire_storage_host`.
+`expect.capability_output` is closed `{bucket, prefix}` (common `bucket` and `object_key`): the
+dispatch's output bucket and the granted prefix. `expect.capability_source` is closed `{bucket,
+object_key}`: the dispatch's source bucket and object key. None of them is a wire member.
 
 `expect.<name>` is missing when `expect` itself is missing or null. An empty version list is present
 (not missing): it makes every message `unsupported_version`.
@@ -583,6 +671,13 @@ failed results use recorded execution fences even after trash/restore; current a
 acceptance is a separate decision. The reused claim and unclaimed rows keep their fields and
 channels; dispatch kind selects the expected grant/result family. Stored acquire results use
 `poll`; `storage` still selects only generation manifests.
+
+For both capability kinds `expect` holds the values **recorded on the dispatch and its execution**, as
+for progress and results (`placement_epoch` and `lifecycle_revision` as dispatched, `execution_id` and
+`execution_fence` as granted, the `runtime_id` of the grant), never the video's current revision:
+whether an execution may still be issued a capability is the Hub's decision after validation (section
+15.4), not a validation verdict. `last_capability_seq` is the highest `seq` the Hub recorded for the
+execution, 0 before the first request.
 
 The record rules apply to both encode and acquire:
 
@@ -613,8 +708,8 @@ The record rules apply to both encode and acquire:
 | C2 | No protocol major other than 2 and no manifest major other than 1 is accepted. |
 | C3 | Versions match by exact string; no draft is compatible with another version. |
 | C4 | `versions.json` `live` lists the versions production accepts; `draft` lists versions under development, accepted only by a context built for tests. A version absent from the list of the context's channel is `unsupported_version`. |
-| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` went live with its readers: `live` is `["2.0.0", "2.1.0"]`, `draft` is empty, and a runtime's list holds live values only; a dispatch keeps its one recorded version (section 5). |
-| C6 | Every object of every schema has `additionalProperties: false` (the thirteen kinds, the context, the carriers, the catalog), except `ext`. |
+| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` went live with its readers: `live` is `["2.0.0", "2.1.0"]`, and a runtime's list holds live values only; a dispatch keeps its one recorded version (section 5). `2.2.0`, the capability exchange, is a draft: `draft` is `["2.2.0"]`, `live` is unchanged, no runtime lists it and no Hub writes it; only a context built for tests accepts it. |
+| C6 | Every object of every schema has `additionalProperties: false` (the fifteen kinds, the context, the carriers, the catalog), except `ext`. |
 | C7 | `ext` is the only extension point: optional on encode progress and encode results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
 | C8 | Every identity field is required and non-null, with no default; an identity field equal to `video_uuid` where it names another entity is S7. |
 | C9 | A key id outside the context's set for that direction is `unknown_key_id`; there is no fallback key. |
@@ -689,6 +784,13 @@ key line.
   provider and stored acquire carriers. Unclaimed has no storage URL. Routes stay
   `/api/transcode/v2/claim` and `/api/transcode/v2/callback`. The signing domain stays v2 at `2.1.0`;
   there is no new key family.
+* The capability exchange (`2.2.0`) uses the same HTTP carrier and the same signing domain, with no
+  new key family: a request is the body of an HTTP request signed with a worker-to-Hub key, its answer
+  the raw body of a `200` response signed with a Hub-to-worker key and `Cache-Control: no-store`, sent
+  only to the runtime whose request it answers; neither travels in a RunPod carrier or a stored result.
+  Its HTTP readers and their caps are the Hub's capability route (a later slice) and the worker's
+  capability client: only a reader of this one answer permits 2,097,152 bytes, as only the acquire
+  grant's reader does for that kind.
 * **Live receiver order:** L0, L1, L2, then key lookup by `key_id` (`unknown_key_id`),
   then signature verification over the exact received bytes (`invalid_signature`), then L3, L4 and
   dedupe (below). Unsigned pipeline fixtures check key id membership in L4 (S3);
@@ -742,21 +844,30 @@ without a valid `hub.error` is `unreachable`; a non-envelope `413` is reported a
 `hub.error` 2,048; manifest 8,388,608; claim, claim grant and unclaimed 4,096 each), `carrier_max_bytes` (`runpod.input` 8,448, `runpod.output`
 33,024, `runpod.acquire.output` 131,328); acquire request 4,096, grant 2,097,152,
 completed 65,536 and failed 4,096; `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
-`max_segments_per_rendition` 3,600, `storage_call_margin_seconds` 600 (15.1, rule 8; 15.2). The worst case of every kind (every string at its maximum length
+`max_segments_per_rendition` 3,600, `storage_call_margin_seconds` 600 (15.1, rule 8; 15.2); capability
+request 32,768 and answer 2,097,152, and `capability_closure_margin_seconds` 60 (section 15.4, Hub rule
+6), which no validator reads. The worst case of every kind (every string at its maximum length
 in the costliest characters, every integer at its maximum, every array full, every optional member
 present, `/` written as `\/`) passes its schema and fits its limit; both suites build it, prove it
-maximal against the schema's bounds, and measure it.
+maximal against the schema's bounds, and measure it. The capability maxima are catalog positives,
+measured on both sides: the request with 128 objects of 128-character paths and the escaped maximal MD5
+is 29,062 bytes (945 tokens), the answer with 128 put URLs and a source URL of 4,096 characters each,
+`/` escaped wherever it may stand, 959,619 bytes (699 tokens); with the longest version and audience
+strings the schema alone allows they are 29,080 and 959,634 bytes. `max_tokens` needs no change.
 
 **Writer convention.** Senders serialize compactly: no insignificant whitespace, only the escapes
 JSON requires (optionally `/` as `\/`), integers as integer literals. The byte limits are guaranteed
 for such writers; receivers accept any JSON text within the byte limit.
 
 `reason-codes.json` lists every code in a fixed order with `layer` (`size`, `parse`, `version`,
-`schema`, `semantic`; reserved codes: `auth`, `dedupe`, `fetch`, `claim` or null), `http_status` (what B07
+`schema`, `semantic`; reserved codes: `auth`, `dedupe`, `fetch`, `claim`, `capability` or null), `http_status` (what B07
 returns; null when the code never becomes an HTTP response), `retryable`, `reserved` (not produced by
 the validation pipeline: `invalid_signature`, `duplicate_message`, `conflicting_terminal_result`,
-`manifest_digest_mismatch`, `internal_error`, `service_unavailable`, and the claim core's
-`invalid_bootstrap_token`, `claim_conflict`, `claim_refused`, `claim_replayed`; section 15) and `first_unit`.
+`manifest_digest_mismatch`, `internal_error`, `service_unavailable`, the claim core's
+`invalid_bootstrap_token`, `claim_conflict`, `claim_refused`, `claim_replayed`; section 15; and the
+capability core's, layer `capability`, none retryable: `capability_refused` (403), `lease_expired` (403),
+`stage_budget_exceeded` (403), `capability_conflict` (409), `capability_limit_exceeded` (422); section
+15.4) and `first_unit`.
 `dispatch_expired` is not reserved: S6 produces it on the worker, and it is also the claim core's
 answer to a claim that arrives after the bootstrap's expiry (section 15.2), with status 410. The PHP and
 Python enums equal this list, and `hub.error`'s `error.code` enum equals it too.
@@ -777,9 +888,24 @@ file (9.2), validate, and assert:
   section 6).
 
 Catalog counts are calculated from `cases.json`; positive and negative ids continue after `P29`
-and `N149`, without renumbering old cases (two or three digits). The acquire groups are
+and `N149`, without renumbering old cases (two to four digits). The acquire groups are
 `acquire-request`, `acquire-grant`, `acquire-results`, `acquire-contexts`, `acquire-version`,
-`acquire-semantics`, `acquire-bounds`, `acquire-carriers`, named by `rule`. Context-construction
+`acquire-semantics`, `acquire-bounds`, `acquire-carriers`, named by `rule`. The capability groups
+(`2.2.0`, ids `P112` to `P155` and `N945` to `N1518`, payloads under `fixtures/capabilities-request/`,
+`fixtures/capabilities-granted/` and `fixtures/capabilities-version/`) are `capabilities-request` (12
+cases: every stage, the heartbeat, source only, put only with 1 and 128 objects, both, a null and a set
+duration, the worker's self-check, the minimal and the maximal escaped request),
+`capabilities-granted` (17: their answers for both roles, both expiry bounds, a URL dated at the skew
+bound or before the sending, a put URL the receiver's clock already sees expired, the minimal and the
+maximal escaped answer), `capabilities-contexts` (144: a valid row and the absent and null case of every
+required field, for each of the four role and kind pairs), `capabilities-version` (21: both kinds at
+`2.0.0` and `2.1.0`, both at `2.2.0` under the live lists, the four acquire kinds at `2.2.0`, the eight
+encode-family kinds at `2.2.0` with their `2.0.0` shapes, a `hub.error` carrying a reserved capability
+code, the manifest at `1.0.0` and at `2.2.0`), `capabilities-semantics` (113: the S checks of both
+kinds, every branch of K1 to K5 and every K5 URL rule) and `capabilities-bounds` (311: the absent, null,
+wrong-type and both bound negatives of every member of both kinds, the URL refusals of the schema,
+closed objects and enums, the parse layer, both caps exactly and one byte over, and 23 invalid
+contexts). Context-construction
 cases use outcome `context_invalid` or `context_incomplete`, layer `context`, the matching
 snake-case reason, and the missing field as a pointer for incomplete (null for invalid). They
 never run the message pipeline. A carrier case additionally names `carrier`: check its raw cap,
@@ -787,8 +913,9 @@ then its schema, verify its exact inner message and signature, then run the inne
 PHP native array construction is also exercised in the context suite. `P17` is retired: it pinned an
 integer-valued float as accepted, and its payload became
 `N76` when number literals had to be integer literals. Large payloads (`P21`, `N84`, `N112`, `N113`)
-are stored compact; every file stays under 1 MB except acquire-grant payload fixtures, whose
-ceiling is 2,097,153 bytes (the maximal escaped grant and the one-byte-over-cap refusal); every
+are stored compact; every file stays under 1 MB except acquire-grant and capabilities-granted
+payload fixtures, whose ceiling is 2,097,153 bytes (the maximal escaped grant and the one-byte-over-cap
+refusals); every
 non-reserved reason code is produced by at
 least one negative; every fixture file is used by a case. Each negative starts from a valid positive
 and changes one thing, so it holds one violation at its layer: an L3 negative produces errors only
@@ -796,7 +923,10 @@ at its pinned pointer (in jsonschema's flattened report), and an L4 negative fai
 check, except that an S7 case also fails the equality check of the aliased id where its row runs
 one (S13 for N45, S15 for N91); N126, whose row runs no S15, fails S21 instead, and N132 (the
 runtime id, which no equality check of its row reads) fails S7 alone. An acquire source alias also
-fails A1, after S7; a grant location mismatch is the same predicate in S18 and A4. A8 oneOf
+fails A1, after S7; a grant location mismatch is the same predicate in S18 and A4. A capability S7
+case also fails the equality check of the aliased id (S15 for N1101 and N1131, S29 for N1102 and N1132,
+S8 for N1103); an S1 case on a URL expiry (N1125, N1126) and a K4 case whose URL expiry is not a whole
+second (N1161, N1164) also fail K5, since a URL's date plus its expiry is always a whole second. A8 oneOf
 suberrors
 explain the relation; its reported L3 pointer is `/error`. A negative may still
 break a later layer as a consequence (N27 renames the master playlist, so `master_playlist_path`
@@ -1081,21 +1211,81 @@ the dispatch. A claim whose `message_id` the replay record holds (below) is answ
 
 ### 15.3 Outside this version
 
-The encode grant carries no storage credential, no lease and no deadline: the encode worker still holds its
-configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its run from its own start (15.1, rule 8; 15.2, the write deadline). It
-carries the media key since the amendment of 2026-10-10 (C1b): the plan's protected channel, so the
-dispatch never needs one. The amendment of 2026-10-15 (C1c) added, after the pilot stream's
-review: the runtime's deadline and the execution's write deadline (15.1 rule 8, 15.2), where a
-prefix may lie, one key per dispatch, the revoked bootstrap (row 5), the replay record
-(`claim_replayed`), the fixed keys of the manifest and the stored result (15.1 rule 9), the cause
-`expired` and a refused dispatch's output (15.1 rule 7), which values `expect` holds (9.4), the
-dedupe of terminal messages (section 12) and the key line (section 11). Narrow credentials issued with the grant, the lease and its renewal are
-B07's and arrive as a later protocol version that both sides list before either writes it (C5);
-those credentials will replace the configured access profile that `credential_ref` names, the
-dispatch still naming the location (section 7, "Reaching a location"). Until then one configured
-profile can reach every organization's bucket, so a Hub defect that paired a `location_id` with
-another location's `bucket` would put the output in the wrong bucket: no semantic check compares
-them, and the residual risk is accepted until B07's scoped credentials (publication still fails
-closed, the manifest being read from the named location). The claim address and encode prefix layout
-are the Hub's; acquire fixes its source layout and
-PUT authority in `2.1.0` as specified above.
+Under `2.0.0` the encode grant carries no storage credential, no lease and no deadline: the encode worker
+holds its configured storage credential, and the dispatch's `limits.max_wall_time_ms` bounds its run from
+its own start (15.1, rule 8; 15.2, the write deadline). It carries the media key since the amendment of
+2026-10-10 (C1b): the plan's protected channel, so the dispatch never needs one. The amendment of
+2026-10-15 (C1c) added, after the pilot stream's review: the runtime's deadline and the execution's write
+deadline (15.1 rule 8, 15.2), where a prefix may lie, one key per dispatch, the revoked bootstrap (row 5),
+the replay record (`claim_replayed`), the fixed keys of the manifest and the stored result (15.1 rule 9),
+the cause `expired` and a refused dispatch's output (15.1 rule 7), which values `expect` holds (9.4), the
+dedupe of terminal messages (section 12) and the key line (section 11). Until a dispatch speaks `2.2.0`
+one configured profile can reach every organization's bucket, so a Hub defect that paired a
+`location_id` with another location's `bucket` would put the output in the wrong bucket: no semantic
+check compares them, and the residual risk is accepted until then (publication still fails closed, the
+manifest being read from the named location). The claim address and encode prefix layout are the Hub's;
+acquire fixes its source layout and PUT authority in `2.1.0` as specified above.
+
+Protocol `2.2.0`, a draft (C5), brings what B07 promised a later version: the capability exchange of
+section 15.4, by which a runtime holds no storage credential and asks for short-lived signed URLs, one
+per object, with the lease that its requests renew and the stage it reports. `credential_ref` still names
+the location (section 7, "Reaching a location"); at `2.2.0` no configured profile is used for it. These
+are rules of a draft: no runtime lists `2.2.0` and no Hub writes it. What stays outside the contract:
+the records of the Hub's seal (the declared objects, their expiries and the closure's evidence are the
+Hub's own, and a later slice builds them), and promotion by copy to a second bucket, which the closure
+seal of 15.4 replaces and which is not built.
+
+### 15.4 The capability exchange (`2.2.0`)
+
+The exchange is generic per operation kind: what a kind may ask for (the path grammar, how many distinct
+paths, how many bytes) is the Hub's policy of that kind, never a contract field. A request with `put`
+null and `source` false is the heartbeat: it renews the lease and reports the stage. The rules below
+bind the runtime and the Hub's capability core, which keeps the state; the validator checks the two
+messages (sections 7 to 9).
+
+**The runtime.**
+
+1. At `2.2.0` a runtime uses no configured storage credential for the dispatch's locations: it reads the
+   source only through `source.url` and writes only through put URLs it was granted. `credential_ref`
+   still names the location and is still validated as a name.
+2. It asks only after its claim was granted (15.1, rule 3), with the execution identity and the
+   `runtime_id` of its claim, `seq` strictly increasing from 1, one request at a time. A retry after a
+   lost answer is a new message (`message_id`, `sent_at`, `seq` and signature), never the same bytes.
+3. It declares for every object its path relative to the granted prefix, its exact size and the base64
+   MD5 of its bytes, and sends the PUT with exactly that `Content-MD5`. A path keeps the size and MD5 it
+   was first declared with.
+4. It uses a URL only for the object it was granted for, and never after the URL's expiry counted from
+   the instant it sent the request, on a monotonic clock. It asks again for a URL it could not use in
+   time: renewal is asking again.
+5. `put` null with `source` false is the heartbeat. A runtime sends a request at least every 180 seconds
+   while it works. When it cannot obtain an accepted answer before `lease.expires_at` (counted the same
+   monotonic way), or the Hub answers `lease_expired`, `stage_budget_exceeded` or `capability_refused`,
+   it stops: it starts no further write, ends its work, and reports its failed result (15.1 rules 8 and
+   9 unchanged; the stored result needs a live URL like every write).
+6. `stage` is the stage it is in; stages only move forward, in the order `probing`, `downloading`,
+   `transcoding`, `finalizing`, `uploading`. `media_duration_ms` is null until the probe admitted the
+   source, then the admitted duration, unchanged afterwards.
+7. The manifest and the stored result are objects like the others, at their fixed keys (15.1 rule 9),
+   asked for last.
+8. URLs, request bodies and answers are never logged, persisted, or put in an error or a message.
+
+**The Hub.**
+
+1. It answers only an authenticated, fully validated request of the runtime it granted; a `seq` at or
+   below the recorded one is `stale_capability_sequence`.
+2. It issues only while the execution runs for that runtime before its hard deadline, its lease is
+   live, its stage is inside its budget, and its result could still be published (the organization is
+   active, the placement epoch and the video's lifecycle revision are the recorded ones, and the fence is
+   the video's newest encode fence). Otherwise it answers `hub.error` `capability_refused`,
+   `lease_expired` or `stage_budget_exceeded`, each final.
+3. It records every declared object and the newest expiry it will sign **before** it signs, signs with
+   no transaction open at absolute whole-second expiries (put: now plus the asked lifetime; source: the
+   hard deadline), rechecks the execution after signing, and only then answers. A signing failure is a
+   retryable `internal_error` and changes no reservation; the recorded expiry stands.
+4. A path asked again with another size or MD5 is `capability_conflict`; more distinct paths or bytes
+   than the dispatch's limits allow is `capability_limit_exceeded`.
+5. Every accepted request moves the lease to its length from now, never past the hard deadline.
+6. The Hub publishes a `2.2.0` generation only after its closure: the newest put expiry it recorded plus
+   `limits.json` `capability_closure_margin_seconds` (60), and the store's listing of the prefix equal
+   to the recorded objects and the manifest. The seal is the Hub's, and a later slice builds it.
+   `write_deadline_at` (15.2, "The last write") stays the bound a deletion and a cleanup wait for.

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.video-hub.invalid/transcode/v2/schemas/execution-capabilities-request.schema.json",
+  "title": "Transcode contract v2: execution-capabilities-request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "message_kind",
+    "message_id",
+    "sent_at",
+    "audience",
+    "key_id",
+    "identity",
+    "runtime_id",
+    "seq",
+    "stage",
+    "media_duration_ms",
+    "source",
+    "put"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/version"
+    },
+    "message_kind": {
+      "type": "string",
+      "const": "execution.capabilities.request"
+    },
+    "message_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "sent_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "audience": {
+      "$ref": "common.schema.json#/$defs/audience"
+    },
+    "key_id": {
+      "$ref": "common.schema.json#/$defs/key_id"
+    },
+    "identity": {
+      "$ref": "common.schema.json#/$defs/identity_execution"
+    },
+    "runtime_id": {
+      "$ref": "common.schema.json#/$defs/uuid"
+    },
+    "seq": {
+      "$ref": "capabilities-common.schema.json#/$defs/capability_seq"
+    },
+    "stage": {
+      "$ref": "common.schema.json#/$defs/stage"
+    },
+    "media_duration_ms": {
+      "$ref": "capabilities-common.schema.json#/$defs/media_duration_ms"
+    },
+    "source": {
+      "type": "boolean"
+    },
+    "put": {
+      "if": {
+        "type": "null"
+      },
+      "else": {
+        "$ref": "capabilities-common.schema.json#/$defs/put_request"
+      }
+    }
+  }
+}

@@ -1,4 +1,4 @@
-"""Layer L4: the semantic checks S1-S31 against the trusted context (standard library only).
+"""Layer L4: the semantic checks S1-S31, then A1-A7 or K1-K5, against the trusted context (standard library only).
 
 The rule table below says, per (role, kind), which channels are allowed and which checks
 run, in order; the first failing check wins. It also yields the context fields each
@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Optional
 
-from . import acquire
+from . import acquire, capabilities
 from .reasons import ReasonCode
-from .registry import Channel, ContractRegistry, MessageKind, Role
+from .registry import CAPABILITY_KINDS, Channel, ContractRegistry, MessageKind, Role
 
 if TYPE_CHECKING:
     from .context import TrustedContext
@@ -181,6 +181,8 @@ def required_context_fields(role: str, kind: str) -> tuple[str, ...]:
         raise KeyError(f"no rule set for role {role!r} and kind {kind!r}")
     if (role, kind) in ACQUIRE_CONTEXT_FIELDS:
         return ACQUIRE_CONTEXT_FIELDS[role, kind]
+    if (role, kind) in CAPABILITY_CONTEXT_FIELDS:
+        return CAPABILITY_CONTEXT_FIELDS[role, kind]
     versions_field = "accepted_manifest_versions" if kind == _MANIFEST else "accepted_protocol_versions"
     fields: list[str] = [versions_field]
     for check in row[1]:
@@ -211,6 +213,29 @@ RULES = {**RULES,
     ('hub_receiver', 'source.acquire.result.failed'): (('push', 'poll'), ('S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16')),
 }
 
+_CAPABILITY_REQUEST = MessageKind.EXECUTION_CAPABILITIES_REQUEST.value
+_CAPABILITY_GRANTED = MessageKind.EXECUTION_CAPABILITIES_GRANTED.value
+_CAPABILITY_IDENTITY_FIELDS = (
+    'accepted_protocol_versions', 'expected_audience', 'known_key_ids', 'now', 'clock_skew_s', 'expect.org_uuid',
+    'expect.video_uuid', 'expect.owning_cell_id', 'expect.placement_epoch', 'expect.lifecycle_revision',
+    'expect.attempt_id', 'expect.dispatch_id', 'expect.execution_id', 'expect.execution_fence', 'expect.runtime_id',
+)
+_CAPABILITY_S_CHECKS = (
+    'S1', 'S2', 'S3', 'S4', 'S5', 'S7', 'S8', 'S9', 'S10', 'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'S29',
+)
+# The capability exchange (2.2.0, README 8.5): one HTTP exchange, on the push channel only.
+CAPABILITY_CONTEXT_FIELDS = {
+    **{(role, _CAPABILITY_REQUEST): _CAPABILITY_IDENTITY_FIELDS + ('last_capability_seq',)
+       for role in ('hub_receiver', 'worker_sender')},
+    **{(role, _CAPABILITY_GRANTED): _CAPABILITY_IDENTITY_FIELDS + (
+        'expect.capability_request', 'expect.capability_storage_host', 'expect.capability_output',
+        'expect.capability_source') for role in ('hub_sender', 'worker_receiver')},
+}
+RULES = {**RULES,
+    **{(role, _CAPABILITY_REQUEST): (('push',), _CAPABILITY_S_CHECKS + ('K1', 'K2')) for role in ('hub_receiver', 'worker_sender')},
+    **{(role, _CAPABILITY_GRANTED): (('push',), _CAPABILITY_S_CHECKS + ('K3', 'K4', 'K5')) for role in ('hub_sender', 'worker_receiver')},
+}
+
 # --- helpers --------------------------------------------------------------------------------
 
 
@@ -222,6 +247,8 @@ def _source_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any]
     """Pointer and value of the message's source id; None when the kind (or an optional block) has none."""
     if kind == "source.acquire.request":
         return "/destination/source_id", document["destination"]["source_id"]
+    if kind in CAPABILITY_KINDS:
+        return None
     if kind == _MANIFEST:
         return "/identity/source_id", _identity(document)["source_id"]
     source = document.get("source")
@@ -234,7 +261,7 @@ def _runtime_reference(document: Mapping[str, Any], kind: str) -> tuple[str, Any
     """Pointer and value of the message's runtime id; None when the kind carries none."""
     if kind == _CLAIM:
         return "/claim/runtime_id", document["claim"]["runtime_id"]
-    if kind in (_GRANT, _UNCLAIMED, "source.acquire.granted"):
+    if kind in (_GRANT, _UNCLAIMED, "source.acquire.granted") or kind in CAPABILITY_KINDS:
         return "/runtime_id", document["runtime_id"]
     return None
 
@@ -246,6 +273,13 @@ def _timestamps(document: Mapping[str, Any], kind: str) -> Iterator[tuple[str, A
         yield "/claim/expires_at", document["claim"]["expires_at"]
     if kind == _MANIFEST:
         yield "/created_at", document["created_at"]
+    if kind == _CAPABILITY_GRANTED:
+        yield "/lease/expires_at", document["lease"]["expires_at"]
+        yield "/stage/ends_at", document["stage"]["ends_at"]
+        if document["source"] is not None:
+            yield "/source/expires_at", document["source"]["expires_at"]
+        if document["put"] is not None:
+            yield "/put/expires_at", document["put"]["expires_at"]
 
 
 def _count(artifacts: list[Mapping[str, Any]], artifact_kind: str, rendition: str | None = None) -> int:
@@ -527,6 +561,7 @@ def _s31_granted_media_key(
 
 CHECKS: Mapping[str, CheckFunction] = {
     **acquire.CHECKS,
+    **capabilities.CHECKS,
     "S1": _s1_timestamps,
     "S2": _s2_audience,
     "S3": _s3_key_id,

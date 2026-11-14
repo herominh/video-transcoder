@@ -16,6 +16,11 @@ RESERVED_CODES = {
     "claim_conflict",
     "claim_refused",
     "claim_replayed",
+    "capability_refused",
+    "lease_expired",
+    "stage_budget_exceeded",
+    "capability_conflict",
+    "capability_limit_exceeded",
 }
 
 
@@ -35,7 +40,7 @@ def test_reason_codes_when_compared_should_match_python_enum():
     assert python_codes == list(registry.reason_code_values())
 
 
-def test_reason_codes_when_scanned_should_reserve_exactly_the_live_path_and_claim_core_codes():
+def test_reason_codes_when_scanned_should_reserve_exactly_the_live_path_claim_core_and_capability_core_codes():
     # Arrange
     registry = ContractRegistry.load()
 

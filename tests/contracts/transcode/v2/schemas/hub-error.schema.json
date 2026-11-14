@@ -90,7 +90,17 @@
             "acquire_plan_mismatch",
             "acquire_url_invalid",
             "acquire_parts_mismatch",
-            "acquire_integrity_mismatch"
+            "acquire_integrity_mismatch",
+            "stale_capability_sequence",
+            "duplicate_capability_path",
+            "capability_answer_mismatch",
+            "capability_expiry_invalid",
+            "capability_url_invalid",
+            "capability_refused",
+            "lease_expired",
+            "stage_budget_exceeded",
+            "capability_conflict",
+            "capability_limit_exceeded"
           ]
         },
         "message": {

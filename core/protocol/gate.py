@@ -12,7 +12,7 @@ from typing import Any, Mapping
 
 from .context import TrustedContext
 from .reasons import Layer, ReasonCode
-from .registry import KNOWN_KINDS, Channel, MessageKind
+from .registry import KNOWN_KINDS, REQUIRED_PROTOCOL_VERSION, Channel, MessageKind
 from .verdict import Verdict
 
 # Tab, LF, CR and printable ASCII: the only bytes a contract payload may hold.
@@ -160,7 +160,7 @@ def select_kind(document: Mapping[str, Any], context: TrustedContext) -> Message
     kind = document.get(kind_field)
     if not isinstance(kind, str) or kind not in KNOWN_KINDS:
         return Verdict.reject(Layer.VERSION, ReasonCode.UNKNOWN_MESSAGE_KIND, f"/{kind_field}")
-    if kind.startswith("source.acquire.") and version != "2.1.0":
+    if REQUIRED_PROTOCOL_VERSION.get(kind, version) != version:
         return Verdict.reject(Layer.VERSION, ReasonCode.UNKNOWN_MESSAGE_KIND, f"/{kind_field}")
     if kind not in context.accepted_message_kinds:
         return Verdict.reject(Layer.VERSION, ReasonCode.UNEXPECTED_MESSAGE_KIND, f"/{kind_field}")
