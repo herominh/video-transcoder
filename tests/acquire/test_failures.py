@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from core.drive_import import acquire, transfer
-from core.drive_import.clock import DeadlineReached
+from core.net.clock import DeadlineReached
 from core.drive_import.failure import Code, ImportFailed, Stage
 from core.protocol import outbox, signing
 from core.protocol.transport import TransportFailed

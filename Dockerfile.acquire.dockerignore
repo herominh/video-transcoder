@@ -9,9 +9,11 @@
 !core/drive_import/transfer.py
 !core/drive_import/google.py
 !core/drive_import/store.py
-!core/drive_import/transport.py
-!core/drive_import/clock.py
+!core/drive_import/deadline.py
 !core/drive_import/failure.py
+!core/net/__init__.py
+!core/net/transport.py
+!core/net/clock.py
 !wrappers/runpod_acquire_handler.py
 !tests/contracts/transcode/v2/
 **/__pycache__

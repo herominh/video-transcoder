@@ -17,12 +17,12 @@ from core.protocol.registry import MessageKind
 from core.protocol.runtime import Runtime
 from core.protocol.settings import AcquireSettings
 from core.protocol.transport import TransportFailed
+from core.net.clock import DeadlineReached, StopLine
+from core.net.transport import TRANSFER_ERRORS, HttpSession
 
-from . import store
-from .clock import DeadlineReached, StopLine
+from . import deadline, store
 from .failure import Code, ImportFailed, Stage
 from .transfer import Part, Tally, TransferPlan, TransferResult, transfer
-from .transport import TRANSFER_ERRORS, HttpSession
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,7 @@ def _terminal(
         settings=runtime.settings, now=now,
     )
     stage = failure.stage if failure is not None else Stage.VERIFY
-    check = None if failure is not None and failure.code is Code.DEADLINE else lambda: stop.require(stage)
+    check = None if failure is not None and failure.code is Code.DEADLINE else lambda: deadline.require(stop, stage)
     try:
         return seal_message(message, context, settings=runtime.settings, require_time=check)
     except ImportFailed:

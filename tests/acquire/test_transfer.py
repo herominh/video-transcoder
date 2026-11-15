@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from core.drive_import import acquire
-from core.drive_import.clock import StopLine
+from core.net.clock import StopLine
 from core.drive_import.failure import ImportFailed
 from core.drive_import.transfer import Part, TransferPlan, transfer
 from core.protocol import acquire_messages, messages

@@ -32,9 +32,9 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from core.drive_import import store
-from core.drive_import.clock import DeadlineReached, StopLine
+from core.net.clock import DeadlineReached, StopLine
 from core.drive_import.failure import Code, ImportFailed, Stage
-from core.drive_import.transport import TRANSFER_ERRORS, BoundedBody, RequestsSession, read_small_answer
+from core.net.transport import TRANSFER_ERRORS, BoundedBody, RequestsSession, read_small_answer
 from tests.drive_import.fakes import MIB, DriveFile, FakeClock
 
 TIMEOUT = (5.0, 5.0)

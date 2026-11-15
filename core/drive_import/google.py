@@ -21,7 +21,7 @@ from typing import Any, Mapping, Protocol
 from urllib.parse import quote
 
 from core.drive_import.failure import Code
-from core.drive_import.transport import HttpResponse, read_small_answer
+from core.net.transport import HttpResponse, read_small_answer
 
 HOST = "www.googleapis.com"
 FILES_URL = f"https://{HOST}/drive/v3/files/"

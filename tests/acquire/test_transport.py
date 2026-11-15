@@ -12,8 +12,8 @@ import pytest
 
 from core.drive_import import google
 from core.drive_import.acquire import ClaimedAcquire, run_acquire
-from core.drive_import.clock import StopLine
-from core.drive_import.transport import HttpResponse, RequestsSession
+from core.net.clock import StopLine
+from core.net.transport import HttpResponse, RequestsSession
 from core.protocol.acquire_claim import AcquireGrant, claim_execution
 from core.protocol.acquire_dispatch import accept_dispatch
 from tests.acquire.support import Scenario, wire

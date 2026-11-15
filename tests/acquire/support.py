@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping
 
-from core.drive_import.clock import StopLine
+from core.net.clock import StopLine
 from core.protocol import files, signing
 from core.protocol.messages import timestamp
 from core.protocol.runtime import Runtime

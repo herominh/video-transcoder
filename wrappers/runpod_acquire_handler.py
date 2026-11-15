@@ -14,7 +14,7 @@ os.environ.pop("SSLKEYLOGFILE", None)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core.drive_import.acquire import handle  # noqa: E402
-from core.drive_import.transport import ClosableHttpSession, RequestsSession  # noqa: E402
+from core.net.transport import ClosableHttpSession, RequestsSession  # noqa: E402
 from core.protocol.dispatch import DispatchRefused  # noqa: E402
 from core.protocol.runtime import Runtime, load_runtime  # noqa: E402
 from core.protocol.settings import AcquireSettings  # noqa: E402

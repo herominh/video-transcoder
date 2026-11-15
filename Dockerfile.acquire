@@ -29,9 +29,11 @@ COPY core/drive_import/acquire.py core/drive_import/acquire.py
 COPY core/drive_import/transfer.py core/drive_import/transfer.py
 COPY core/drive_import/google.py core/drive_import/google.py
 COPY core/drive_import/store.py core/drive_import/store.py
-COPY core/drive_import/transport.py core/drive_import/transport.py
-COPY core/drive_import/clock.py core/drive_import/clock.py
+COPY core/drive_import/deadline.py core/drive_import/deadline.py
 COPY core/drive_import/failure.py core/drive_import/failure.py
+COPY core/net/__init__.py core/net/__init__.py
+COPY core/net/transport.py core/net/transport.py
+COPY core/net/clock.py core/net/clock.py
 COPY tests/contracts/transcode/v2/ tests/contracts/transcode/v2/
 COPY wrappers/runpod_acquire_handler.py wrappers/runpod_acquire_handler.py
 

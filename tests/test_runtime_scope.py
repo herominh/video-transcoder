@@ -10,7 +10,8 @@ start of the worker under contract v2 (core.protocol.handler) and the job runner
 none of the v1 worker's modules.
 
 The acquire endpoint (wrappers/runpod_acquire_handler.py; Dockerfile.acquire) ships its explicit CPU closure and
-the v2 contract. The transcode entry does not reach it. The Drive import's first contract, import/v1, is retired on
+the v2 contract. The transcode entry does not reach it; the two share only the hardened HTTP session of core/net/,
+which the transcode reaches for its protocol 2.2.0 path. The Drive import's first contract, import/v1, is retired on
 both sides (TD-184): no entry point, image or contract copy of it remains.
 
 The transcode image's build context leaves out what the shared one does and the Drive acquire's files too: BuildKit
@@ -32,8 +33,12 @@ RUNPOD_ENTRY_POINT = "wrappers/runpod_handler.py"
 ACQUIRE_ENTRY_POINT = "wrappers/runpod_acquire_handler.py"
 ACQUIRE_TRANSFER_MODULES = {
     "core.drive_import", "core.drive_import.acquire", "core.drive_import.transfer", "core.drive_import.google",
-    "core.drive_import.store", "core.drive_import.transport", "core.drive_import.clock", "core.drive_import.failure",
+    "core.drive_import.store", "core.drive_import.deadline", "core.drive_import.failure",
 }
+# The hardened session both entries share: the acquire's transfer and the transcode's 2.2.0 path.
+NET_MODULES = {"core.net", "core.net.transport", "core.net.clock"}
+DRIVE_FILES = ("__init__", "acquire", "transfer", "google", "store", "deadline", "failure")
+NET_FILES = ("__init__", "transport", "clock")
 IMPORT_PACKAGE = "core.drive_import"
 # The acquire image's hashed lock (its file name is the Drive import's, from before the acquire).
 ACQUIRE_REQUIREMENTS = "requirements-import.lock"
@@ -211,7 +216,7 @@ def test_acquire_entry_when_imported_should_reach_only_the_cpu_module_closure() 
     assert ACQUIRE_TRANSFER_MODULES <= reachable
     assert "core.protocol.acquire_claim" in reachable
     outside = {name for name in reachable if not _in_package(name, PROTOCOL_PACKAGE)}
-    assert outside == ACQUIRE_TRANSFER_MODULES | {"core", "core.failure", "wrappers.runpod_acquire_handler"}
+    assert outside == ACQUIRE_TRANSFER_MODULES | NET_MODULES | {"core", "core.failure", "wrappers.runpod_acquire_handler"}
     assert not any(_in_package(name, JOB_PACKAGE) for name in reachable)
     assert not any("ffmpeg" in name for name in reachable)
 
@@ -277,8 +282,8 @@ def test_acquire_dockerignore_when_read_should_include_only_the_lock_and_the_fil
         "!core/__init__.py",
         "!core/failure.py",
         "!core/protocol/",
-        *[f"!core/drive_import/{name}.py" for name in
-          ("__init__", "acquire", "transfer", "google", "store", "transport", "clock", "failure")],
+        *[f"!core/drive_import/{name}.py" for name in DRIVE_FILES],
+        *[f"!core/net/{name}.py" for name in NET_FILES],
         f"!{ACQUIRE_ENTRY_POINT}",
         "!tests/contracts/transcode/v2/",
         "**/__pycache__",
@@ -307,8 +312,8 @@ def test_acquire_image_when_inspected_should_copy_exactly_the_cpu_runtime_and_v2
     expected = {
         "requirements-import.lock", "core/__init__.py", "core/failure.py", "core/protocol/",
         "tests/contracts/transcode/v2/", ACQUIRE_ENTRY_POINT,
-        *[f"core/drive_import/{name}.py" for name in
-          ("__init__", "acquire", "transfer", "google", "store", "transport", "clock", "failure")],
+        *[f"core/drive_import/{name}.py" for name in DRIVE_FILES],
+        *[f"core/net/{name}.py" for name in NET_FILES],
     }
 
     # Act
