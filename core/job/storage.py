@@ -33,8 +33,10 @@ store the recorded bytes of the same file under the same key (a body whose bytes
 ones is refused), so whichever of them lands, and in whatever order, the object is the same.
 
 abandoned_requests() counts the requests this process abandoned while they still ran, at the deadline
-or at their ceiling. Each keeps its thread and its connection until the storage ends it, so once the
-count is above zero the entry point asks for a fresh process with every job it returns.
+or at their ceiling. Each of this module's keeps its thread and its connection until the storage ends
+it, so once the count is above zero the entry point asks for a fresh process with every job it returns.
+The 2.2.0 upload through URLs (core/job/url_upload.py) is counted here too, unchanged, though a PUT it
+gives up is closed with its lane's HTTP session at once, its thread then ending as soon as it returns.
 
 download_source() copies the source into the scratch directory through RangeSource.read(), so every byte
 arrives through the reader's own checks: in production an S3RangeSource, whose ranged reads are each
@@ -359,7 +361,8 @@ def abandoned_requests() -> int:
     """How many storage requests this process has abandoned while they still ran, at the deadline or at
     their ceiling.
 
-    Each of them keeps its helper thread and its connection until the storage ends the request, and it
+    Each of them keeps its helper thread and its connection until the storage ends the request (a PUT
+    of the 2.2.0 upload through URLs is cut with its lane's session at once instead), and it
     belongs to no single job (a read of the preflight can be given up after its job returned). The count
     never falls: once it is above zero the process is marked, and the entry point asks for a fresh
     worker with every job it returns.

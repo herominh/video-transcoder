@@ -836,3 +836,117 @@ def test_watchdog_when_many_puts_are_held_at_once_should_end_every_one_at_the_st
     # the stop line as a transfer error.
     assert len(outcomes) == CONCURRENT_PUTS
     assert all(failed and elapsed < ENDED_WITHIN_S for failed, elapsed in outcomes)
+
+
+# --- a session cut at once (abandon(): one lane of the encode's protocol 2.2.0 upload) --------------------------------
+
+# How soon after abandon() a request it cut must have ended: far less than any time-out or stop line of these tests.
+CUT_ENDED_WITHIN_S = 1.0
+
+
+def _eventually(condition: Callable[[], bool], within_s: float = 5.0) -> bool:
+    """Whether `condition()` became true within `within_s` seconds, looked at every few milliseconds."""
+    give_up_at = time.monotonic() + within_s
+    while time.monotonic() < give_up_at:
+        if condition():
+            return True
+        time.sleep(0.005)
+    return condition()
+
+
+def _refusal_of(work: Callable[[], object]) -> BaseException | None:
+    try:
+        work()
+    except Exception as error:  # noqa: BLE001 - the test compares what each session raises
+        return error
+    return None
+
+
+def test_abandon_when_a_request_is_blocked_on_a_silent_server_should_end_it_with_a_transfer_error_at_once(
+    tls, server_tls
+):
+    # Arrange: a PUT whose server read its body and answers nothing, under a far stop line and a long read time-out.
+    made = RequestsSession(ca_bundle=str(tls.certificate))
+    outcome: list[tuple[BaseException | None, float]] = []
+    with _loopback_server(tls=server_tls) as (base, seen):
+        thread = threading.Thread(
+            target=lambda: outcome.append(_ended(lambda: made.put(
+                base + "/hold", BoundedBody(PAYLOAD, _far_stop_line()), {"Content-Length": str(len(PAYLOAD))},
+                LONG_TIMEOUT, stop_line=_far_stop_line(),
+            ))),
+            daemon=True,
+        )
+        thread.start()
+        assert _eventually(lambda: len(seen.bodies) == 1), "the PUT never reached the server"
+
+        # Act: cut from another thread than the one the request blocks
+        cut_at = time.monotonic()
+        made.abandon()
+        thread.join(ENDED_WITHIN_S)
+        ended_after_s = time.monotonic() - cut_at
+
+    # Assert: the request ended on its own thread, as a transfer error, right after the cut
+    assert not thread.is_alive()
+    ((raised, _),) = outcome
+    assert isinstance(raised, TRANSFER_ERRORS) and not isinstance(raised, DeadlineReached)
+    assert ended_after_s < CUT_ENDED_WITHIN_S
+
+
+def test_abandon_when_a_request_is_asked_afterwards_should_refuse_it_as_an_expired_session_does():
+    # Arrange: one session cut, one whose stop line has passed
+    cut = RequestsSession()
+    cut.abandon()
+    expired = RequestsSession()
+    clock = FakeClock()
+    passed = StopLine(clock, clock.monotonic() - 1.0)
+    try:
+        with _loopback_server() as (base, seen):
+            expired_refusal = _refusal_of(lambda: expired.get(base + "/target", {}, TIMEOUT, True, stop_line=passed))
+
+            # Act
+            get_refusal = _refusal_of(lambda: cut.get(base + "/target", {}, TIMEOUT, True, stop_line=_far_stop_line()))
+            put_refusal = _refusal_of(lambda: cut.put(
+                base + "/target", BoundedBody(PAYLOAD, _far_stop_line()), {"Content-Length": str(len(PAYLOAD))},
+                TIMEOUT, stop_line=_far_stop_line(),
+            ))
+            asked = list(seen.requests)
+    finally:
+        expired.close()
+
+    # Assert: the same refusal as an expired session's, and nothing reached the server
+    assert isinstance(expired_refusal, DeadlineReached)
+    assert type(get_refusal) is type(expired_refusal)
+    assert type(put_refusal) is type(expired_refusal)
+    assert asked == []
+
+
+@pytest.mark.parametrize("before", ["abandon", "close"])
+def test_abandon_when_the_session_was_cut_or_closed_already_should_not_raise(before):
+    # Arrange: a session that made a request (its watchdog armed), then was cut or closed
+    made = RequestsSession()
+    with _loopback_server() as (base, _):
+        made.get(base + "/target", {}, TIMEOUT, True, stop_line=_far_stop_line()).close()
+    getattr(made, before)()
+
+    # Act
+    raised = _refusal_of(made.abandon)
+
+    # Assert
+    assert raised is None
+
+
+def test_abandon_when_a_watchdog_is_armed_should_let_its_timer_go():
+    # Arrange
+    made = RequestsSession()
+    with _loopback_server() as (base, _):
+        made.get(base + "/target", {}, TIMEOUT, True, stop_line=_far_stop_line()).close()
+    timers_before = [thread for thread in threading.enumerate() if isinstance(thread, threading.Timer)]
+
+    # Act
+    made.abandon()
+    for thread in timers_before:
+        thread.join(1.0)
+
+    # Assert: the session's timer was armed, and the cut let it go
+    assert timers_before != []
+    assert [thread for thread in timers_before if thread.is_alive()] == []

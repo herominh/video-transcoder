@@ -28,6 +28,12 @@ connect time-out cut to what is left of the stop line, so that several addresses
 taking a whole time-out. What nothing cuts short is the name resolution itself, which no time-out of the HTTP
 library bounds and which has no socket to shut; it ends where the latch is read next.
 
+`abandon()` does to one session at once, from any thread, what the watchdog does at the stop line, and lets the
+session go: the encode's 2.2.0 upload (core/job/url_upload.py) gives each of its lanes a session of its own, which
+makes one request at a time, and cuts that session when it gives up the lane's PUT at its ceiling
+or at the deadline, so that no thread, body or connection of a given-up PUT outlives the cut but for the moment its
+thread needs to return. The acquire never calls it.
+
 A transfer that fails (no connection, a reset, a time-out, an answer cut short, a socket shut at the stop line)
 raises an OSError: requests' own errors are OSErrors (RequestException derives from IOError). Their text names the
 request's URL, so the job never logs, keeps or re-raises one: it notes that the try failed and goes on outside the
@@ -107,6 +113,13 @@ class ClosableHttpSession(HttpSession, Protocol):
     """A session the entry point makes for one job and closes when the job ends."""
 
     def close(self) -> None: ...
+
+
+class AbandonableHttpSession(ClosableHttpSession, Protocol):
+    """A session that can also be cut while a request is in flight on it: one lane of the 2.2.0 upload
+    (core/job/url_upload.py), which makes one request at a time, so that cutting the session cuts that request."""
+
+    def abandon(self) -> None: ...
 
 
 class _Sockets:
@@ -345,12 +358,29 @@ class RequestsSession:
 
     def close(self) -> None:
         self._sockets.expire()
+        self._let_watchdog_go()
+        self._session.close()
+
+    def abandon(self) -> None:
+        """Cut the session now, from any thread: every socket it keeps is shut and the session is latched as expired,
+        as the watchdog does at the stop line; its watchdog is let go and its requests session closed. A request in
+        flight on it then ends with a transfer error on its own thread, and every later request on it is refused as
+        an expired session refuses one (DeadlineReached). It never raises: a session cut or closed already is cut
+        again, harmlessly, and an error of the requests session's close is dropped (its sockets are shut already, and
+        its text could quote a URL)."""
+        self._sockets.expire()
+        self._let_watchdog_go()
+        try:
+            self._session.close()
+        except Exception:  # noqa: BLE001 - nothing of it is kept: the session is cut whatever its close says
+            return
+
+    def _let_watchdog_go(self) -> None:
         with self._watchdog_lock:
             if self._watchdog is not None:
                 self._watchdog.cancel()
             self._watchdog = None
             self._watchdog_due = None
-        self._session.close()
 
     def _watch(self, stop_line: StopLine) -> None:
         """Refuse a request once the session has expired (DeadlineReached); else arm the watchdog at `stop_line`,

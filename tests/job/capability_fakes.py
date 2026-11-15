@@ -326,6 +326,7 @@ class FakeStore:
         self.hold_s = 0.5
         self.peak = 0
         self.closed = False
+        self.abandoned = 0
         self._active = 0
         self._lock = threading.Condition()
 
@@ -424,6 +425,11 @@ class FakeStore:
 
     def close(self) -> None:
         self.closed = True
+
+    def abandon(self) -> None:
+        """A lane's cut (the upload gave up a PUT on it): counted only, the fake has no socket to shut."""
+        with self._lock:
+            self.abandoned += 1
 
 
 def wait_until(condition: Callable[[], bool], *, within_s: float = 5.0) -> bool:

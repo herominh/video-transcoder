@@ -31,8 +31,9 @@ credential: no access profile is resolved and no storage client is made. Right a
 execution makes its capability client (core/protocol/capabilities_client.py), its heartbeat (core/job/heartbeat.py)
 and its HTTP session (core/net/transport.py). Entering a stage reports it with one request (for `probing` asking the
 source's read URL as well), and the preflight's admitted duration is reported from `downloading` on. The source is
-read through that URL (core/source_reader.py UrlRangeSource), the generation and the stored result are written
-through put URLs (core/job/url_upload.py). The execution looks at its authority as it enters a stage and between
+read through that URL (core/source_reader.py UrlRangeSource) on that session, the generation and the stored result
+are written through put URLs (core/job/url_upload.py), each lane of the upload on a session of its own
+(upload_session()). The execution looks at its authority as it enters a stage and between
 the objects it uploads, and every bounded process it runs is stopped once the authority is lost
 (core/bounded_process.py stopped_when()); an execution whose authority was lost ends with that failure
 (authority_refused, not retryable, at the stage it was in), whatever its stage then failed with. The heartbeat is
@@ -100,7 +101,7 @@ from core.encode_command import EncodeSource
 from core.failure import DETAIL_MAX_CHARS, Diagnostic, Failure, WorkerFailure, make_detail
 from core.hls_key import KEY_BYTES
 from core.net.clock import stop_line_within
-from core.net.transport import ClosableHttpSession, RequestsSession
+from core.net.transport import AbandonableHttpSession, ClosableHttpSession, RequestsSession
 from core.package import (
     CONTRACT_MAX_DIAGNOSTICS,
     CONTRACT_MAX_DURATION_MS,
@@ -146,7 +147,7 @@ from .storage import (
     upload_generation,
     upload_result,
 )
-from .url_upload import UPLOAD_PARALLELISM, upload_generation_by_urls, upload_result_by_url
+from .url_upload import upload_generation_by_urls, upload_result_by_url
 
 logger = logging.getLogger(__name__)
 
@@ -176,8 +177,14 @@ DEADLINE_EXCEEDED_CLASS = "deadline_exceeded"
 # start's wall time is never taken as less (an absurd reading far in the past).
 LEAST_COUNTABLE_S = -sys.float_info.max / MS_PER_SECOND
 SPENT_BEFORE_START_DETAIL = "{detail}; the start had spent {spent_s} s of its {limit_s} s before the execution began"
-# The connections the session of a 2.2.0 execution keeps per host: the PUTs it makes at once, and the preflight's reads.
-URL_SESSION_CONNECTIONS = UPLOAD_PARALLELISM + 4
+# The connections the shared session of a 2.2.0 execution keeps per host: its source reads alone (UrlRangeSource), the
+# room they had beside the PUTs before each lane of the upload was given a session of its own (upload_session()). The
+# reads go one at a time (the preflight's under its loopback server's fetch lock, the download's in order), and a read
+# given up at its ceiling may still hold its connection while the next one opens: four leave room for that.
+URL_SESSION_CONNECTIONS = 4
+# The connections the session of one lane of a 2.2.0 upload keeps: a lane makes one request at a time, so cutting its
+# session when its PUT is given up cuts exactly that request (core/job/url_upload.py).
+UPLOAD_SESSION_CONNECTIONS = 1
 # The class and the code of the failure that the source was no longer the recorded object (core/source_reader.py).
 SOURCE_CHANGED = ("source_integrity_mismatch", "source_changed")
 
@@ -342,8 +349,14 @@ def _scratch_failure(error: OSError) -> Failure:
 
 
 def url_session() -> ClosableHttpSession:
-    """The HTTP session one 2.2.0 execution reads and writes its URLs through."""
+    """The HTTP session one 2.2.0 execution reads its source's URLs through."""
     return RequestsSession(connections=URL_SESSION_CONNECTIONS)
+
+
+def upload_session() -> AbandonableHttpSession:
+    """The HTTP session of one lane of a 2.2.0 execution's upload (and of its stored result's PUT): made for each lane
+    by the upload, cut when the lane's PUT is given up, closed at the upload's end."""
+    return RequestsSession(connections=UPLOAD_SESSION_CONNECTIONS)
 
 
 class JobRunner:
@@ -357,23 +370,28 @@ class JobRunner:
         output_client_factory: Callable[[StorageProfile], Any] = upload_client,
         ffmpeg_version: Callable[[Deadline], str] = installed_ffmpeg_version,
         url_session_factory: Callable[[], ClosableHttpSession] = url_session,
+        upload_session_factory: Callable[[], AbandonableHttpSession] = upload_session,
     ) -> None:
         """`source_client_factory` makes the S3 client the source is read with and `output_client_factory`
         the one the generation is stored with, each from an access profile; `ffmpeg_version` names the
         installed ffmpeg within the execution's deadline, which it is handed, or raises WorkerFailure
-        when it cannot; `url_session_factory` makes the HTTP session of one 2.2.0 execution."""
+        when it cannot; `url_session_factory` makes the HTTP session one 2.2.0 execution reads its source
+        through, and `upload_session_factory` the session of each lane of its upload."""
         if not isinstance(job_settings, JobSettings):
             raise TypeError("job_settings must be a JobSettings")
-        given = (source_client_factory, output_client_factory, ffmpeg_version, url_session_factory)
+        given = (source_client_factory, output_client_factory, ffmpeg_version, url_session_factory,
+                 upload_session_factory)
         if not all(callable(factory) for factory in given):
             raise TypeError(
-                "source_client_factory, output_client_factory, ffmpeg_version and url_session_factory must be callable"
+                "source_client_factory, output_client_factory, ffmpeg_version, url_session_factory and "
+                "upload_session_factory must be callable"
             )
         self._job_settings = job_settings
         self._source_client_factory = source_client_factory
         self._output_client_factory = output_client_factory
         self._ffmpeg_version = ffmpeg_version
         self._url_session_factory = url_session_factory
+        self._upload_session_factory = upload_session_factory
 
     def run(self, claimed: ClaimedExecution, runtime: Runtime) -> SealedMessage:
         """Run the granted execution and return its sealed `transcode.result.completed` or `.failed`.
@@ -395,6 +413,7 @@ class JobRunner:
             self._output_client_factory,
             self._ffmpeg_version,
             self._url_session_factory,
+            self._upload_session_factory,
         ).run()
 
 
@@ -410,11 +429,13 @@ class _Execution:
         output_client_factory: Callable[[StorageProfile], Any],
         ffmpeg_version: Callable[[Deadline], str],
         url_session_factory: Callable[[], ClosableHttpSession],
+        upload_session_factory: Callable[[], AbandonableHttpSession],
     ) -> None:
         self._dispatch = claimed.dispatch
         self._grant = claimed.grant
         self._runtime_id = claimed.runtime_id
         self._url_session_factory = url_session_factory
+        self._upload_session_factory = upload_session_factory
         self._runtime = runtime
         self._job_settings = job_settings
         self._source_client_factory = source_client_factory
@@ -508,7 +529,7 @@ class _Execution:
         """A 2.2.0 execution's stored result: nothing without a client, a session, or a stage it reached."""
         if self._capabilities is None or self._url_session is None:
             return
-        upload_result_by_url(self._capabilities, self._url_session, result=result, deadline=self._deadline)
+        upload_result_by_url(self._capabilities, self._upload_session_factory, result=result, deadline=self._deadline)
 
     def _ending(self) -> SealedMessage:
         execution_id = self._grant.identity.execution_id
@@ -994,15 +1015,13 @@ class _Execution:
         self._enter(STAGE_UPLOADING)
         manifest = generation.manifest
         generation_bytes = manifest.total_bytes + manifest.size_bytes
-        if self._url_session is None:
-            raise RuntimeError("the session of a 2.2.0 execution is made with its capability client")
 
         def uploaded(total_bytes: int) -> None:
             self._progress.uploaded(total_bytes, generation_bytes)
 
         upload_generation_by_urls(
             self._capabilities_of(),
-            self._url_session,
+            self._upload_session_factory,
             prefix=self._grant.output_prefix,
             output_root=scratch.output_root,
             artifacts=generation.artifacts,

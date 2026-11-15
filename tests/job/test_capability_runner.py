@@ -72,6 +72,7 @@ class _Harness:
             output_client_factory=lambda profile: self._refused_client("output"),
             ffmpeg_version=lambda deadline: FFMPEG_VERSION,
             url_session_factory=lambda: self.store,
+            upload_session_factory=lambda: self.store,
         )
 
     def _refused_client(self, side: str) -> Any:

@@ -12,19 +12,26 @@ once, its size and SHA-256 checked against the manifest and its MD5 computed (a 
 internal_error/artifact_changed_before_upload, and nothing of the batch is sent); then the batch's URLs are asked
 for (lifetime BATCH_URL_LIFETIME_S), declaring each object's path, size and MD5, which a path keeps whenever it is
 asked again (rule 4); then the objects are PUT by a pool of UPLOAD_PARALLELISM daemon threads, so never more than
-that many at once and never more bodies than that in memory but for a PUT given up at its ceiling (below). One PUT
-reads the file into memory and checks it again against the declared MD5 (what is sent is what was declared), and
-carries `Content-MD5`, `Content-Length` and the object's content type, through the shared session
-(core/net/transport.py) with a BoundedBody, a 10 s connect and the execution's deadline as its stop line. The PUT
-runs on a helper thread the pool's slot waits for no longer than the request's ceiling of core/job/storage.py
+that many at once and never more bodies than that in memory. Each pool thread is a lane with an HTTP session of its
+own (core/net/transport.py), made by the caller's factory at the lane's first PUT and kept for its later ones; a lane
+makes one request at a time, each PUT on a connection of its own (its answer is closed unread, which closes its
+connection). One PUT reads the file into memory and checks it again against the declared MD5 (what is
+sent is what was declared), and carries `Content-MD5`, `Content-Length` and the object's content type, through its
+lane's session with a BoundedBody, a 10 s connect and the execution's deadline as its stop line. The PUT runs on a
+helper thread the pool's slot waits for no longer than the request's ceiling of core/job/storage.py
 (storage._within): its body stops at the ceiling, its socket reads are each held to it, and a PUT whose answer has
 not ended by then (one that trickles in after the body included) is given up there, counted with
-storage.abandoned_requests(), and tried again as output_write_failed/upload_stalled; the given-up request keeps its
-thread, its body and its connection until the store ends it or the session's watchdog shuts its socket at the
-deadline. A 200 is success, its body never read. A 5xx, a time-out, a connection error or a stall is tried again
-after storage.py's waits (0.5, 2 and 8 s, each times a factor drawn between 0.5 and 1, a whole-seconds `Retry-After`
-honoured up to 30 s); so is any other 4xx but a 403 that storage.refusal_passes() lets pass: a 408, a 409 or a 429
-by its status alone, and any other 4xx by an error code such as RequestTimeout, IncompleteBody or BadDigest, read
+storage.abandoned_requests(), and tried again as output_write_failed/upload_stalled. A PUT given up while it still
+runs, at its ceiling or at the deadline, is closed with its lane's session: the lane cuts that session
+(RequestsSession.abandon(): every socket shut, the session refused from then on) and forgets it before anything else,
+so the request ends with a transfer error on its helper thread and no thread, body or connection of it outlives the
+cut but for the moment its thread needs to return; the lane's next PUT goes through a fresh session. A cut never
+touches another lane. A factory that raises is resource_exhausted/storage_request_start_failed (retryable), named in
+the log by the error's class alone. A 200 is success, its body never read. A 5xx, a time-out, a connection error or
+a stall is tried again after storage.py's waits (0.5, 2 and 8 s, each times a factor drawn between 0.5 and 1, a
+whole-seconds `Retry-After` honoured up to 30 s); so is any other 4xx but a 403 that storage.refusal_passes() lets
+pass: a 408, a 409 or a 429 by its status alone,
+and any other 4xx by an error code such as RequestTimeout, IncompleteBody or BadDigest, read
 from at most ERROR_BODY_MAX_BYTES of its error body (never logged; that body is read for no other answer). A 403 puts the object back to be asked again in a later batch, at most
 MAX_REASKS further times, then output_write_failed/upload_url_refused (retryable); a URL whose usable time (less
 URL_MARGIN_S) has passed before its PUT could start is asked again without counting, the store having refused
@@ -36,15 +43,18 @@ output_write_failed/upload_refused, final.
 
 The first failure stops the rest: no new PUT starts, the PUTs under way are waited for (each within its ceiling or
 the deadline), and that failure is the upload's. A lost authority (the capability client's lost()) is such a
-failure. No write starts after the execution's deadline, and the session's watchdog shuts every socket at it, so a
-PUT given up there is closed, not left open (TD-345 for this path). A pool thread that still has not come back
-DRAIN_AFTER_DEADLINE_S after the deadline is given up and counted too, so the entry point asks for a fresh worker.
-Once every artifact is stored, the manifest alone is asked for (lifetime LAST_URL_LIFETIME_S) and PUT.
+failure. No write starts after the execution's deadline, and each session's watchdog shuts its sockets at it, so a
+PUT given up there is closed, not left open (TD-345 for this path), as its lane's cut closes it too. A pool thread
+that still has not come back DRAIN_AFTER_DEADLINE_S after the deadline is given up and counted too, so the entry point
+asks for a fresh worker. Once every artifact is stored, the manifest alone is asked for (lifetime LAST_URL_LIFETIME_S)
+and PUT. At the upload's end, however it ends, every lane's session still held is closed, and cut where a pool thread
+was given up.
 
 upload_result_by_url() stores the terminal result's carrier at `result.json` through a URL of its own (lifetime
 LAST_URL_LIFETIME_S), asked in one exchange that is never tried again (CapabilityClient.ask_once()) and PUT once,
 best effort: it never replaces or delays the result beyond that exchange and that PUT (15.1 rule 9), and a runtime
-whose authority is lost asks for no new URL (rule 6), so a result built then is not stored.
+whose authority is lost asks for no new URL (rule 6), so a result built then is not stored. Its PUT goes through a
+session of the same factory, the job's own thread its lane: given up, it is cut as a lane's is, and closed otherwise.
 
 No URL, MD5, request, error body or answer reaches a log line or a failure; a typed failure is raised once the
 handler that caught the session's error (which quotes the whole URL) has ended.
@@ -72,7 +82,7 @@ from core.bounded_process import Deadline
 from core.encode import ArtifactFile
 from core.failure import Failure, WorkerFailure
 from core.net.clock import DeadlineReached, stop_line_within
-from core.net.transport import TRANSFER_ERRORS, BoundedBody, HttpResponse, HttpSession, close_quietly
+from core.net.transport import TRANSFER_ERRORS, AbandonableHttpSession, BoundedBody, HttpResponse, close_quietly
 from core.package import ManifestOutput
 from core.protocol.capabilities_client import CapabilityClient, PutUrl
 from core.protocol.messages import CapabilityObject, CapabilityPut
@@ -324,19 +334,97 @@ class _DaemonPool:
                 future.set_exception(error)
 
 
+SessionFactory = Callable[[], AbandonableHttpSession]
+
+
+class _Lanes:
+    """The sessions of one upload's lanes: one for each thread that makes PUTs (a pool thread, or the job's own for
+    the stored result), made from the factory at that thread's first PUT and kept for its later ones. A lane makes one
+    request at a time, so cutting its session cuts exactly that request and no other lane's."""
+
+    def __init__(self, factory: SessionFactory) -> None:
+        self._factory = factory
+        self._lock = threading.Lock()
+        self._held: dict[threading.Thread, AbandonableHttpSession] = {}
+        self._closed = False
+
+    def session(self) -> AbandonableHttpSession:
+        """The calling lane's session, made now when it has none; WorkerFailure (resource_exhausted/
+        storage_request_start_failed, retryable) when the factory raises. A session made once the lanes were closed
+        is cut at once, so that its request is refused rather than left open."""
+        lane = threading.current_thread()
+        with self._lock:
+            held = self._held.get(lane)
+        if held is not None:
+            return held
+        made = self._made()
+        with self._lock:
+            if not self._closed:
+                self._held[lane] = made
+                return made
+        made.abandon()
+        return made
+
+    def _made(self) -> AbandonableHttpSession:
+        error_class: str | None = None
+        try:
+            return self._factory()
+        except Exception as error:  # noqa: BLE001 - typed below, outside the handler
+            # Nothing of the error is kept but its class: its text could quote a URL.
+            error_class = type(error).__name__
+        logger.warning("an upload session could not be made: %s", error_class)
+        raise WorkerFailure(STORAGE_REQUEST_START_FAILED)
+
+    def cut(self) -> None:
+        """The calling lane's request was given up while it ran: its session is cut and forgotten, so the lane's next
+        PUT goes through a fresh session."""
+        lane = threading.current_thread()
+        with self._lock:
+            held = self._held.pop(lane, None)
+        if held is not None:
+            held.abandon()
+
+    def close(self, *, cut: bool) -> None:
+        """Close every session still held (`cut`: cut it instead, for a lane that may still be in a request); no lane
+        is given a session afterwards."""
+        with self._lock:
+            self._closed = True
+            held = list(self._held.values())
+            self._held.clear()
+        for session in held:
+            if cut:
+                session.abandon()
+            else:
+                _close_session(session)
+
+
+def _close_session(session: AbandonableHttpSession) -> None:
+    """Close a lane's session; one whose close fails is cut instead. Nothing of the error is kept: its text could quote
+    a URL, and a close changes nothing the upload decided."""
+    failed = False
+    try:
+        session.close()
+    except Exception:  # noqa: BLE001 - see above
+        failed = True
+    if failed:
+        session.abandon()
+
+
 class _UrlUpload:
-    """The PUTs of one upload: what they share (the session, the deadline, the running total and the stop)."""
+    """The PUTs of one upload: what they share (the lanes' sessions, the deadline, the running total and the stop)."""
 
     def __init__(
         self,
         capabilities: CapabilityClient,
-        session: HttpSession,
+        session_factory: SessionFactory,
         deadline: Deadline,
         sleep: Callable[[float], None],
         on_bytes: Callable[[int], None] | None,
     ) -> None:
         self._capabilities = capabilities
-        self._session = session
+        self._lanes = _Lanes(session_factory)
+        # Whether a pool thread was given up after the deadline: its lane may still be in a request.
+        self._gave_up = False
         self._deadline = deadline
         self._stop_line = stop_line_within(deadline.remaining_s)
         self._sleep = sleep
@@ -348,6 +436,10 @@ class _UrlUpload:
     def stop(self) -> None:
         """No PUT of this upload starts from now on, and a wait between two tries ends."""
         self._stopped.set()
+
+    def close_lanes(self) -> None:
+        """At the upload's end: every lane's session still held is closed, or cut where a pool thread was given up."""
+        self._lanes.close(cut=self._gave_up)
 
     def ask(self, items: Sequence[_Item], lifetime_s: int) -> dict[str, PutUrl]:
         self._capabilities.raise_if_lost()
@@ -408,32 +500,44 @@ class _UrlUpload:
             waited += step
 
     def put_once(self, item: _Item, url: PutUrl, data: bytes) -> _Answer:
-        """One PUT of `data` through `url`, given up at its ceiling (a stall); WorkerFailure once the deadline has
-        passed, or when no thread could be made for it."""
+        """One PUT of `data` through `url` on the calling lane's session, given up at its ceiling (a stall);
+        WorkerFailure once the deadline has passed, or when no thread or session could be made for it. A PUT given up
+        while it runs, at its ceiling or at the deadline, is cut with its lane's session before this returns."""
         ceiling_s = _request_ceiling_s(item.upload.size_bytes)
         timeout = self._stop_line.cut(CONNECT_TIMEOUT_S, ceiling_s)
         if timeout is None:
             raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
-        stalled = False
+        session = self._lanes.session()
+        ended: WorkerFailure | None = None
         try:
             answer = _within(
                 self._deadline,
-                functools.partial(self._exchange, item, url, data, timeout, time.monotonic() + ceiling_s),
+                functools.partial(self._exchange, item, url, data, timeout, time.monotonic() + ceiling_s, session),
                 expired=UPLOAD_DEADLINE_EXCEEDED, stalled=UPLOAD_STALLED, ceiling_s=ceiling_s,
             )
         except WorkerFailure as failed:
-            if failed.failure is not UPLOAD_STALLED:
-                raise
-            stalled = True
-        if stalled:
-            return _Answer(None, stalled=True)
-        return answer
+            ended = failed
+        if ended is None:
+            return answer
+        if ended.failure is UPLOAD_STALLED or ended.failure is UPLOAD_DEADLINE_EXCEEDED:
+            # The request may still run on its helper thread: cutting the lane's session ends it, its connection and
+            # its body with it, and the lane's next PUT gets a fresh session.
+            self._lanes.cut()
+        if ended.failure is not UPLOAD_STALLED:
+            raise ended
+        return _Answer(None, stalled=True)
 
     def _exchange(
-        self, item: _Item, url: PutUrl, data: bytes, timeout: tuple[float, float], ceiling_ends_at: float
+        self,
+        item: _Item,
+        url: PutUrl,
+        data: bytes,
+        timeout: tuple[float, float],
+        ceiling_ends_at: float,
+        session: AbandonableHttpSession,
     ) -> _Answer:
-        """The PUT itself, on the helper thread put_once() waits for: its body stops at the nearer of the deadline and
-        the ceiling; a refusal's error code is read from its bounded error body."""
+        """The PUT itself, on the helper thread put_once() waits for, through the lane's `session`: its body stops at
+        the nearer of the deadline and the ceiling; a refusal's error code is read from its bounded error body."""
         upload = item.upload
         body_stop = stop_line_within(lambda: min(self._deadline.remaining_s(), ceiling_ends_at - time.monotonic()))
         headers = {
@@ -443,7 +547,7 @@ class _UrlUpload:
         }
         response: HttpResponse | None = None
         try:
-            response = self._session.put(url.url, BoundedBody(data, body_stop), headers, timeout, stop_line=self._stop_line)
+            response = session.put(url.url, BoundedBody(data, body_stop), headers, timeout, stop_line=self._stop_line)
         except (DeadlineReached, *TRANSFER_ERRORS):
             # No answer: the session's error quotes the URL, so nothing of it is kept.
             response = None
@@ -492,6 +596,7 @@ class _UrlUpload:
                 expired_since = time.monotonic() if expired_since is None else expired_since
                 if time.monotonic() - expired_since >= DRAIN_AFTER_DEADLINE_S:
                     _give_up(pending)
+                    self._gave_up = True
                     break
         if failure is not None:
             raise failure
@@ -537,7 +642,7 @@ def _require_single_put_sizes(uploads: Sequence[_Object]) -> None:
 
 def upload_generation_by_urls(
     capabilities: CapabilityClient,
-    session: HttpSession,
+    session_factory: SessionFactory,
     *,
     prefix: str,
     output_root: Path,
@@ -549,9 +654,12 @@ def upload_generation_by_urls(
     parallelism: int = UPLOAD_PARALLELISM,
 ) -> int:
     """Store the generation through granted put URLs and return the bytes uploaded: `artifacts` in batches, then the
-    manifest. Raises what upload_generation() raises before any request, WorkerFailure as the module says."""
+    manifest. `session_factory` makes the session of each lane. Raises what upload_generation() raises before any
+    request, WorkerFailure as the module says."""
     if not isinstance(capabilities, CapabilityClient):
         raise TypeError("capabilities must be a CapabilityClient")
+    if not callable(session_factory):
+        raise TypeError("session_factory must be callable")
     if isinstance(parallelism, bool) or not isinstance(parallelism, int) or not 1 <= parallelism <= UPLOAD_PARALLELISM:
         raise ValueError(f"parallelism must be an integer from 1 to {UPLOAD_PARALLELISM}")
     _require_transfer_arguments(deadline, sleep, on_bytes)
@@ -559,7 +667,7 @@ def upload_generation_by_urls(
     _require_what_the_manifest_records(artifacts, manifest)
     _require_single_put_sizes(uploads)
     *artifact_uploads, manifest_upload = uploads
-    run = _UrlUpload(capabilities, session, deadline, sleep, on_bytes)
+    run = _UrlUpload(capabilities, session_factory, deadline, sleep, on_bytes)
     pool = _DaemonPool(parallelism)
     try:
         fresh = deque(artifact_uploads)
@@ -575,6 +683,7 @@ def upload_generation_by_urls(
     finally:
         run.stop()
         pool.shutdown()
+        run.close_lanes()
     return run.uploaded
 
 
@@ -601,7 +710,7 @@ def _put_alone(run: _UrlUpload, pool: _DaemonPool, item: _Item) -> None:
 
 def upload_result_by_url(
     capabilities: CapabilityClient,
-    session: HttpSession,
+    session_factory: SessionFactory,
     *,
     result: SealedMessage,
     deadline: Deadline,
@@ -609,11 +718,13 @@ def upload_result_by_url(
     """Attempt one PUT of the terminal result's RunPod carrier at `result.json` through a URL of its own; whether it
     was stored. False, asking nothing, once the authority is lost, the deadline has passed or no stage was reached,
     and False when the URL's one exchange granted none; WorkerFailure for a PUT that failed. The caller keeps the
-    sealed result whatever this does."""
+    sealed result whatever this does. Its PUT goes through a session `session_factory` makes, as a lane's does."""
     if result.kind not in {MessageKind.TRANSCODE_RESULT_COMPLETED, MessageKind.TRANSCODE_RESULT_FAILED}:
         raise ValueError("only a terminal result may be stored")
     if not isinstance(capabilities, CapabilityClient):
         raise TypeError("capabilities must be a CapabilityClient")
+    if not callable(session_factory):
+        raise TypeError("session_factory must be callable")
     if not isinstance(deadline, Deadline):
         raise TypeError("deadline must be a Deadline")
     if capabilities.lost() is not None or deadline.expired() or capabilities.stage is None:
@@ -634,8 +745,11 @@ def upload_result_by_url(
     (url,) = answer.puts
     if capabilities.monotonic() >= url.use_before - URL_MARGIN_S:
         return False
-    run = _UrlUpload(capabilities, session, deadline, lambda seconds: None, None)
-    put = run.put_once(item, url, carrier)
+    run = _UrlUpload(capabilities, session_factory, deadline, lambda seconds: None, None)
+    try:
+        put = run.put_once(item, url, carrier)
+    finally:
+        run.close_lanes()
     if put.status != HTTP_OK:
         raise _upload_failed("no answer" if put.status is None else f"status {put.status}")
     return True
