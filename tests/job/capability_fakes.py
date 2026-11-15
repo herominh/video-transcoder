@@ -21,26 +21,29 @@ import json
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import quote, urlsplit
 
-from core.net.clock import DeadlineReached, StopLine
-from core.protocol import pipeline, signing
+from core.failure import Failure
+from core.net.clock import StopLine
+from core.protocol import messages, pipeline, signing
 from core.protocol.context import TrustedContext
 from core.protocol.handler import ClaimedExecution
+from core.protocol.outbox import SealedMessage, seal_message
+from core.protocol.registry import MessageKind
 from core.protocol.settings import WorkerSettings
 from core.protocol.transport import HttpAnswer
 from tests.contract.v2_support import (
-    CALLBACK_URL,
     CELL_ID,
     HUB_KEY,
     HUB_KEY_ID,
     WORKER_AUDIENCE,
     WORKER_KEY,
     WORKER_KEY_ID,
+    FIXTURE_NOW,
     FakeClock,
     compact,
     timestamp_text,
@@ -87,6 +90,22 @@ def capability_claimed(*, request_changes: Mapping[str, Any] | None = None, encr
     """The fixtures' dispatch at 2.2.0 (P02 unencrypted unless asked), accepted, and its grant (P27 or P24)."""
     changes = {"/protocol_version": CAPABILITY_VERSION, **(request_changes or {})}
     return claimed_execution(encrypted=encrypted, request_changes=changes, settings=capability_settings())
+
+
+def failed_result_of(claimed: ClaimedExecution) -> SealedMessage:
+    """A sealed `transcode.result.failed` of the execution, as the runner returns one."""
+    settings = capability_settings()
+    message = messages.result_failed(
+        protocol_version=claimed.dispatch.protocol_version, message_id="99999999-9999-7999-8999-0000000000f1",
+        sent_at=FIXTURE_NOW, key_id=settings.worker_to_hub_key_id, identity=claimed.grant.identity,
+        failure=Failure("encoder_failed", "test_failure", True, "a failure of the test"), stage="probing",
+    )
+    context = messages.worker_sender_context(
+        MessageKind.TRANSCODE_RESULT_FAILED, claimed.grant.identity, now=FIXTURE_NOW,
+        settings=dataclasses.replace(settings, accepted_protocol_versions=(claimed.dispatch.protocol_version,)),
+        source_id=claimed.dispatch.source.source_id,
+    )
+    return seal_message(message, context, settings=settings)
 
 
 def _whole_second(moment: datetime) -> datetime:

@@ -14,8 +14,9 @@ the acquire's are core/drive_import/deadline.py's.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Protocol
+import time
+from datetime import datetime, timezone
+from typing import Callable, Protocol
 
 
 class Clock(Protocol):
@@ -71,3 +72,27 @@ class StopLine:
             return False
         self._clock.sleep(seconds)
         return True
+
+
+class _Remaining:
+    """A Clock whose monotonic reading is minus the seconds `remaining_s()` gives, so that a stop line at zero on it
+    passes exactly when they run out; it waits in real seconds."""
+
+    def __init__(self, remaining_s: Callable[[], float]) -> None:
+        self._remaining_s = remaining_s
+
+    def now(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def monotonic(self) -> float:
+        return -self._remaining_s()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+def stop_line_within(remaining_s: Callable[[], float]) -> StopLine:
+    """The stop line that passes once `remaining_s()` (the seconds an encode's Deadline leaves, for one) is zero."""
+    if not callable(remaining_s):
+        raise TypeError("remaining_s must be callable")
+    return StopLine(_Remaining(remaining_s), 0.0)

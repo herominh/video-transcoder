@@ -104,6 +104,7 @@ from core.protocol.outbox import SealedMessage, runpod_output
 from core.protocol.registry import MessageKind
 from core.protocol.settings import StorageProfile
 from core.source_reader import (
+    SOURCE_READ_DEADLINE_EXCEEDED,
     S3_CONNECT_TIMEOUT_S,
     S3_MAX_ATTEMPTS,
     S3_READ_TIMEOUT_S,
@@ -204,10 +205,6 @@ DOWNLOAD_DEADLINE_EXCEEDED = Failure(
 UPLOAD_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "upload_deadline_exceeded", False,
     "the job ran out of time while it uploaded the generation",
-)
-SOURCE_READ_DEADLINE_EXCEEDED = Failure(
-    "deadline_exceeded", "source_read_deadline_exceeded", False,
-    "the job ran out of time while it read the source",
 )
 # A request that outlasted its own ceiling while the deadline still had time left: a failed attempt
 # that passes, unlike a deadline (a slow network or storage, not a limit that is too small).

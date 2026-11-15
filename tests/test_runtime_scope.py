@@ -151,9 +151,10 @@ def test_runtime_modules_when_searched_should_have_no_v1_url_acquisition():
     # Act
     sources = {path.relative_to(REPOSITORY_ROOT).as_posix(): path.read_text(encoding="utf-8") for path in modules}
 
-    # Assert: the v2 job's separate exact-source downloader is retained.
+    # Assert: the v2 job's separate exact-source downloader is retained. The v1 field is `source_url` as a whole
+    # word: the 2.2.0 failure code `source_url_refused` names the granted read URL, no acquisition.
     for name, source in sources.items():
-        assert "source_url" not in source, name
+        assert re.search(r"\bsource_url\b", source) is None, name
         assert "upload_original" not in source, name
         if not name.startswith("core/job/"):
             assert "download_source" not in source, name
@@ -206,6 +207,14 @@ def test_runpod_entry_point_when_its_imports_are_followed_should_never_reach_the
 
     # Assert
     assert sorted(name for name in reachable if _in_package(name, IMPORT_PACKAGE)) == []
+
+
+def test_runpod_entry_point_when_its_imports_are_followed_should_reach_the_shared_session_for_its_url_path():
+    # Act
+    reachable = _reachable_modules(REPOSITORY_ROOT / RUNPOD_ENTRY_POINT)
+
+    # Assert
+    assert NET_MODULES <= reachable
 
 
 def test_acquire_entry_when_imported_should_reach_only_the_cpu_module_closure() -> None:

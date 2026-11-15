@@ -4,8 +4,8 @@ Video processing worker for Video Hub. Supported processing runs through an exte
 
 ## Architecture
 
-- `wrappers/runpod_handler.py` and `Dockerfile.runpod` — contract v2 transcode entry: claim the execution before processing, then return the signed result. The protocol and job runner live in `core/protocol/` and `core/job/`.
-- `wrappers/runpod_acquire_handler.py` and `Dockerfile.acquire` (`video-transcoder-acquire`) — signed source acquisition (protocol 2.1.0) from Google Drive; its transfer lives in `core/drive_import/`. The first Drive import, contract `import/v1`, its image and its contract copy are retired (Hub TD-184).
+- `wrappers/runpod_handler.py` and `Dockerfile.runpod` — contract v2 transcode entry: claim the execution before processing, then return the signed result. The protocol and job runner live in `core/protocol/` and `core/job/`. A dispatch of protocol 2.2.0 (the capability exchange, a draft no endpoint accepts yet) holds no storage credential: it reads and writes through the URLs the Hub grants (`core/protocol/capabilities_client.py`, `core/job/heartbeat.py`, `core/job/url_upload.py`), over the hardened HTTP session of `core/net/`, and needs `VH_CAPABILITIES_URL` and `VH_STORAGE_HOST` (then `VH_STORAGE_PROFILES` is optional).
+- `wrappers/runpod_acquire_handler.py` and `Dockerfile.acquire` (`video-transcoder-acquire`) — signed source acquisition (protocol 2.1.0) from Google Drive; its transfer lives in `core/drive_import/`, over the HTTP session of `core/net/` it shares with the transcode's 2.2.0 path. The first Drive import, contract `import/v1`, its image and its contract copy are retired (Hub TD-184).
 - `wrappers/docker_server.py`, `core/api.py` and `Dockerfile` — development-only v1 HTTP adapter, disabled unless `VH_DEVELOPMENT_ADAPTER` is exactly `1`.
 - `wrappers/modal_app.py` — staged second candidate. Both its HTTP endpoint and worker function refuse execution until Modal implements the provider adapter contract.
 - Stateless — no database; job tracking lives in Video Hub.
