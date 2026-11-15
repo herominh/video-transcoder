@@ -23,15 +23,15 @@ storage.abandoned_requests(), and tried again as output_write_failed/upload_stal
 thread, its body and its connection until the store ends it or the session's watchdog shuts its socket at the
 deadline. A 200 is success, its body never read. A 5xx, a time-out, a connection error or a stall is tried again
 after storage.py's waits (0.5, 2 and 8 s, each times a factor drawn between 0.5 and 1, a whole-seconds `Retry-After`
-honoured up to 30 s); so is any other 4xx but a 403 that storage.refusal_passes() lets pass (a 408, a 409, a 429, or
-an error code such as RequestTimeout, IncompleteBody or BadDigest, read from at most ERROR_BODY_MAX_BYTES of its
-error body, which is never logged). A 403 puts the object back to be asked again in a later batch, at most
+honoured up to 30 s); so is any other 4xx but a 403 that storage.refusal_passes() lets pass: a 408, a 409 or a 429
+by its status alone, and any other 4xx by an error code such as RequestTimeout, IncompleteBody or BadDigest, read
+from at most ERROR_BODY_MAX_BYTES of its error body (never logged; that body is read for no other answer). A 403 puts the object back to be asked again in a later batch, at most
 MAX_REASKS further times, then output_write_failed/upload_url_refused (retryable); a URL whose usable time (less
 URL_MARGIN_S) has passed before its PUT could start is asked again without counting, the store having refused
 nothing. An object's retry budget (the waits before its further attempts) is its own and is kept across the URLs it
 is given, so only a URL that was never used for an attempt runs out of time for free: once the budget is spent, the
 last attempt's failure is raised (upload_stalled or upload_failed, retryable), whatever the URL. A refusal whose error
-body could not be read whole counts as no answer. Any other answer, a redirect included, is
+body is read for its code and could not be read whole counts as no answer. Any other answer, a redirect included, is
 output_write_failed/upload_refused, final.
 
 The first failure stops the rest: no new PUT starts, the PUTs under way are waited for (each within its ceiling or
@@ -82,6 +82,7 @@ from core.protocol.registry import MessageKind
 from .storage import (
     CONTENT_TYPES,
     ERROR_CODE_PATTERN,
+    PASSING_REFUSAL_STATUSES,
     RESULT_NAME,
     RETRY_AFTER_MAX_S,
     STORAGE_REQUEST_START_FAILED,
@@ -450,7 +451,7 @@ class _UrlUpload:
             return _Answer(None, stalled=body_stop.passed() and not self._stop_line.passed())
         status = response.status_code
         try:
-            error_code = _error_code_of(response) if HTTP_CLIENT_ERROR <= status < HTTP_SERVER_ERROR else None
+            error_code = _error_code_of(response) if _decided_by_its_code(status) else None
             if isinstance(error_code, _Unread):
                 # An answer cut short is no answer, as a transfer error is: a failure that passes.
                 return _Answer(None)
@@ -495,6 +496,13 @@ class _UrlUpload:
         if failure is not None:
             raise failure
         return again
+
+
+def _decided_by_its_code(status: int) -> bool:
+    """Whether a refusal's error code can change how it ends: a 4xx but a 403 (always asked again) and but one whose
+    status alone passes (PASSING_REFUSAL_STATUSES, its Retry-After read from its head)."""
+    return (HTTP_CLIENT_ERROR <= status < HTTP_SERVER_ERROR and status != HTTP_FORBIDDEN
+            and status not in PASSING_REFUSAL_STATUSES)
 
 
 def _passes(answer: _Answer) -> bool:

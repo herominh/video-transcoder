@@ -495,14 +495,36 @@ def test_ask_once_when_an_exchange_holds_the_lock_should_give_up_within_one_exch
     assert len(setup.hub.requests) == 2
 
 
+class _ReportingLock:
+    """The client's exchange lock, saying when someone asks for it: a test then knows ask_once is waiting."""
+
+    def __init__(self, inner: Any, asked: threading.Event) -> None:
+        self._inner = inner
+        self._asked = asked
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        self._asked.set()
+        return self._inner.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._inner.release()
+
+    def __enter__(self) -> bool:
+        return self.acquire()
+
+    def __exit__(self, *exception: object) -> None:
+        self.release()
+
+
 def test_ask_once_when_the_exchange_it_waited_for_ends_the_work_should_send_nothing():
-    # Arrange: the heartbeat in flight is refused for good while ask_once waits for the lock.
+    # Arrange: the heartbeat in flight is refused for good, its answer held until ask_once waits for the lock.
     setup = _Setup()
     setup.client.ask("finalizing")
-    release = threading.Event()
+    release, asked = threading.Event(), threading.Event()
     thread = _beat_held_until(
         setup, release, lambda request, hub: hub_error(403, "lease_expired", retryable=False))
-    threading.Timer(0.2, release.set).start()
+    setup.client._exchange_lock = _ReportingLock(setup.client._exchange_lock, asked)
+    threading.Thread(target=lambda: asked.wait(5.0) and release.set(), daemon=True).start()
     # Act
     granted = setup.client.ask_once(put=_put("result.json"))
     thread.join(5.0)

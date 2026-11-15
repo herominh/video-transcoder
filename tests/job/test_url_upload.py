@@ -480,14 +480,31 @@ def test_upload_when_an_answer_outlasts_its_ceiling_should_give_it_up_and_store_
 # --- the round-2 review's cases ------------------------------------------------------------------------------
 
 
-def _stalling(setup: _Setup, path: str, release: threading.Event, seconds_each: float) -> None:
-    """Every PUT of `path` moves the client's clock `seconds_each`, then holds its answer past the ceiling."""
+def _stalling(
+    setup: _Setup, monkeypatch: pytest.MonkeyPatch, path: str, release: threading.Event, seconds_each: float
+) -> None:
+    """Every PUT of `path` moves the client's clock `seconds_each`, then holds its answer past the ceiling (0.05 s).
+    The pool's slot waits for that move before it judges the stall, so the attempt has taken its time on the clock
+    whenever the store's thread came to it."""
+    advanced = threading.Semaphore(0)
 
     def stall() -> None:
         setup.clock.advance(seconds_each)
+        advanced.release()
         release.wait(5.0)
 
     setup.store.put_answers[path] = [stall] * 20
+    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: 0.05)
+    within = url_upload._within
+
+    def within_after_the_move(deadline: Deadline, call, **named):
+        try:
+            return within(deadline, call, **named)
+        finally:
+            if call.args[0].upload.relative_path == path:
+                assert advanced.acquire(timeout=5.0), "the stalling PUT never reached the store"
+
+    monkeypatch.setattr(url_upload, "_within", within_after_the_move)
 
 
 def _asks_of(setup: _Setup, path: str) -> int:
@@ -497,9 +514,8 @@ def _asks_of(setup: _Setup, path: str) -> int:
 def test_upload_when_every_manifest_put_stalls_should_end_upload_stalled_after_four_puts(tmp_path, monkeypatch):
     # Arrange: each attempt takes 31 s of the manifest URL's 60, so only two attempts fit in one URL.
     setup = _Setup(tmp_path, segments=1)
-    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: 0.05)
     release = threading.Event()
-    _stalling(setup, MANIFEST_NAME, release, 31)
+    _stalling(setup, monkeypatch, MANIFEST_NAME, release, 31)
     try:
         # Act
         failure = _failure(lambda: _upload_at(setup, parallelism=1)).failure
@@ -516,9 +532,8 @@ def test_upload_when_an_artifacts_attempts_outlast_its_url_should_end_upload_sta
 ):
     # Arrange: each attempt of the thumbnail takes 100 s of its batch URL's 180.
     setup = _Setup(tmp_path, segments=1)
-    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: 0.05)
     release = threading.Event()
-    _stalling(setup, "thumbnail.jpg", release, 100)
+    _stalling(setup, monkeypatch, "thumbnail.jpg", release, 100)
     try:
         # Act
         failure = _failure(lambda: _upload_at(setup, parallelism=1)).failure
@@ -583,9 +598,41 @@ def test_upload_when_a_pool_thread_cannot_be_started_should_fail_retryable_and_e
 
     monkeypatch.setattr(threading.Thread, "start", failing_third)
     # Act
-    failure = _failure(setup.upload).failure
-    # Assert
+    raised = _failure(setup.upload)
+    # Assert: the interpreter's error is neither the failure's cause nor its context.
+    failure = raised.failure
     assert (failure.error_class, failure.code, failure.retryable) == (
         "resource_exhausted", "storage_request_start_failed", True)
+    assert raised.__cause__ is None and raised.__context__ is None
     assert wait_until(lambda: not [t for t in threading.enumerate() if t.name.startswith(url_upload.POOL_THREAD_PREFIX)])
     assert setup.store.puts == []
+
+
+
+def _broken_body(size: int):
+    yield b"<Error><Co"
+    raise ConnectionError("https://store.test.invalid/the-whole-url?X-Amz-Signature=0")
+
+
+def test_upload_when_a_403s_error_body_breaks_off_should_ask_for_a_fresh_url_and_count_the_refusal(tmp_path):
+    # Arrange
+    setup = _Setup(tmp_path)
+    setup.store.put_answers["thumbnail.jpg"] = [FakeResponse(403, {}, chunks=_broken_body)] * 4
+    # Act
+    failure = _failure(setup.upload).failure
+    # Assert: every refusal was answered with a fresh URL, and four of them end the upload.
+    assert failure.code == "upload_url_refused"
+    assert _asks_of(setup, "thumbnail.jpg") == 4
+    thumbnail_urls = [put.url for put in setup.store.puts if put.path == "thumbnail.jpg"]
+    assert len(set(thumbnail_urls)) == 4
+
+
+def test_upload_when_a_429s_error_body_breaks_off_should_wait_its_retry_after(tmp_path):
+    # Arrange
+    setup = _Setup(tmp_path)
+    setup.store.put_answers["thumbnail.jpg"] = [FakeResponse(429, {"Retry-After": "20"}, chunks=_broken_body)]
+    # Act
+    setup.upload()
+    # Assert
+    assert "thumbnail.jpg" in setup.store.objects
+    assert sum(setup.waits.seconds) == pytest.approx(20.0)
