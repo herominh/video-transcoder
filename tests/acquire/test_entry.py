@@ -51,7 +51,7 @@ def test_acquire_entry_when_configured_with_a_draft_should_refuse_before_sdk_sta
     versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.3.0"]}}
     monkeypatch.setattr(settings_module, "load_registry", lambda: replace(shipped, versions=versions))
     # Act / Assert
-    with pytest.raises(SettingsInvalid):
+    with pytest.raises(SettingsInvalid, match="is not a live protocol version"):
         entry.main(start=started.append, env={**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": "2.3.0"})
     assert not started
 

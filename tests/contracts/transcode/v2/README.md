@@ -1297,10 +1297,13 @@ messages (sections 7 to 9).
 6. `put` null with `source` false is the heartbeat. A runtime sends a request at least every 180 seconds
    while it works. Its lease ends, by its own count, once `lease.expires_at` minus the answer's
    `sent_at` has passed since the instant it sent the request that answer answers, on the same monotonic
-   clock. Until its first accepted answer it has been told no lease: it counts its lease as 600 seconds
-   (the least an answer promises, Hub rule 6) from the moment it was granted its claim, on the same
-   clock; the Hub records 900 seconds from the grant, so the runtime's count ends first. When it cannot
-   obtain an accepted answer before its lease ends, or the Hub answers
+   clock. Until its first accepted answer it has been told no lease. It then counts its lease as 600
+   seconds (the least an answer promises, Hub rule 6) from the moment it begins its capability exchange,
+   right after its claim was granted (15.1, rule 3), on the same monotonic clock; the Hub records 900
+   seconds from the grant, so the runtime's count ends first. And it asks for that first answer, retries
+   included (rule 7), no longer than a claim's patience (15.1: 120 seconds) from that same moment: when
+   none was accepted by then, it ends its work as when its lease ends. When it cannot obtain an accepted
+   answer before its lease ends, or the Hub answers
    `lease_expired`, `stage_budget_exceeded` or `capability_refused`, it stops: it starts no further
    write and asks for no further URL, ends its work, and reports its failed result (15.1 rules 8 and 9
    unchanged). A stopped runtime may still store its result (15.1 rule 9) through a URL it already holds
@@ -1331,7 +1334,7 @@ What a runtime reports when the exchange ended its work (rules 6 and 7), as the 
 | `authority_refused` | the Hub's `error.code` | a `hub.error` that ends the work: not retryable, among them `capability_refused`, `lease_expired` and `stage_budget_exceeded` (Hub rule 3), `capability_conflict` and `capability_limit_exceeded` (Hub rule 5) |
 | `authority_refused` | `payload_too_large` | a `413` that is no `hub.error` envelope (rule 7, section 12) |
 | `authority_refused` | `capability_answer_invalid` | an answer it does not accept (rule 3), or any other status |
-| `authority_refused` | `lease_unrenewed` | no accepted answer before its lease ended by its own count (rule 6) |
+| `authority_refused` | `lease_unrenewed` | no accepted answer before its lease ended by its own count, or no first accepted answer within the claim's patience of 120 seconds (rule 6) |
 | `deadline_exceeded` | `capability_deadline_exceeded` | its deadline came before an accepted answer (rule 7) |
 
 **The Hub.**

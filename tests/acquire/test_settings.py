@@ -101,12 +101,13 @@ def test_acquire_settings_when_the_live_versions_are_listed_in_another_order_sho
 def test_acquire_settings_when_an_entry_is_a_draft_version_should_refuse_the_start(
     value: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Arrange: the shipped tree lists no draft since 2.2.0 went live; this test's registry defines one.
+    # Arrange: the shipped tree lists no draft since 2.2.0 went live; this test's registry defines one. Every case
+    # names it, so the rule of each entry refuses before the acquire's rule of every live version is reached.
     shipped = ContractRegistry.load()
     versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.3.0"]}}
     monkeypatch.setattr(settings_module, "load_registry", lambda: replace(shipped, versions=versions))
     # Act / Assert
-    with pytest.raises(SettingsInvalid, match="live protocol version") as caught:
+    with pytest.raises(SettingsInvalid, match="is not a live protocol version") as caught:
         AcquireSettings.from_env({**environment(), "VH_ACCEPTED_PROTOCOL_VERSIONS": value})
     assert caught.value.variable == "VH_ACCEPTED_PROTOCOL_VERSIONS"
 

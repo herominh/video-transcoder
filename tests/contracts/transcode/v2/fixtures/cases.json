@@ -17260,7 +17260,7 @@
     },
     {
       "id": "N1089",
-      "payload": "fixtures/capabilities-version/N1089-capability-request-at-2-2-0-under-a-context-listing-only-the-live-versions.json",
+      "payload": "fixtures/capabilities-version/N1089-capability-request-at-2-2-0-under-a-context-listing-only-2-0-0-and-2-1-0.json",
       "context": "fixtures/contexts/ctx-cap-n1089.json",
       "rule": "capabilities-version",
       "purpose": "capability request at 2.2.0 under a context listing only 2.0.0 and 2.1.0",
@@ -17274,7 +17274,7 @@
     },
     {
       "id": "N1090",
-      "payload": "fixtures/capabilities-version/N1090-capability-answer-at-2-2-0-under-a-context-listing-only-the-live-versions.json",
+      "payload": "fixtures/capabilities-version/N1090-capability-answer-at-2-2-0-under-a-context-listing-only-2-0-0-and-2-1-0.json",
       "context": "fixtures/contexts/ctx-cap-n1090.json",
       "rule": "capabilities-version",
       "purpose": "capability answer at 2.2.0 under a context listing only 2.0.0 and 2.1.0",

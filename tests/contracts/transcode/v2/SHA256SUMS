@@ -1,4 +1,4 @@
-a938bb6f1ef850791cad23bba152156eb1cc1f78e775c16ce5ea86482041af35  README.md
+18edb8b19bc0494e83a24c758bf9c17aeff006bb2d9b1f79b97129fbd92c9184  README.md
 b23a6273880c5e6d83d017551c808741fb5ba8be3d0b185c83a3dc7a155ac953  artifact-kinds.json
 846753e7a7b81bf83cdbc4f7b7025a944f11be172f6159e8a7b71391e3247e21  carriers/runpod-acquire-output.schema.json
 5b7b9201a68f27d1a8d531fd9ee8a83ae730828fda53599e5626fe73d1ec314f  carriers/runpod-input.schema.json
@@ -1330,8 +1330,8 @@ db322e8a4e9973bb211de5d81f51bde8698dede4ba7e50489f8c2dcf98ee1689  fixtures/capab
 9b43f6c010c2058dd7efa8b570e9852a69519f906c7f92e67291286b2bfa6f9c  fixtures/capabilities-version/N1086-capability-answer-at-2-0-0.json
 86b5593b0cb4119189e293ea713146cb59d0a3f5914b11c9350e41e90e6292f2  fixtures/capabilities-version/N1087-capability-request-at-2-1-0.json
 7423cfaef496e611685d3013c5f774086b6b1d80239fa2a3b6ef96abdf06e2b9  fixtures/capabilities-version/N1088-capability-answer-at-2-1-0.json
-06b6342009eab7d20e6ab7322acfa72466597e085a733ef6699a800fe124c452  fixtures/capabilities-version/N1089-capability-request-at-2-2-0-under-a-context-listing-only-the-live-versions.json
-954b0700af77388ce0aac7f7743b7324b9d52dcf40bfe45ca00d2adb5d288571  fixtures/capabilities-version/N1090-capability-answer-at-2-2-0-under-a-context-listing-only-the-live-versions.json
+06b6342009eab7d20e6ab7322acfa72466597e085a733ef6699a800fe124c452  fixtures/capabilities-version/N1089-capability-request-at-2-2-0-under-a-context-listing-only-2-0-0-and-2-1-0.json
+954b0700af77388ce0aac7f7743b7324b9d52dcf40bfe45ca00d2adb5d288571  fixtures/capabilities-version/N1090-capability-answer-at-2-2-0-under-a-context-listing-only-2-0-0-and-2-1-0.json
 1e76bd9b56eb3f8803bdd76b9dbd57d81c16c5ff4212285b04d5990d1de9490f  fixtures/capabilities-version/N1091-source-acquire-request-at-2-2-0.json
 7013e94459256b2c52423b4f6b772e8b7c8bb329544d2bef2b43ca622dda82c2  fixtures/capabilities-version/N1092-source-acquire-granted-at-2-2-0.json
 0d16104cbb5db135723cf17eda0c3e76ad4df175c981eb73c4b1b6f7314ccabe  fixtures/capabilities-version/N1093-source-acquire-result-completed-at-2-2-0.json
@@ -1347,7 +1347,7 @@ a67f4e79fb30c24d97a223d5c9f10bf77414937b772f25c10c460bc15bb454f1  fixtures/capab
 00d8b60ea0d52ec280ea39a6fafc49ad07685fad7a171abc4cd088bfb71070f5  fixtures/capabilities-version/P153-transcode-unclaimed-at-2-2-0-its-2-0-0-shape-unchanged.json
 29d8af8be87438ba4542182fe5ecd1d657d310ab466eca44bf96102d6e61dc94  fixtures/capabilities-version/P154-hub-error-at-2-2-0-carrying-a-reserved-capability-code.json
 1190eb521bdec10baedbdd01f9ae843a25f676be943a32fce5b603ac147189d8  fixtures/capabilities-version/P155-generation-manifest-keeps-1-0-0-beside-protocol-2-2-0.json
-6505edb7b3045dd181ce799a00ae13853b2d67fb78eca38aad48504baff81927  fixtures/cases.json
+94a2f45c303799f5160fa7833021c19c50fc8e493892bc17f22d71dc5ce8d4e5  fixtures/cases.json
 a69ae37f297f205545e686caf87db6819c281bddfb514818956acb2f4e46003d  fixtures/claim-granted/N122-another-runtime-id.json
 3c94efa61a18da0ea6fb557e8d60ddbac114e2cf3241bc205c945eeace087165  fixtures/claim-granted/N123-prefix-not-ending-in-generation.json
 5711412992e827719907382b7dd42311d80af0232cac90aca0ca847c8393400b  fixtures/claim-granted/N124-generation-not-execution.json

@@ -824,8 +824,8 @@ def test_run_when_every_stage_succeeds_should_return_a_completed_result_the_hub_
     assert "diagnostics" not in result
 
 
-def test_run_when_the_dispatch_speaks_the_newer_live_version_should_report_and_store_at_that_version(tmp_path, monkeypatch):
-    # Arrange: a worker that lists every live version, and a dispatch at the newer one.
+def test_run_when_the_dispatch_speaks_a_later_live_version_should_report_and_store_at_that_version(tmp_path, monkeypatch):
+    # Arrange: a worker that lists the three live versions, and a dispatch at 2.1.0, a later one than 2.0.0.
     newer = Harness(
         tmp_path, monkeypatch, request_changes={"/protocol_version": ACQUIRE_PROTOCOL_VERSION},
         settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV),
@@ -2772,10 +2772,11 @@ def test_run_when_the_manifest_it_wrote_fails_its_self_check_should_fail_and_sto
     _assert_only_result_stored(harness, result)
 
 
-def test_run_when_a_writer_stamps_the_other_live_version_should_fail_its_self_check_and_store_only_its_result(
+def test_run_when_a_writer_stamps_another_live_version_should_fail_its_self_check_and_store_only_its_result(
     tmp_path, monkeypatch
 ):
-    # Arrange: a worker that lists every live version, a dispatch at 2.0.0, and a writer of the result that stamps 2.1.0.
+    # Arrange: a worker that lists the three live versions, a dispatch at 2.0.0, and a writer of the result that stamps
+    # 2.1.0.
     harness = Harness(tmp_path, monkeypatch, settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV))
     real_result_completed = runner_module.messages.result_completed
 

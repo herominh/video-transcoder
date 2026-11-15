@@ -19,6 +19,7 @@ from core.protocol.settings import (
     UnknownCredentialRef,
     WorkerSettings,
 )
+from tests.contract.v2_support import CAPABILITY_ENV
 
 # Canaries: none of these may ever appear in an error, a traceback or a repr.
 HUB_KEY_HEX = "c0ffee11" * 8
@@ -1026,9 +1027,8 @@ def test_from_env_when_the_environment_is_not_a_mapping_should_raise_type_error(
 
 # --- the capability exchange (protocol 2.2.0, live since Hub 0.11.0: the committed registry lists it) ----------
 
-CAPABILITIES_URL = "https://hub.test.invalid/api/transcode/v2/capabilities"
-STORAGE_HOST = "store.test.invalid"
-CAPABILITY_ENV = {"VH_CAPABILITIES_URL": CAPABILITIES_URL, "VH_STORAGE_HOST": STORAGE_HOST}
+CAPABILITIES_URL = CAPABILITY_ENV["VH_CAPABILITIES_URL"]
+STORAGE_HOST = CAPABILITY_ENV["VH_STORAGE_HOST"]
 STORAGE_PROFILE_VARIABLES = {variable: None for variable in VALID_ENV if variable.startswith("VH_STORAGE_")}
 
 
