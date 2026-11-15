@@ -1301,7 +1301,8 @@ messages (sections 7 to 9).
    seconds (the least an answer promises, Hub rule 6) from the moment it begins its capability exchange,
    right after its claim was granted (15.1, rule 3), on the same monotonic clock; the Hub records 900
    seconds from the grant, so the runtime's count ends first. And it asks for that first answer, retries
-   included (rule 7), no longer than a claim's patience (15.1: 120 seconds) from that same moment: when
+   included (rule 7), no longer than 120 seconds from that same moment (the patience 15.1 states for an
+   acquire claim, which a runtime gives its capability exchange too): when
    none was accepted by then, it ends its work as when its lease ends. When it cannot obtain an accepted
    answer before its lease ends, or the Hub answers
    `lease_expired`, `stage_budget_exceeded` or `capability_refused`, it stops: it starts no further
