@@ -29,6 +29,7 @@ from tests.job.capability_fakes import (
     capability_settings,
     failed_result_of,
     hub_error,
+    wait_until,
 )
 from tests.job.conftest import ScriptedDeadline
 
@@ -474,3 +475,117 @@ def test_upload_when_an_answer_outlasts_its_ceiling_should_give_it_up_and_store_
     assert "thumbnail.jpg" in setup.store.objects
     assert storage_module.abandoned_requests() - before == 1
     assert setup.store.puts_started.count("thumbnail.jpg") == 2
+
+
+# --- the round-2 review's cases ------------------------------------------------------------------------------
+
+
+def _stalling(setup: _Setup, path: str, release: threading.Event, seconds_each: float) -> None:
+    """Every PUT of `path` moves the client's clock `seconds_each`, then holds its answer past the ceiling."""
+
+    def stall() -> None:
+        setup.clock.advance(seconds_each)
+        release.wait(5.0)
+
+    setup.store.put_answers[path] = [stall] * 20
+
+
+def _asks_of(setup: _Setup, path: str) -> int:
+    return sum(1 for request in setup.put_requests() if path in [o["path"] for o in request["put"]["objects"]])
+
+
+def test_upload_when_every_manifest_put_stalls_should_end_upload_stalled_after_four_puts(tmp_path, monkeypatch):
+    # Arrange: each attempt takes 31 s of the manifest URL's 60, so only two attempts fit in one URL.
+    setup = _Setup(tmp_path, segments=1)
+    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: 0.05)
+    release = threading.Event()
+    _stalling(setup, MANIFEST_NAME, release, 31)
+    try:
+        # Act
+        failure = _failure(lambda: _upload_at(setup, parallelism=1)).failure
+    finally:
+        release.set()
+    # Assert
+    assert (failure.code, failure.retryable) == ("upload_stalled", True)
+    assert setup.store.puts_started.count(MANIFEST_NAME) == 4
+    assert _asks_of(setup, MANIFEST_NAME) == 2
+
+
+def test_upload_when_an_artifacts_attempts_outlast_its_url_should_end_upload_stalled_after_four_puts(
+    tmp_path, monkeypatch
+):
+    # Arrange: each attempt of the thumbnail takes 100 s of its batch URL's 180.
+    setup = _Setup(tmp_path, segments=1)
+    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: 0.05)
+    release = threading.Event()
+    _stalling(setup, "thumbnail.jpg", release, 100)
+    try:
+        # Act
+        failure = _failure(lambda: _upload_at(setup, parallelism=1)).failure
+    finally:
+        release.set()
+    # Assert
+    assert failure.code == "upload_stalled"
+    assert setup.store.puts_started.count("thumbnail.jpg") == 4
+    assert _asks_of(setup, "thumbnail.jpg") == 2
+    assert MANIFEST_NAME not in setup.store.objects
+
+
+def test_upload_when_a_refusals_error_body_cannot_be_read_should_try_again_and_store_the_object(tmp_path):
+    # Arrange: a 400 whose error body breaks off.
+    setup = _Setup(tmp_path)
+
+    def broken(size: int):
+        yield b"<Error><Co"
+        raise ConnectionError("https://store.test.invalid/the-whole-url?X-Amz-Signature=0")
+
+    setup.store.put_answers["thumbnail.jpg"] = [FakeResponse(400, {}, chunks=broken)]
+    # Act
+    setup.upload()
+    # Assert
+    assert "thumbnail.jpg" in setup.store.objects
+    assert setup.store.puts_started.count("thumbnail.jpg") == 2
+
+
+def test_upload_when_a_refusals_error_body_is_long_should_read_only_its_first_four_kib(tmp_path):
+    # Arrange: the code that would pass lies beyond the first 4 KiB of the body.
+    setup = _Setup(tmp_path)
+    read: list[int] = []
+    body = b"<Error>" + b" " * 8192 + b"<Code>RequestTimeout</Code></Error>"
+
+    def chunks(size: int):
+        for start in range(0, len(body), size):
+            read.append(size)
+            yield body[start:start + size]
+
+    setup.store.put_answers["thumbnail.jpg"] = [FakeResponse(400, {}, chunks=chunks)]
+    # Act
+    failure = _failure(setup.upload).failure
+    # Assert
+    assert failure.code == "upload_refused"
+    assert sum(read) <= url_upload.ERROR_BODY_MAX_BYTES
+
+
+def test_upload_when_a_pool_thread_cannot_be_started_should_fail_retryable_and_end_the_started_ones(
+    tmp_path, monkeypatch
+):
+    # Arrange: the third thread of the pool cannot be started.
+    setup = _Setup(tmp_path)
+    start = threading.Thread.start
+    pool_starts: list[str] = []
+
+    def failing_third(thread: threading.Thread) -> None:
+        if thread.name.startswith(url_upload.POOL_THREAD_PREFIX):
+            pool_starts.append(thread.name)
+            if len(pool_starts) == 3:
+                raise RuntimeError("can't start new thread")
+        start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", failing_third)
+    # Act
+    failure = _failure(setup.upload).failure
+    # Assert
+    assert (failure.error_class, failure.code, failure.retryable) == (
+        "resource_exhausted", "storage_request_start_failed", True)
+    assert wait_until(lambda: not [t for t in threading.enumerate() if t.name.startswith(url_upload.POOL_THREAD_PREFIX)])
+    assert setup.store.puts == []

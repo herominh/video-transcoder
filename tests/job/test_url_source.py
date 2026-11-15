@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from core.failure import WorkerFailure
+from core.failure import Failure, WorkerFailure
 from core.net.clock import DeadlineReached, stop_line_within
 from core.protocol.capabilities_client import CapabilityClient
 from core.source_reader import UrlRangeSource
@@ -277,3 +277,32 @@ def test_read_when_the_authority_is_lost_should_send_nothing():
     # Assert
     assert (failure.error_class, failure.code, failure.retryable) == ("authority_refused", "capability_refused", False)
     assert len(setup.store.gets) == gets
+
+
+def test_read_when_the_authority_is_lost_by_the_time_the_store_refuses_should_ask_no_fresh_url():
+    # Arrange: a reader whose URLs come from a recorded source; the store's refusal arrives once the work has ended.
+    setup = _Setup()
+    granted = setup.client.ask("probing", source=True).source
+    asked: list[str] = []
+
+    def recorded_url():
+        asked.append("asked")
+        return granted
+
+    source = UrlRangeSource(
+        setup.store, size_bytes=len(SOURCE), etag=SOURCE_ETAG, stop_line=stop_line_within(lambda: 3600.0),
+        monotonic=setup.clock.monotonic, ask_url=recorded_url, require_authority=setup.client.raise_if_lost,
+    )
+    source.use(granted)
+
+    def refused_after_the_loss() -> FakeResponse:
+        setup.client.fail(Failure("internal_error", "heartbeat_failed", True, "the heartbeat failed: RuntimeError"))
+        return FakeResponse(403)
+
+    setup.store.get_answers.append(refused_after_the_loss)
+    # Act
+    failure = _failure(lambda: source.read(0, 10)).failure
+    # Assert
+    assert failure.code == "heartbeat_failed"
+    assert asked == []
+    assert len(setup.store.gets) == 1

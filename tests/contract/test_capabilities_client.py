@@ -4,11 +4,14 @@ request with the contract's own validator and answers signed messages built in t
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any, Callable
 
 import pytest
 
 from core.failure import Failure, WorkerFailure
+from core.protocol import capabilities_client
 from core.protocol.capabilities_client import FIRST_LEASE_S, CapabilityClient, ExchangeEnded
 from core.protocol.claim import CLAIM_PATIENCE_S
 from core.protocol.messages import CapabilityObject, CapabilityPut
@@ -442,3 +445,68 @@ def test_fail_when_the_runtime_faults_should_end_the_work_with_that_failure():
     # Assert
     lost = setup.client.lost()
     assert lost is not None and lost.failure == failure
+
+
+# --- ask_once behind an exchange in flight (round 2) -----------------------------------------------------------
+
+
+def _beat_held_until(setup: _Setup, release: threading.Event, answer: Callable[[dict[str, Any], FakeHub], HttpAnswer]):
+    """Start a heartbeat on a thread of its own whose answer the Hub holds until `release`; return the thread and the
+    event that says the beat is in flight."""
+    in_flight = threading.Event()
+
+    def held(request: dict[str, Any], hub: FakeHub) -> HttpAnswer:
+        in_flight.set()
+        release.wait(5.0)
+        return answer(request, hub)
+
+    setup.hub.script.append(held)
+
+    def beat() -> None:
+        try:
+            setup.client.heartbeat()
+        except WorkerFailure:
+            pass
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    assert in_flight.wait(5.0)
+    return thread
+
+
+def test_ask_once_when_an_exchange_holds_the_lock_should_give_up_within_one_exchange(monkeypatch):
+    # Arrange: one exchange lasts at most 0.3 s here; the heartbeat's is held for longer.
+    monkeypatch.setattr(capabilities_client, "CAPABILITY_REQUEST_TIMEOUT_S", 0.3)
+    setup = _Setup()
+    setup.client.ask("finalizing")
+    release = threading.Event()
+    thread = _beat_held_until(setup, release, lambda request, hub: hub.grant(request))
+    started = time.monotonic()
+    try:
+        # Act
+        granted = setup.client.ask_once(put=_put("result.json"))
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        thread.join(5.0)
+    # Assert
+    assert granted is None
+    assert elapsed < 1.5
+    assert len(setup.hub.requests) == 2
+
+
+def test_ask_once_when_the_exchange_it_waited_for_ends_the_work_should_send_nothing():
+    # Arrange: the heartbeat in flight is refused for good while ask_once waits for the lock.
+    setup = _Setup()
+    setup.client.ask("finalizing")
+    release = threading.Event()
+    thread = _beat_held_until(
+        setup, release, lambda request, hub: hub_error(403, "lease_expired", retryable=False))
+    threading.Timer(0.2, release.set).start()
+    # Act
+    granted = setup.client.ask_once(put=_put("result.json"))
+    thread.join(5.0)
+    # Assert
+    assert granted is None
+    assert len(setup.hub.requests) == 2
+    assert setup.client.lost().failure.code == "lease_expired"

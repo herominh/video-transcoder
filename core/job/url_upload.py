@@ -28,7 +28,11 @@ an error code such as RequestTimeout, IncompleteBody or BadDigest, read from at 
 error body, which is never logged). A 403 puts the object back to be asked again in a later batch, at most
 MAX_REASKS further times, then output_write_failed/upload_url_refused (retryable); a URL whose usable time (less
 URL_MARGIN_S) has passed before its PUT could start is asked again without counting, the store having refused
-nothing. Any other answer, a redirect included, is output_write_failed/upload_refused, final.
+nothing. An object's retry budget (the waits before its further attempts) is its own and is kept across the URLs it
+is given, so only a URL that was never used for an attempt runs out of time for free: once the budget is spent, the
+last attempt's failure is raised (upload_stalled or upload_failed, retryable), whatever the URL. A refusal whose error
+body could not be read whole counts as no answer. Any other answer, a redirect included, is
+output_write_failed/upload_refused, final.
 
 The first failure stops the rest: no new PUT starts, the PUTs under way are waited for (each within its ceiling or
 the deadline), and that failure is the upload's. A lost authority (the capability client's lost()) is such a
@@ -58,7 +62,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +84,7 @@ from .storage import (
     ERROR_CODE_PATTERN,
     RESULT_NAME,
     RETRY_AFTER_MAX_S,
+    STORAGE_REQUEST_START_FAILED,
     UPLOAD_DEADLINE_EXCEEDED,
     UPLOAD_RETRY_WAITS_S,
     UPLOAD_STALLED,
@@ -144,12 +149,14 @@ OBJECT_TOO_LARGE = Failure(
 
 @dataclass
 class _Item:
-    """One object on its way: what it is, the base64 MD5 it is declared with, and how often the store refused its URL."""
+    """One object on its way: what it is, the base64 MD5 it is declared with, how often the store refused its URL,
+    and what is left of its retry budget, the waits before its further attempts, kept across the URLs it is given."""
 
     upload: _Object
     md5: str = field(repr=False)
     data: bytes | None = field(default=None, repr=False)
     refusals: int = 0
+    waits_s: Iterator[float] = field(default_factory=lambda: iter(UPLOAD_RETRY_WAITS_S), repr=False)
 
     @property
     def declared(self) -> CapabilityObject:
@@ -230,17 +237,28 @@ def _retry_after_s(headers: Any) -> float:
     return min(float(significant or "0"), RETRY_AFTER_MAX_S)
 
 
-def _error_code_of(response: HttpResponse) -> str | None:
+class _Unread:
+    """A refusal's error body whose transfer failed: no answer was read whole."""
+
+
+_UNREAD = _Unread()
+
+
+def _error_code_of(response: HttpResponse) -> str | None | _Unread:
     """The error code a refusal's error body names, read from at most ERROR_BODY_MAX_BYTES of it; None when it names
-    none of ERROR_CODE_PATTERN's shape, or its transfer failed. Nothing of the body is kept but that code."""
+    none of ERROR_CODE_PATTERN's shape; _UNREAD when its transfer failed. Nothing of the body is kept but that code."""
     body = bytearray()
+    failed = False
     try:
         for chunk in response.iter_content(ERROR_BODY_CHUNK_BYTES):
             body += chunk
             if len(body) >= ERROR_BODY_MAX_BYTES:
                 break
     except (DeadlineReached, *TRANSFER_ERRORS):
-        return None
+        # The session's error quotes the URL: nothing of it is kept.
+        failed = True
+    if failed:
+        return _UNREAD
     found = _ERROR_CODE_ELEMENT.search(bytes(body[:ERROR_BODY_MAX_BYTES]))
     if found is None:
         return None
@@ -263,11 +281,23 @@ class _DaemonPool:
     keeps the process from ending."""
 
     def __init__(self, workers: int) -> None:
+        """Start the threads; WorkerFailure (resource_exhausted/storage_request_start_failed, retryable) when one cannot
+        be started, as storage._within types the same failure, once the threads started before it were told to end."""
         self._tasks: queue.SimpleQueue[tuple[Future[Any], Callable[[], Any]] | None] = queue.SimpleQueue()
-        self._workers = workers
+        self._workers = 0
+        started = True
         for number in range(workers):
             thread = threading.Thread(target=self._work, name=f"{POOL_THREAD_PREFIX}-{number}", daemon=True)
-            thread.start()
+            try:
+                thread.start()
+            except RuntimeError:
+                # The interpreter's own text says nothing the typed failure does not.
+                started = False
+                break
+            self._workers += 1
+        if not started:
+            self.shutdown()
+            raise WorkerFailure(STORAGE_REQUEST_START_FAILED)
 
     def submit(self, call: Callable[[], Any]) -> Future[Any]:
         future: Future[Any] = Future()
@@ -338,7 +368,7 @@ class _UrlUpload:
             raise
 
     def _put(self, item: _Item, url: PutUrl) -> _Outcome:
-        nominal_waits_s = iter(UPLOAD_RETRY_WAITS_S)
+        # The retry budget is the item's: a URL that runs out of time between two attempts gives no new one.
         while True:
             if self._stopped.is_set():
                 return _SKIPPED
@@ -363,7 +393,7 @@ class _UrlUpload:
             failed = WorkerFailure(UPLOAD_STALLED) if answer.stalled else _upload_failed(
                 "no answer" if answer.status is None else f"status {answer.status}"
             )
-            wait_s = _next_wait_s(nominal_waits_s, self._deadline, at_least_s=answer.retry_after_s)
+            wait_s = _next_wait_s(item.waits_s, self._deadline, at_least_s=answer.retry_after_s)
             if wait_s is None:
                 raise failed
             logger.warning("an upload through its URL failed and is tried again after %.3f s", wait_s)
@@ -421,6 +451,9 @@ class _UrlUpload:
         status = response.status_code
         try:
             error_code = _error_code_of(response) if HTTP_CLIENT_ERROR <= status < HTTP_SERVER_ERROR else None
+            if isinstance(error_code, _Unread):
+                # An answer cut short is no answer, as a transfer error is: a failure that passes.
+                return _Answer(None)
             return _Answer(status, _retry_after_s(response.headers), error_code)
         finally:
             close_quietly(response)

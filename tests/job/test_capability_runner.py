@@ -276,3 +276,20 @@ def test_run_when_the_authority_is_lost_during_the_download_should_read_no_furth
         "authority_refused", "capability_refused", False, "downloading")
     assert len(harness.store.gets) - gets_at_loss[0] <= 1
     assert len(harness.store.gets) < len(SOURCE_OBJECT) // 1024
+
+
+def test_run_when_the_result_is_stored_should_have_ended_the_clients_work_first(harness, monkeypatch):
+    # Arrange: what the client says of its work at the moment the result is stored.
+    ended_at_store: list[bool] = []
+    store = runner_module.upload_result_by_url
+
+    def recording(capabilities, session, **named):
+        ended_at_store.append(capabilities.ended)
+        return store(capabilities, session, **named)
+
+    monkeypatch.setattr(runner_module, "upload_result_by_url", recording)
+    # Act
+    harness.run()
+    # Assert: no heartbeat could follow the result's request.
+    assert ended_at_store == [True]
+    assert harness.hub.requests[-1] is _result_requests(harness)[-1]
