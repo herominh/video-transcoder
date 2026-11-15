@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 import requests
 
-from core.drive_import.clock import StopLine
+from core.net.clock import StopLine
 from core.drive_import.failure import Code, ImportFailed, Stage
 from core.drive_import.transfer import DOWNLOAD_CHUNK_BYTES, Part, TransferPlan, TransferResult, transfer
 from tests.acquire.support import PART_SIZE, SIGNATURE_CANARY, Scenario, grant_for

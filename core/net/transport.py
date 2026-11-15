@@ -1,5 +1,5 @@
-"""What the acquire sends its requests through: a small session interface, its real implementation over
-`requests`, and the request body that stops at the stop line.
+"""What the acquire and an encode at protocol 2.2.0 send their presigned requests through: a small session interface,
+its real implementation over `requests`, and the request body that stops at the stop line.
 
 The job calls only `get(url, headers, timeout, stream, stop_line=...)` and `put(url, data, headers, timeout,
 stop_line=...)` and reads only an answer's `status_code`, its `headers` (case-insensitive), `iter_content(chunk_size)`
@@ -50,7 +50,7 @@ from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
 from urllib3.util.connection import _set_socket_options, allowed_gai_family
 
-from core.drive_import.clock import DeadlineReached, StopLine
+from core.net.clock import DeadlineReached, StopLine
 
 # What a failed transfer raises (requests.RequestException is an OSError).
 TRANSFER_ERRORS: tuple[type[BaseException], ...] = (OSError,)
@@ -59,6 +59,9 @@ SMALL_ANSWER_MAX_BYTES = 65_536
 _SMALL_ANSWER_CHUNK_BYTES = 8_192
 # The HTTP library makes no request again by itself: every try is the job's.
 NO_RETRIES = 0
+# The connections to one host a session keeps for reuse: requests' own default, enough for a job of one request at a
+# time (the acquire's).
+DEFAULT_CONNECTIONS = 10
 # How far apart two readings of one stop line may lie and still name the same instant for the watchdog, and how long
 # after the stop line the watchdog fires.
 _WATCHDOG_SLACK_S = 0.05
@@ -279,10 +282,10 @@ def _watched_pools(sockets: _Sockets) -> dict[str, type[HTTPConnectionPool]]:
 class _WatchedAdapter(HTTPAdapter):
     """requests' adapter, its pools making connections whose sockets the session's watchdog knows."""
 
-    def __init__(self, pools: dict[str, type[HTTPConnectionPool]]) -> None:
+    def __init__(self, pools: dict[str, type[HTTPConnectionPool]], connections: int) -> None:
         # Set before the base class builds its pool manager, which init_poolmanager() then changes.
         self._watched_pool_classes = pools
-        super().__init__(max_retries=NO_RETRIES)
+        super().__init__(max_retries=NO_RETRIES, pool_maxsize=connections)
 
     def init_poolmanager(self, *arguments: Any, **named: Any) -> None:
         super().init_poolmanager(*arguments, **named)
@@ -301,15 +304,19 @@ class RequestsSession:
     request held to the job's stop line by the session's watchdog.
 
     `ca_bundle` replaces the certificates a server's is verified against (certifi's) for a test's own server only.
+    `connections` is how many connections to one host the session keeps for reuse: at least as many as the job
+    sends requests at once, or each further one is opened and dropped anew.
     """
 
-    def __init__(self, ca_bundle: str | None = None) -> None:
+    def __init__(self, ca_bundle: str | None = None, *, connections: int = DEFAULT_CONNECTIONS) -> None:
+        if isinstance(connections, bool) or not isinstance(connections, int) or connections < 1:
+            raise ValueError("connections must be a positive integer")
         self._sockets = _Sockets()
         self._session = _NoRedirectSession()
         self._session.trust_env = False
         if ca_bundle is not None:
             self._session.verify = ca_bundle
-        adapter = _WatchedAdapter(_watched_pools(self._sockets))
+        adapter = _WatchedAdapter(_watched_pools(self._sockets), connections)
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
         self._watchdog_lock = threading.Lock()

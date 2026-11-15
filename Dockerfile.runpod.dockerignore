@@ -16,6 +16,7 @@ tests/
 *.m3u8
 README.md
 CLAUDE.md
-# Dockerfile.runpod copies core/ and wrappers/ whole: the Drive acquire's files (Dockerfile.acquire's) stay out.
+# Dockerfile.runpod copies core/ and wrappers/ whole: the Drive acquire's files (Dockerfile.acquire's) stay out. The
+# shared HTTP session the acquire and a 2.2.0 encode use, core/net/, is outside the Drive package and ships.
 core/drive_import/
 wrappers/runpod_acquire_handler.py

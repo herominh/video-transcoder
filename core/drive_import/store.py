@@ -21,9 +21,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Mapping
 
-from core.drive_import.clock import DeadlineReached, StopLine
+from core.drive_import import deadline
 from core.drive_import.failure import Code, ImportFailed, Stage
-from core.drive_import.transport import TRANSFER_ERRORS, BoundedBody, HttpResponse, HttpSession, close_quietly
+from core.net.clock import DeadlineReached, StopLine
+from core.net.transport import TRANSFER_ERRORS, BoundedBody, HttpResponse, HttpSession, close_quietly
 
 CONNECT_TIMEOUT_S = 10.0
 # A PUT's read time-out (the wait for the store's answer) grows with its body: one second per MiB of the body, at
@@ -93,7 +94,7 @@ def put(
     read_timeout_s = max(MIN_READ_TIMEOUT_S, len(payload) / READ_TIMEOUT_BYTES_PER_SECOND)
     for attempt in range(1, len(RETRY_WAITS_S) + 2):
         if attempt > 1:
-            stop_line.wait(RETRY_WAITS_S[attempt - 2], stage)
+            deadline.wait(stop_line, RETRY_WAITS_S[attempt - 2], stage)
         answer = _put_once(http, url, payload, request_headers, stop_line, stage, read_timeout_s)
         if answer.deadline:
             raise ImportFailed(Code.DEADLINE, stage)
@@ -102,7 +103,7 @@ def put(
         if answer.status is not None and not _retryable(answer.status):
             raise ImportFailed(Code.UPLOAD_FAILED, stage)
         on_failed_try(attempt)
-    raise stop_line.failed(Code.UPLOAD_FAILED, stage)
+    raise deadline.failed(stop_line, Code.UPLOAD_FAILED, stage)
 
 
 def _put_once(
@@ -114,7 +115,7 @@ def _put_once(
     stage: Stage,
     read_timeout_s: float,
 ) -> _Answer:
-    timeout = stop_line.timeout(stage, CONNECT_TIMEOUT_S, read_timeout_s)
+    timeout = deadline.timeout(stop_line, stage, CONNECT_TIMEOUT_S, read_timeout_s)
     response: HttpResponse | None = None
     reached = False
     try:

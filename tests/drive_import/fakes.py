@@ -22,7 +22,7 @@ from typing import Any
 import requests
 from requests.structures import CaseInsensitiveDict
 
-from core.drive_import.clock import DeadlineReached, StopLine
+from core.net.clock import DeadlineReached, StopLine
 from core.drive_import.transfer import PART_SIZE
 
 START = datetime(2026, 10, 17, 8, 0, 0, tzinfo=timezone.utc)

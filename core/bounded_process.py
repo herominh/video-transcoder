@@ -2,7 +2,9 @@
 
 At the deadline the group gets SIGTERM, then SIGKILL after a one-second grace; reaping and the
 bounded reader joins can add a few seconds more, so callers reserve that overrun.
-An optional monitor, called at a fixed interval while the process runs, can stop it the same way.
+An optional monitor, called at a fixed interval while the process runs, can stop it the same way, and so
+can a stop check a caller sets around a block of work (stopped_when()): every bounded process that block
+starts is stopped once the check says so, whichever stage started it.
 Every stderr byte, not only the kept tail, can be scanned for patterns the caller must not miss.
 """
 
@@ -17,7 +19,9 @@ import signal
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import IO, Protocol
 
@@ -34,6 +38,35 @@ REAP_TIMEOUT_S = 1.0
 # The bytes of stderr carried from one read into the next, so a pattern split across two reads is
 # still found: a stderr pattern must match within this many bytes.
 STDERR_PATTERN_OVERLAP_BYTES = 256
+
+
+# The stop checks of the blocks the current context runs inside (stopped_when()), innermost last.
+_stop_checks: ContextVar[tuple[Callable[[], bool], ...]] = ContextVar("bounded_process_stop_checks", default=())
+
+
+@contextmanager
+def stopped_when(check: Callable[[], bool]) -> Iterator[None]:
+    """While the block runs, every process run_bounded() starts in this context (this thread, unless a context is
+    handed on) is stopped as its monitor would stop it once `check()` returns True, looked at each time the wait
+    for the process polls; one asked for while it is True already is not started. What `check` raises propagates
+    as a monitor's does."""
+    if not callable(check):
+        raise ValueError("check must be callable")
+    token = _stop_checks.set(_stop_checks.get() + (check,))
+    try:
+        yield
+    finally:
+        _stop_checks.reset(token)
+
+
+def _asked_to_stop(checks: Sequence[Callable[[], bool]]) -> bool:
+    for check in checks:
+        stop = check()
+        if not isinstance(stop, bool):
+            raise TypeError("a stop check must return a bool")
+        if stop:
+            return True
+    return False
 
 
 def _require_positive_ms(ms: object) -> int:
@@ -255,13 +288,14 @@ def _wait_for_ending(
     overflowed: threading.Event,
     read_failed: threading.Event,
     monitor: _Monitor,
+    stop_checks: Sequence[Callable[[], bool]],
 ) -> _Ending:
     while True:
         if overflowed.is_set():
             return _Ending.OVERFLOWED
         if read_failed.is_set():
             return _Ending.READ_FAILED
-        if monitor.asks_to_stop():
+        if monitor.asks_to_stop() or _asked_to_stop(stop_checks):
             return _Ending.STOPPED
         remaining = deadline.remaining_s()
         if remaining <= 0:
@@ -375,6 +409,9 @@ def run_bounded(
 
     With `monitor` (and `monitor_interval_ms`, given together), the monitor is called at most once
     per interval while the process runs; True lets it continue, False stops it as a deadline would.
+    The stop checks of the blocks this call runs inside (stopped_when()) stop it the same way, and a
+    result of a process stopped so says `stopped_by_monitor`; one such check that is True already
+    starts no process (returncode None, stopped_by_monitor True).
 
     Raises OSError when the process cannot be started, or when its output could not be fully
     read (a reader could not be set up, or a read failed); the process group is dead by then.
@@ -398,6 +435,17 @@ def run_bounded(
     _require_monitor(monitor, monitor_interval_ms)
     inherited_fds = _validated_fds(pass_fds)
     patterns = _validated_patterns(stderr_patterns)
+    stop_checks = _stop_checks.get()
+    if _asked_to_stop(stop_checks):
+        return BoundedResult(
+            returncode=None,
+            stdout=b"",
+            stderr_tail=b"",
+            timed_out=False,
+            stdout_overflow=False,
+            stderr_truncated=False,
+            stopped_by_monitor=True,
+        )
     if deadline.expired():
         return BoundedResult(
             returncode=None,
@@ -430,7 +478,7 @@ def run_bounded(
         readers.append(_start_reader(process.stdout, stdout_buffer, stop_reading, read_errors))
         readers.append(_start_reader(process.stderr, stderr_buffer, stop_reading, read_errors))
         ending = _wait_for_ending(
-            process, deadline, stdout_buffer.overflowed, read_errors.happened, output_monitor
+            process, deadline, stdout_buffer.overflowed, read_errors.happened, output_monitor, stop_checks
         )
         if ending is not _Ending.EXITED:
             _terminate_group(process)

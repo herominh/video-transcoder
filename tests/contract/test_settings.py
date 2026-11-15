@@ -69,8 +69,9 @@ DEFAULT_PROFILE_LEAD_INS = {
     "VH_STORAGE_DEFAULT_ACCESS_KEY_ID": "entry 1: its VH_STORAGE_<NAME>_ACCESS_KEY_ID variable ",
     "VH_STORAGE_DEFAULT_SECRET_ACCESS_KEY": "entry 1: its VH_STORAGE_<NAME>_SECRET_ACCESS_KEY variable ",
 }
-# A storage name other than the list's own and the `<NAME>` form: one made from an entry of the list.
-DERIVED_STORAGE_NAME = re.compile(r"VH_STORAGE_(?!PROFILES\b|<NAME>_)")
+# A storage name other than the list's own, the storage host's and the `<NAME>` form: one made from an entry of the
+# list (a profile named `host` has VH_STORAGE_HOST_ENDPOINT, which this still finds).
+DERIVED_STORAGE_NAME = re.compile(r"VH_STORAGE_(?!PROFILES\b|HOST\b|<NAME>_)")
 # A second profile, `eu-archive`, after `default`: entry 2 of the list.
 TWO_PROFILES_ENV = {
     "VH_STORAGE_PROFILES": "default,eu-archive",
@@ -1012,3 +1013,130 @@ def test_from_env_when_the_environment_is_not_a_mapping_should_raise_type_error(
     # Act / Assert
     with pytest.raises(TypeError, match="mapping"):
         WorkerSettings.from_env(not_a_mapping)
+
+
+# --- the capability exchange (protocol 2.2.0, a draft: these tests' registry lists it as live) ----------------
+
+CAPABILITIES_URL = "https://hub.test.invalid/api/transcode/v2/capabilities"
+STORAGE_HOST = "store.test.invalid"
+CAPABILITY_ENV = {"VH_CAPABILITIES_URL": CAPABILITIES_URL, "VH_STORAGE_HOST": STORAGE_HOST}
+STORAGE_PROFILE_VARIABLES = {variable: None for variable in VALID_ENV if variable.startswith("VH_STORAGE_")}
+
+
+@pytest.fixture
+def capability_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A registry that lists 2.2.0 as live, as the release that makes it live will."""
+    shipped = ContractRegistry.load()
+    versions = {**shipped.versions, "protocol": {"live": ["2.0.0", "2.1.0", "2.2.0"], "draft": []}}
+    registry = dataclasses.replace(shipped, versions=versions)
+    monkeypatch.setattr(worker_settings, "load_registry", lambda: registry)
+
+
+def test_from_env_when_two_two_zero_is_accepted_should_need_no_storage_profile(capability_live):
+    # Arrange
+    env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **CAPABILITY_ENV, **STORAGE_PROFILE_VARIABLES)
+
+    # Act
+    settings = WorkerSettings.from_env(env)
+
+    # Assert
+    assert (settings.capabilities_url, settings.storage_host) == (CAPABILITIES_URL, STORAGE_HOST)
+    assert dict(settings.storage_profiles) == {}
+    with pytest.raises(UnknownCredentialRef):
+        settings.storage_profile("default")
+
+
+def test_from_env_when_two_two_zero_is_accepted_beside_profiles_should_hold_both(capability_live):
+    # Arrange
+    env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **CAPABILITY_ENV)
+
+    # Act
+    settings = WorkerSettings.from_env(env)
+
+    # Assert
+    assert settings.storage_profile("default").endpoint == "https://storage.test.invalid"
+    assert settings.storage_host == STORAGE_HOST
+
+
+@pytest.mark.parametrize("variable", ["VH_CAPABILITIES_URL", "VH_STORAGE_HOST"])
+def test_from_env_when_two_two_zero_is_accepted_without_a_capability_variable_should_refuse_naming_it(
+    capability_live, variable
+):
+    # Arrange
+    env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **{**CAPABILITY_ENV, variable: None})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert (refusal.variable, refusal.rule) == (variable, "is required")
+
+
+@pytest.mark.parametrize("value,rule", [
+    ("http://hub.test.invalid/capabilities", NOT_AN_HTTPS_URL),
+    ("https://user@hub.test.invalid/capabilities", CARRIES_USERINFO),
+    ("https://hub.test.invalid/capabilities#here", CARRIES_A_FRAGMENT),
+    ("hub.test.invalid/capabilities", NOT_AN_HTTPS_URL),
+])
+def test_from_env_when_the_capabilities_url_is_not_a_bare_https_url_should_refuse(capability_live, value, rule):
+    # Arrange
+    env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **{**CAPABILITY_ENV, "VH_CAPABILITIES_URL": value})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert (refusal.variable, refusal.rule) == ("VH_CAPABILITIES_URL", rule)
+
+
+@pytest.mark.parametrize("value", [
+    "Store.test.invalid", "store.test.invalid:443", "https://store.test.invalid", "store.test.invalid.",
+    "store_test.invalid", "-store.test.invalid", "store.test.invalid/bucket",
+], ids=["upper-case", "port", "scheme", "trailing-dot", "underscore", "leading-hyphen", "path"])
+def test_from_env_when_the_storage_host_is_no_lowercase_dns_hostname_should_refuse(capability_live, value):
+    # Arrange
+    env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **{**CAPABILITY_ENV, "VH_STORAGE_HOST": value})
+
+    # Act
+    refusal = _refusal(env)
+
+    # Assert
+    assert (refusal.variable, refusal.rule) == ("VH_STORAGE_HOST", "must be a lowercase DNS hostname")
+
+
+def test_from_env_when_two_two_zero_is_not_accepted_should_need_the_profiles_and_not_the_capability_variables():
+    # Arrange
+    without_profiles = _env(**STORAGE_PROFILE_VARIABLES)
+
+    # Act
+    settings = WorkerSettings.from_env(VALID_ENV)
+    refusal = _refusal(without_profiles)
+
+    # Assert
+    assert (settings.capabilities_url, settings.storage_host) == (None, None)
+    assert (refusal.variable, refusal.rule) == ("VH_STORAGE_PROFILES", "is required")
+
+
+def test_from_env_when_two_two_zero_is_not_accepted_should_still_check_the_capability_variables_that_are_set():
+    # Arrange
+    good = _env(**CAPABILITY_ENV)
+    bad = _env(**{**CAPABILITY_ENV, "VH_STORAGE_HOST": "Store.test.invalid"})
+
+    # Act
+    settings = WorkerSettings.from_env(good)
+    refusal = _refusal(bad)
+
+    # Assert
+    assert (settings.capabilities_url, settings.storage_host) == (CAPABILITIES_URL, STORAGE_HOST)
+    assert refusal.variable == "VH_STORAGE_HOST"
+
+
+def test_settings_when_they_hold_the_capability_variables_should_show_neither(capability_live):
+    # Arrange
+    settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **CAPABILITY_ENV))
+
+    # Act
+    shown = repr(settings) + str(settings)
+
+    # Assert
+    assert CAPABILITIES_URL not in shown and STORAGE_HOST not in shown

@@ -104,6 +104,7 @@ from core.protocol.outbox import SealedMessage, runpod_output
 from core.protocol.registry import MessageKind
 from core.protocol.settings import StorageProfile
 from core.source_reader import (
+    SOURCE_READ_DEADLINE_EXCEEDED,
     S3_CONNECT_TIMEOUT_S,
     S3_MAX_ATTEMPTS,
     S3_READ_TIMEOUT_S,
@@ -204,10 +205,6 @@ DOWNLOAD_DEADLINE_EXCEEDED = Failure(
 UPLOAD_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "upload_deadline_exceeded", False,
     "the job ran out of time while it uploaded the generation",
-)
-SOURCE_READ_DEADLINE_EXCEEDED = Failure(
-    "deadline_exceeded", "source_read_deadline_exceeded", False,
-    "the job ran out of time while it read the source",
 )
 # A request that outlasted its own ceiling while the deadline still had time left: a failed attempt
 # that passes, unlike a deadline (a slow network or storage, not a limit that is too small).
@@ -1313,7 +1310,15 @@ def _refused_for_good(error: BotoCoreError | ClientError) -> bool:
     status = _answered_status(error)
     if status is None or not HTTP_FIRST_REDIRECT <= status <= HTTP_LAST_CLIENT_ERROR:
         return False
-    return status not in PASSING_REFUSAL_STATUSES and _error_code(error) not in PASSING_REFUSAL_CODES
+    return not refusal_passes(status, _error_code(error))
+
+
+def refusal_passes(status: int, error_code: str | None) -> bool:
+    """Whether a storage's refusal of a PUT (a status from 300 to 499) passes, so that sending the object again can
+    change how it ends: one of PASSING_REFUSAL_STATUSES, or an answer whose error code (of ERROR_CODE_PATTERN's shape,
+    None otherwise) is one of PASSING_REFUSAL_CODES. The 2.2.0 upload through URLs asks it too
+    (core/job/url_upload.py)."""
+    return status in PASSING_REFUSAL_STATUSES or error_code in PASSING_REFUSAL_CODES
 
 
 def _answered_status(error: ClientError) -> int | None:

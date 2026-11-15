@@ -7,10 +7,10 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Mapping
 
-from core.drive_import import google, store
-from core.drive_import.clock import DeadlineReached, StopLine
+from core.drive_import import deadline, google, store
 from core.drive_import.failure import Code, ImportFailed, Stage
-from core.drive_import.transport import TRANSFER_ERRORS, HttpResponse, HttpSession, close_quietly
+from core.net.clock import DeadlineReached, StopLine
+from core.net.transport import TRANSFER_ERRORS, HttpResponse, HttpSession, close_quietly
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +86,11 @@ class SelfCheckFailed(RuntimeError):
 
 def transfer(plan: TransferPlan, api_key: str, http: HttpSession, tally: Tally | None = None) -> TransferResult:
     plan.require_valid()
-    plan.stop_line.require(Stage.INPUT)
+    deadline.require(plan.stop_line, Stage.INPUT)
     counts = tally if tally is not None else Tally()
     _require_unchanged(plan, api_key, http, plan.stop_line, counts)
     parts, checksum = _Transfer(plan, api_key, http, plan.stop_line, counts).run()
-    plan.stop_line.require(Stage.VERIFY)
+    deadline.require(plan.stop_line, Stage.VERIFY)
     return TransferResult(plan.expected_size, checksum, tuple(parts))
 
 
@@ -103,13 +103,13 @@ def _require_unchanged(job: TransferPlan, api_key: str, http: HttpSession, stop_
     headers = google.request_headers(api_key, job)
     for attempt in range(1, METADATA_TRIES + 1):
         if attempt > 1:
-            stop_line.wait(DOWNLOAD_RETRY_WAITS_S[attempt - 2], Stage.METADATA)
-        timeout = stop_line.timeout(Stage.METADATA, google.CONNECT_TIMEOUT_S, google.METADATA_READ_TIMEOUT_S)
+            deadline.wait(stop_line, DOWNLOAD_RETRY_WAITS_S[attempt - 2], Stage.METADATA)
+        timeout = deadline.timeout(stop_line, Stage.METADATA, google.CONNECT_TIMEOUT_S, google.METADATA_READ_TIMEOUT_S)
         answer = _metadata_once(http, url, headers, timeout, stop_line)
-        stop_line.require(Stage.METADATA)
+        deadline.require(stop_line, Stage.METADATA)
         if answer is Code.DOWNLOAD_FAILED:
             # An answer cut short by the watchdog at the stop line reads as one Google did not give whole.
-            raise stop_line.failed(answer, Stage.METADATA)
+            raise deadline.failed(stop_line, answer, Stage.METADATA)
         if isinstance(answer, Code):
             raise ImportFailed(answer, Stage.METADATA)
         if isinstance(answer, dict):
@@ -118,7 +118,7 @@ def _require_unchanged(job: TransferPlan, api_key: str, http: HttpSession, stop_
                 raise ImportFailed(change, Stage.METADATA)
             return
         _log_failed_try(tally, Stage.METADATA, None, attempt)
-    raise stop_line.failed(Code.DOWNLOAD_FAILED, Stage.METADATA)
+    raise deadline.failed(stop_line, Code.DOWNLOAD_FAILED, Stage.METADATA)
 
 
 def _metadata_once(
@@ -167,12 +167,12 @@ class _TimedResponse:
         self.headers = response.headers
 
     def iter_content(self, chunk_size: int) -> Iterator[bytes]:
-        self._stop_line.require(self._stage)
+        deadline.require(self._stop_line, self._stage)
         chunks = self._response.iter_content(chunk_size)
         while True:
-            self._stop_line.require(self._stage)
+            deadline.require(self._stop_line, self._stage)
             chunk = next(chunks, None)
-            self._stop_line.require(self._stage)
+            deadline.require(self._stop_line, self._stage)
             if chunk is None:
                 return
             yield chunk
@@ -239,16 +239,16 @@ class _Transfer:
         while True:
             self._tries += 1
             if self._tries > DOWNLOAD_TRIES:
-                raise self._stop_line.failed(Code.DOWNLOAD_FAILED, Stage.DOWNLOAD)
+                raise deadline.failed(self._stop_line, Code.DOWNLOAD_FAILED, Stage.DOWNLOAD)
             if self._tries > 1:
-                self._stop_line.wait(DOWNLOAD_RETRY_WAITS_S[self._tries - 2], Stage.DOWNLOAD)
+                deadline.wait(self._stop_line, DOWNLOAD_RETRY_WAITS_S[self._tries - 2], Stage.DOWNLOAD)
             answer = self._request()
             if self._stop_line.passed():
                 if not isinstance(answer, (Code, google.Retry)):
                     close_quietly(answer)
                 raise ImportFailed(Code.DEADLINE, Stage.DOWNLOAD)
             if answer is Code.DOWNLOAD_FAILED:
-                raise self._stop_line.failed(answer, Stage.DOWNLOAD)
+                raise deadline.failed(self._stop_line, answer, Stage.DOWNLOAD)
             if isinstance(answer, Code):
                 raise ImportFailed(answer, Stage.DOWNLOAD)
             if not isinstance(answer, google.Retry):
@@ -256,7 +256,7 @@ class _Transfer:
             self._log_failed_try()
 
     def _request(self) -> HttpResponse | Code | google.Retry:
-        timeout = self._stop_line.timeout(Stage.DOWNLOAD, google.CONNECT_TIMEOUT_S, google.MEDIA_READ_TIMEOUT_S)
+        timeout = deadline.timeout(self._stop_line, Stage.DOWNLOAD, google.CONNECT_TIMEOUT_S, google.MEDIA_READ_TIMEOUT_S)
         headers = google.media_headers(self._api_key, self._job, self._part_start)
         response = _get(
             self._http, google.media_url(self._job.file_id), headers, timeout, self._stop_line, Stage.DOWNLOAD
@@ -274,14 +274,14 @@ class _Transfer:
         after it is the watchdog's cut (a body framed by the connection's close ends cleanly when it is shut)."""
         chunks = _chunks_of(response)
         while chunks is not None:
-            self._stop_line.require(Stage.DOWNLOAD)
+            deadline.require(self._stop_line, Stage.DOWNLOAD)
             chunk = _next_chunk(chunks)
             if isinstance(chunk, _Broken):
                 return False
             if isinstance(chunk, _End):
-                self._stop_line.require(Stage.DOWNLOAD)
+                deadline.require(self._stop_line, Stage.DOWNLOAD)
                 return True
-            self._stop_line.require(Stage.DOWNLOAD)
+            deadline.require(self._stop_line, Stage.DOWNLOAD)
             self._tally.bytes_read += len(chunk)
             self._take(chunk)
         return False
@@ -303,7 +303,7 @@ class _Transfer:
         """Write the part in flight, which is whole and not the last, and make the next one the part in flight."""
         self._sha256.update(self._buffer)
         self._md5.update(self._buffer)
-        self._stop_line.require(Stage.DOWNLOAD)
+        deadline.require(self._stop_line, Stage.DOWNLOAD)
         self._put_part()
         self._tally.stage = Stage.DOWNLOAD
         self._part_start += len(self._buffer)
@@ -317,12 +317,12 @@ class _Transfer:
             raise ImportFailed(Code.SIZE_SHORT, Stage.DOWNLOAD)
         if self._part != len(self._sizes) or len(self._buffer) != self._sizes[-1]:
             raise SelfCheckFailed("a stream of the expected size did not end in the last part, whole")
-        self._stop_line.require(Stage.VERIFY)
+        deadline.require(self._stop_line, Stage.VERIFY)
         self._sha256.update(self._buffer)
         self._md5.update(self._buffer)
-        self._stop_line.require(Stage.VERIFY)
+        deadline.require(self._stop_line, Stage.VERIFY)
         checksum_verified = self._verified()
-        self._stop_line.require(Stage.VERIFY)
+        deadline.require(self._stop_line, Stage.VERIFY)
         self._put_part()
         return self._written, checksum_verified
 

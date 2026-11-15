@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, ClassVar, Mapping
 
@@ -32,6 +32,7 @@ CONTEXT_VERSION = 1
 _MICROSECONDS_PER_MILLISECOND = 1_000
 _SCHEMAS = schema.SCHEMA_BASE_URI + "schemas/"
 _COMMON = _SCHEMAS + "common.schema.json#/$defs/"
+_CAPABILITIES = _SCHEMAS + "capabilities-common.schema.json#/$defs/"
 
 
 class MessageTooLarge(ValueError):
@@ -206,6 +207,34 @@ class Counters(_ContractValue):
     renditions_done: int
     bytes_downloaded: int
     bytes_uploaded: int
+
+
+@dataclass(frozen=True)
+class CapabilityObject(_ContractValue):
+    """`put_object`: one object a capability request declares, relative to the granted prefix, with its exact size
+    and the base64 of its MD5 (README 15.4, runtime rule 4). repr() does not show the MD5."""
+
+    SCHEMA: ClassVar[str] = _CAPABILITIES + "put_object"
+
+    path: str
+    size_bytes: int
+    md5: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class CapabilityPut:
+    """`put_request`: the asked lifetime of the put URLs and the objects they are asked for, in order."""
+
+    lifetime_seconds: int
+    objects: tuple[CapabilityObject, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.objects, tuple) or not all(isinstance(item, CapabilityObject) for item in self.objects):
+            raise TypeError("objects must be a tuple of CapabilityObject")
+        _require_schema(_CAPABILITIES + "put_request", self.to_dict(), type(self).__name__)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"lifetime_seconds": self.lifetime_seconds, "objects": [item.to_dict() for item in self.objects]}
 
 
 # --- encoding and sealing ---------------------------------------------------------------------
@@ -456,6 +485,40 @@ def unclaimed(
     return _checked(kind, document)
 
 
+def capabilities_request(
+    *,
+    protocol_version: str,
+    message_id: str,
+    sent_at: datetime,
+    key_id: str,
+    identity: ExecutionIdentity,
+    runtime_id: str,
+    seq: int,
+    stage: str,
+    media_duration_ms: int | None,
+    source: bool,
+    put: CapabilityPut | None,
+) -> dict[str, Any]:
+    """`execution.capabilities.request`: this runtime's ask at `stage`; with `put` None and `source` False, the heartbeat."""
+    _require_type("identity", identity, ExecutionIdentity)
+    _require_type("source", source, bool)
+    if put is not None:
+        _require_type("put", put, CapabilityPut)
+    kind = MessageKind.EXECUTION_CAPABILITIES_REQUEST
+    document: dict[str, Any] = {
+        **_envelope(kind, protocol_version=protocol_version, message_id=message_id, sent_at=sent_at, key_id=key_id,
+                    cell_id=identity.owning_cell_id),
+        "identity": identity.to_dict(),
+        "runtime_id": runtime_id,
+        "seq": seq,
+        "stage": stage,
+        "media_duration_ms": media_duration_ms,
+        "source": source,
+        "put": None if put is None else put.to_dict(),
+    }
+    return _checked(kind, document)
+
+
 # --- trusted contexts -------------------------------------------------------------------------
 
 # The kinds the worker sends and self-checks, with the identity each carries.
@@ -467,6 +530,7 @@ _SENT_IDENTITIES: Mapping[MessageKind, type] = {
     MessageKind.TRANSCODE_UNCLAIMED: DispatchIdentity,
     MessageKind.SOURCE_ACQUIRE_RESULT_COMPLETED: ExecutionIdentity,
     MessageKind.SOURCE_ACQUIRE_RESULT_FAILED: ExecutionIdentity,
+    MessageKind.EXECUTION_CAPABILITIES_REQUEST: ExecutionIdentity,
 }
 
 
@@ -481,11 +545,15 @@ def worker_sender_context(
     source_id: str | None = None,
     output_location_id: str | None = None,
     profile: Profile | None = None,
+    runtime_id: str | None = None,
+    last_capability_seq: int | None = None,
 ) -> TrustedContext:
     """The worker_sender context (README 9.3) of one message about to be sent, from the worker's own records.
 
     `expected_audience` is the Hub's (`hub:` plus the identity's cell), `known_key_ids` the worker's own
-    signing key id. A field the kind requires and the caller left None raises ContextIncomplete.
+    signing key id; a capability request also needs this runtime's id and the highest `seq` it has sent
+    (`last_capability_seq`, 0 before its first). A field the kind requires and the caller left None raises
+    ContextIncomplete.
     """
     message_kind = MessageKind(kind)
     expected_identity = _SENT_IDENTITIES.get(message_kind)
@@ -495,7 +563,7 @@ def worker_sender_context(
     _require_type("settings", settings, ProtocolSettings)
     _require_type("now", now, datetime)
     expect: dict[str, Any] = identity.to_dict()
-    for name, value in (("source_id", source_id), ("output_location_id", output_location_id)):
+    for name, value in (("source_id", source_id), ("output_location_id", output_location_id), ("runtime_id", runtime_id)):
         if value is not None:
             expect[name] = value
     if profile is not None:
@@ -514,6 +582,7 @@ def worker_sender_context(
             "known_key_ids": [settings.worker_to_hub_key_id],
             "expect": expect,
             "last_event_seq": last_event_seq,
+            "last_capability_seq": last_capability_seq,
         }
     )
 
@@ -527,12 +596,21 @@ def receiver_context(
     output_location_id: str | None = None,
     runtime_id: str | None = None,
     encryption: Encryption | None = None,
+    execution: ExecutionIdentity | None = None,
+    capability_request: Mapping[str, Any] | None = None,
+    capability_storage_host: str | None = None,
+    capability_output: tuple[str, str] | None = None,
+    capability_source: tuple[str, str] | None = None,
 ) -> TrustedContext:
-    """The worker_receiver context (README 9.3) of `transcode.request`, `transcode.claim.granted` or `hub.error`.
+    """The worker_receiver context (README 9.3) of `transcode.request`, `transcode.claim.granted`,
+    `execution.capabilities.granted` or `hub.error`.
 
     The request needs `now`; the grant needs `now` and the accepted dispatch's identity, its output location,
-    this runtime's id and the dispatch's encryption; `hub.error` needs only the settings. A field the kind
-    requires and the caller left None raises ContextIncomplete.
+    this runtime's id and the dispatch's encryption; `hub.error` needs only the settings. A capability answer
+    needs `now`, the execution's identity as granted, this runtime's id, the request it answers
+    (`capability_request`: the built `execution.capabilities.request` exactly as it was sent), the storage host
+    of the settings, the output's (bucket, granted prefix) and the source's (bucket, object key). A field the
+    kind requires and the caller left None raises ContextIncomplete.
     """
     message_kind = MessageKind(kind)
     _require_type("settings", settings, ProtocolSettings)
@@ -552,6 +630,11 @@ def receiver_context(
     elif message_kind is MessageKind.TRANSCODE_CLAIM_GRANTED:
         data["channel"] = Channel.PUSH.value
         data["expect"] = _grant_expect(dispatch, output_location_id, runtime_id, encryption)
+    elif message_kind is MessageKind.EXECUTION_CAPABILITIES_GRANTED:
+        data["channel"] = Channel.PUSH.value
+        data["expect"] = _capability_expect(
+            execution, runtime_id, capability_request, capability_storage_host, capability_output, capability_source
+        )
     else:
         raise ValueError(f"the worker does not receive {message_kind.value}")
     data.update(
@@ -582,4 +665,43 @@ def _grant_expect(
     if encryption is not None:
         _require_type("encryption", encryption, Encryption)
         expect["encryption"] = encryption.to_dict()
+    return expect
+
+
+def _capability_expect(
+    execution: ExecutionIdentity | None,
+    runtime_id: str | None,
+    request: Mapping[str, Any] | None,
+    storage_host: str | None,
+    output: tuple[str, str] | None,
+    source: tuple[str, str] | None,
+) -> dict[str, Any]:
+    expect: dict[str, Any] = {}
+    if execution is not None:
+        _require_type("execution", execution, ExecutionIdentity)
+        expect.update(execution.to_dict())
+    if runtime_id is not None:
+        expect["runtime_id"] = runtime_id
+    if request is not None:
+        _require_type("capability_request", request, Mapping)
+        if request.get("message_kind") != MessageKind.EXECUTION_CAPABILITIES_REQUEST.value:
+            raise ValueError("capability_request must be the execution.capabilities.request that was sent")
+        put = request["put"]
+        expect["capability_request"] = {
+            "seq": request["seq"],
+            "stage": request["stage"],
+            "source": request["source"],
+            "put": None if put is None else {
+                "lifetime_seconds": put["lifetime_seconds"],
+                "paths": [item["path"] for item in put["objects"]],
+            },
+        }
+    if storage_host is not None:
+        expect["capability_storage_host"] = storage_host
+    if output is not None:
+        bucket, prefix = output
+        expect["capability_output"] = {"bucket": bucket, "prefix": prefix}
+    if source is not None:
+        bucket, object_key = source
+        expect["capability_source"] = {"bucket": bucket, "object_key": object_key}
     return expect

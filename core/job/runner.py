@@ -26,6 +26,21 @@ The stages, in order (the `stage` of a progress message and of a failed result; 
                   worker's own validator would refuse is found before anything is uploaded
     uploading     the files the manifest lists, then the manifest; the result is built anew after it
 
+A dispatch of protocol 2.2.0 (the capability exchange, README 15.4) runs the same stages without any storage
+credential: no access profile is resolved and no storage client is made. Right after the wall-time check the
+execution makes its capability client (core/protocol/capabilities_client.py), its heartbeat (core/job/heartbeat.py)
+and its HTTP session (core/net/transport.py). Entering a stage reports it with one request (for `probing` asking the
+source's read URL as well), and the preflight's admitted duration is reported from `downloading` on. The source is
+read through that URL (core/source_reader.py UrlRangeSource), the generation and the stored result are written
+through put URLs (core/job/url_upload.py). The execution looks at its authority as it enters a stage and between
+the objects it uploads, and every bounded process it runs is stopped once the authority is lost
+(core/bounded_process.py stopped_when()); an execution whose authority was lost ends with that failure
+(authority_refused, not retryable, at the stage it was in), whatever its stage then failed with. The heartbeat is
+stopped and the session closed before run() returns, however it ends. Once the terminal result is sealed the
+client's work is ended (no further retried request or heartbeat), and the stored result is one exchange and one PUT,
+never tried again (contract 15.1 rule 9: storing it never holds back the report). A dispatch of any other version runs
+as it always did.
+
 Everything the execution writes locally lives in one scratch directory of its own, removed whatever
 the ending. The media key of the grant goes to the encode and nowhere else, and the storage credentials
 to the two client factories (one for the source, one for the output) and nowhere else: neither is
@@ -79,11 +94,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from core.admission import RequestLimits
-from core.bounded_process import MS_PER_SECOND, Deadline
+from core.bounded_process import MS_PER_SECOND, Deadline, stopped_when
 from core.encode import ArtifactFile, OutputAllowance, RenditionOutput, encode_rendition
 from core.encode_command import EncodeSource
 from core.failure import DETAIL_MAX_CHARS, Diagnostic, Failure, WorkerFailure, make_detail
 from core.hls_key import KEY_BYTES
+from core.net.clock import stop_line_within
+from core.net.transport import ClosableHttpSession, RequestsSession
 from core.package import (
     CONTRACT_MAX_DIAGNOSTICS,
     CONTRACT_MAX_DURATION_MS,
@@ -101,19 +118,21 @@ from core.package import (
 from core.probe import run_preflight
 from core.profile import MediaProfile, supported_profile
 from core.protocol import messages, pipeline
+from core.protocol.capabilities_client import CapabilityAnswer, CapabilityClient, GrantedUrl
 from core.protocol.context import TrustedContext
 from core.protocol.handler import ClaimedExecution, Runtime
 from core.protocol.messages import Encoder, ManifestLocator, Media, SourceRead
 from core.protocol.outbox import SealedMessage, SelfCheckFailed, seal_message
 from core.protocol.registry import Channel, MessageKind, Role
-from core.protocol.settings import StorageProfile, UnknownCredentialRef
+from core.protocol.settings import CAPABILITY_PROTOCOL_VERSION, StorageProfile, UnknownCredentialRef
 from core.renditions import RenditionPlan, plan_renditions
 from core.source_facts import SourceFacts
-from core.source_reader import RangeSource, S3RangeSource
+from core.source_reader import RangeSource, S3RangeSource, UrlRangeSource
 from core.thumbnail import ThumbnailResult, make_thumbnail
 
 from .config import JobSettings
 from .ffmpeg_version import installed_ffmpeg_version
+from .heartbeat import Heartbeat
 from .progress import ProgressReporter
 from .scratch import hold_scratch_lock, release_scratch_lock, scratch_prefix
 from .storage import (
@@ -127,6 +146,7 @@ from .storage import (
     upload_generation,
     upload_result,
 )
+from .url_upload import UPLOAD_PARALLELISM, upload_generation_by_urls, upload_result_by_url
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +176,8 @@ DEADLINE_EXCEEDED_CLASS = "deadline_exceeded"
 # start's wall time is never taken as less (an absurd reading far in the past).
 LEAST_COUNTABLE_S = -sys.float_info.max / MS_PER_SECOND
 SPENT_BEFORE_START_DETAIL = "{detail}; the start had spent {spent_s} s of its {limit_s} s before the execution began"
+# The connections the session of a 2.2.0 execution keeps per host: the PUTs it makes at once, and the preflight's reads.
+URL_SESSION_CONNECTIONS = UPLOAD_PARALLELISM + 4
 # The class and the code of the failure that the source was no longer the recorded object (core/source_reader.py).
 SOURCE_CHANGED = ("source_integrity_mismatch", "source_changed")
 
@@ -319,6 +341,11 @@ def _scratch_failure(error: OSError) -> Failure:
     return Failure("resource_exhausted", "scratch_create_failed", True, detail)
 
 
+def url_session() -> ClosableHttpSession:
+    """The HTTP session one 2.2.0 execution reads and writes its URLs through."""
+    return RequestsSession(connections=URL_SESSION_CONNECTIONS)
+
+
 class JobRunner:
     """Runs claimed executions with one job configuration; `run` is a core.protocol.handler.JobRunner."""
 
@@ -329,19 +356,24 @@ class JobRunner:
         source_client_factory: Callable[[StorageProfile], Any] = storage_client,
         output_client_factory: Callable[[StorageProfile], Any] = upload_client,
         ffmpeg_version: Callable[[Deadline], str] = installed_ffmpeg_version,
+        url_session_factory: Callable[[], ClosableHttpSession] = url_session,
     ) -> None:
         """`source_client_factory` makes the S3 client the source is read with and `output_client_factory`
         the one the generation is stored with, each from an access profile; `ffmpeg_version` names the
         installed ffmpeg within the execution's deadline, which it is handed, or raises WorkerFailure
-        when it cannot."""
+        when it cannot; `url_session_factory` makes the HTTP session of one 2.2.0 execution."""
         if not isinstance(job_settings, JobSettings):
             raise TypeError("job_settings must be a JobSettings")
-        if not all(callable(given) for given in (source_client_factory, output_client_factory, ffmpeg_version)):
-            raise TypeError("source_client_factory, output_client_factory and ffmpeg_version must be callable")
+        given = (source_client_factory, output_client_factory, ffmpeg_version, url_session_factory)
+        if not all(callable(factory) for factory in given):
+            raise TypeError(
+                "source_client_factory, output_client_factory, ffmpeg_version and url_session_factory must be callable"
+            )
         self._job_settings = job_settings
         self._source_client_factory = source_client_factory
         self._output_client_factory = output_client_factory
         self._ffmpeg_version = ffmpeg_version
+        self._url_session_factory = url_session_factory
 
     def run(self, claimed: ClaimedExecution, runtime: Runtime) -> SealedMessage:
         """Run the granted execution and return its sealed `transcode.result.completed` or `.failed`.
@@ -362,6 +394,7 @@ class JobRunner:
             self._source_client_factory,
             self._output_client_factory,
             self._ffmpeg_version,
+            self._url_session_factory,
         ).run()
 
 
@@ -376,9 +409,12 @@ class _Execution:
         source_client_factory: Callable[[StorageProfile], Any],
         output_client_factory: Callable[[StorageProfile], Any],
         ffmpeg_version: Callable[[Deadline], str],
+        url_session_factory: Callable[[], ClosableHttpSession],
     ) -> None:
         self._dispatch = claimed.dispatch
         self._grant = claimed.grant
+        self._runtime_id = claimed.runtime_id
+        self._url_session_factory = url_session_factory
         self._runtime = runtime
         self._job_settings = job_settings
         self._source_client_factory = source_client_factory
@@ -417,16 +453,27 @@ class _Execution:
         self._scratch_root: Path | None = None
         # The descriptor the lock on the scratch directory lives on, while the execution holds it.
         self._scratch_lock: int | None = None
+        # Of a 2.2.0 execution only, once made: its capability client, heartbeat, session and source.
+        self._by_urls = claimed.dispatch.protocol_version == CAPABILITY_PROTOCOL_VERSION
+        self._capabilities: CapabilityClient | None = None
+        self._heartbeat: Heartbeat | None = None
+        self._url_session: ClosableHttpSession | None = None
+        self._url_source: UrlRangeSource | None = None
 
     def run(self) -> SealedMessage:
         try:
             result = self._ending()
             self._grant.drop_media_key()
+            # The work is over: from here to the report, a 2.2.0 execution sends one exchange more at most (its stored
+            # result's), and waits for no retry and no heartbeat's backoff.
+            if self._capabilities is not None:
+                self._capabilities.end()
             self._store_result(result)
             return result
         finally:
             # Drop the key even when building the terminal result raised.
             self._grant.drop_media_key()
+            self._end_capabilities()
             self._close_clients()
             self._remove_scratch()
 
@@ -434,6 +481,9 @@ class _Execution:
         """Best effort before the handler reports: never replace or reseal a terminal message."""
         try:
             if self._deadline.expired():
+                return
+            if self._by_urls:
+                self._store_result_by_url(result)
                 return
             # A failed execution may have ended before either client was made. Only the output's
             # profile is needed here; failure of the source or the scratch disk must not prevent this.
@@ -454,6 +504,12 @@ class _Execution:
         # Outside the handler: even a failing log must not expose the storage error's own text.
         logger.warning("the terminal result could not be stored: %s", error_class)
 
+    def _store_result_by_url(self, result: SealedMessage) -> None:
+        """A 2.2.0 execution's stored result: nothing without a client, a session, or a stage it reached."""
+        if self._capabilities is None or self._url_session is None:
+            return
+        upload_result_by_url(self._capabilities, self._url_session, result=result, deadline=self._deadline)
+
     def _ending(self) -> SealedMessage:
         execution_id = self._grant.identity.execution_id
         bug_report: str | None = None
@@ -466,6 +522,11 @@ class _Execution:
             # where. No `exc_info`, and not the error: a traceback ends with the error's own text.
             bug_report = _stack_report(error)
             failure = Failure("internal_error", "unexpected_error", True, make_detail(type(error).__name__))
+        lost = None if self._capabilities is None else self._capabilities.lost()
+        if lost is not None:
+            # A stage the lost authority stopped (a bounded process killed, a request refused) fails with whatever
+            # it makes of that; the execution ends because its authority did.
+            failure = lost.failure
         if bug_report is not None:
             # Logged here, after the `except` block has ended: a log handler that fails on this line
             # has Python's logging print every error its failure is chained to, which inside the block
@@ -505,6 +566,8 @@ class _Execution:
         if self._wall_time_spent:
             # Before anything else: no profile is looked up, no client made, nothing read, written or reported.
             raise WorkerFailure(WALL_TIME_SPENT_BEFORE_START)
+        if self._by_urls:
+            return self._stored_generation_by_urls()
         source_access, output_access = self._storage_profiles()
         profile = self._media_profile()
         self._require_grant_key_fits()
@@ -520,10 +583,93 @@ class _Execution:
         self._upload(self._output_client, scratch, generation)
         return generation
 
+    def _stored_generation_by_urls(self) -> _Generation:
+        """Every stage of a 2.2.0 execution in order, each bounded process stopped once the authority is lost."""
+        self._start_capabilities()
+        with stopped_when(self._authority_lost):
+            profile = self._media_profile()
+            self._require_grant_key_fits()
+            encoder = self._identified_encoder(profile)
+            source = self._url_range_source()
+            plan = self._probe(DeadlineSource(source, self._deadline), profile)
+            self._capabilities_of().set_media_duration(plan.facts.duration_ms)
+            scratch = self._download(source)
+            encoded = self._transcode(scratch, plan, profile)
+            generation = self._finalize(scratch, encoded, profile, encoder)
+            self._upload_by_urls(scratch, generation)
+        return generation
+
+    def _start_capabilities(self) -> None:
+        runtime = self._runtime
+        self._capabilities = CapabilityClient(
+            dispatch=self._dispatch,
+            grant=self._grant,
+            runtime_id=self._runtime_id,
+            settings=runtime.settings,
+            transport=runtime.transport,
+            clock=runtime.clock,
+            monotonic=runtime.monotonic,
+            sleep=runtime.sleep,
+            new_message_id=runtime.new_uuid,
+            time_left=self._deadline.remaining_s,
+        )
+        self._url_session = self._url_session_factory()
+        self._heartbeat = Heartbeat(self._capabilities)
+        self._heartbeat.start()
+
+    def _capabilities_of(self) -> CapabilityClient:
+        if self._capabilities is None:
+            raise RuntimeError("the capability client of a 2.2.0 execution is made before its first stage")
+        return self._capabilities
+
+    def _authority_lost(self) -> bool:
+        return self._capabilities is not None and self._capabilities.lost() is not None
+
+    def _url_range_source(self) -> UrlRangeSource:
+        capabilities, located = self._capabilities_of(), self._dispatch.source
+        if self._url_session is None:
+            raise RuntimeError("the session of a 2.2.0 execution is made with its capability client")
+
+        def fresh_url() -> GrantedUrl:
+            answer = capabilities.ask(capabilities.stage or STAGE_PROBING, source=True)
+            if answer.source is None:
+                raise RuntimeError("an accepted answer to a source request carries the source URL")
+            return answer.source
+
+        self._url_source = UrlRangeSource(
+            self._url_session,
+            size_bytes=located.size_bytes,
+            etag=located.etag,
+            stop_line=stop_line_within(self._deadline.remaining_s),
+            monotonic=capabilities.monotonic,
+            ask_url=fresh_url,
+            require_authority=capabilities.raise_if_lost,
+        )
+        return self._url_source
+
+    def _end_capabilities(self) -> None:
+        """Stop the heartbeat (bounded) and close the session; nothing of a 2.0.0 execution."""
+        if self._heartbeat is not None:
+            self._heartbeat.stop()
+        if self._url_session is not None:
+            error_class = _close_error_class(self._url_session)
+            if error_class is not None:
+                logger.warning("the execution's HTTP session could not be closed: %s", error_class)
+
     def _enter(self, stage: str) -> None:
         self._stage = stage
         logger.info("execution %s: %s", self._grant.identity.execution_id, stage)
+        if self._by_urls:
+            self._report_stage(stage)
         self._progress.stage_started(stage)
+
+    def _report_stage(self, stage: str) -> None:
+        """A 2.2.0 stage begins with one request reporting it; `probing`'s asks for the source's read URL as well."""
+        capabilities = self._capabilities_of()
+        capabilities.raise_if_lost()
+        answer: CapabilityAnswer = capabilities.ask(stage, source=stage == STAGE_PROBING)
+        if answer.source is not None and self._url_source is not None:
+            self._url_source.use(answer.source)
 
     def _storage_profiles(self) -> tuple[StorageProfile, StorageProfile]:
         """The access profiles of the source and of the output, both resolved before either is used (README 7)."""
@@ -658,7 +804,7 @@ class _Execution:
         self._progress.renditions_planned(len(renditions))
         return plan
 
-    def _download(self, source: S3RangeSource) -> _Scratch:
+    def _download(self, source: RangeSource) -> _Scratch:
         self._enter(STAGE_DOWNLOADING)
         scratch = self._make_scratch()
         probed_bytes = self._bytes_read
@@ -835,6 +981,28 @@ class _Execution:
         upload_generation(
             client,
             bucket=self._dispatch.output.bucket,
+            prefix=self._grant.output_prefix,
+            output_root=scratch.output_root,
+            artifacts=generation.artifacts,
+            manifest=manifest,
+            deadline=self._deadline,
+            sleep=self._runtime.sleep,
+            on_bytes=uploaded,
+        )
+
+    def _upload_by_urls(self, scratch: _Scratch, generation: _Generation) -> None:
+        self._enter(STAGE_UPLOADING)
+        manifest = generation.manifest
+        generation_bytes = manifest.total_bytes + manifest.size_bytes
+        if self._url_session is None:
+            raise RuntimeError("the session of a 2.2.0 execution is made with its capability client")
+
+        def uploaded(total_bytes: int) -> None:
+            self._progress.uploaded(total_bytes, generation_bytes)
+
+        upload_generation_by_urls(
+            self._capabilities_of(),
+            self._url_session,
             prefix=self._grant.output_prefix,
             output_root=scratch.output_root,
             artifacts=generation.artifacts,
