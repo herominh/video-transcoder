@@ -27,5 +27,5 @@
   "clock_skew_seconds": 300,
   "max_segments_per_rendition": 3600,
   "storage_call_margin_seconds": 600,
-  "capability_closure_margin_seconds": 60
+  "capability_closure_margin_seconds": 120
 }

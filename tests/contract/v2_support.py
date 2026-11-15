@@ -26,8 +26,10 @@ from core.protocol.transport import HttpAnswer
 FIXTURE_NOW: Final = datetime(2030, 1, 1, tzinfo=timezone.utc)
 PROTOCOL_VERSION: Final = "2.0.0"
 ACQUIRE_PROTOCOL_VERSION: Final = "2.1.0"
-# What both RunPod endpoints set as VH_ACCEPTED_PROTOCOL_VERSIONS: every live protocol version.
-LIVE_PROTOCOL_VERSIONS: Final = "2.0.0,2.1.0"
+# Every live protocol version of this tree, 2.2.0 among them since Hub 0.11.0: what an acquire endpoint of an image of
+# this tree sets as VH_ACCEPTED_PROTOCOL_VERSIONS (its entry refuses any other list), and what an encode runtime lists
+# beside its capability configuration (CAPABILITY_ENV).
+LIVE_PROTOCOL_VERSIONS: Final = "2.0.0,2.1.0,2.2.0"
 WORKER_AUDIENCE: Final = "worker:runpod-test"
 HUB_KEY_ID: Final = "test-hub2wk-k1"
 WORKER_KEY_ID: Final = "test-wk2hub-k1"
@@ -93,6 +95,13 @@ _VALID_ENV: Final[Mapping[str, str]] = {
     "VH_STORAGE_DEFAULT_ENDPOINT": "https://storage.test.invalid",
     "VH_STORAGE_DEFAULT_ACCESS_KEY_ID": "test-access-key-id",
     "VH_STORAGE_DEFAULT_SECRET_ACCESS_KEY": "test-secret-access-key",
+}
+
+
+# What an encode runtime that lists 2.2.0 needs beside the list (README 15.4, runtime rule 3).
+CAPABILITY_ENV: Final[Mapping[str, str]] = {
+    "VH_CAPABILITIES_URL": "https://hub.test.invalid/api/transcode/v2/capabilities",
+    "VH_STORAGE_HOST": "store.test.invalid",
 }
 
 

@@ -1,8 +1,8 @@
 """Shared helpers of the protocol 2.2.0 tests: a fake Hub of the capability exchange and a fake store behind the
 shared session. Nothing here opens a connection.
 
-Not a test module. 2.2.0 is a draft, so no environment loads it: capability_settings() builds the worker's settings
-with it listed, as a test-built context may (README section 5). FakeHub stands behind the client's transport: it
+Not a test module. capability_settings() builds the worker's settings with 2.2.0 listed directly, with no
+environment (an environment with the capability variables loads the same since 2.2.0 is live: test_settings.py). FakeHub stands behind the client's transport: it
 judges every capability request with the contract's own validator under a `hub_receiver` context and the signature
 under the worker-to-Hub key, records it, and answers what the test scripts, by default a signed
 `execution.capabilities.granted` with URLs of the fake store's host, built here; every other POST (a progress
@@ -75,8 +75,8 @@ HTTP_PRECONDITION_FAILED = 412
 
 
 def capability_settings(**changes: Any) -> WorkerSettings:
-    """The worker's settings of the fixtures, accepting 2.0.0 and the 2.2.0 draft, with the capability address and the
-    storage host, and other fields replaced where given."""
+    """The worker's settings of the fixtures, accepting 2.0.0 and 2.2.0, with the capability address and the storage
+    host, and other fields replaced where given."""
     values = {
         "accepted_protocol_versions": ("2.0.0", CAPABILITY_VERSION),
         "capabilities_url": CAPABILITIES_URL,

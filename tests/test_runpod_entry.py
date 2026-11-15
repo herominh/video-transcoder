@@ -73,6 +73,7 @@ from core.protocol.settings import SettingsInvalid
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
     CALLBACK_URL,
+    CAPABILITY_ENV,
     CLAIM_URL,
     ACQUIRE_PROTOCOL_VERSION,
     ACQUIRE_REQUEST,
@@ -1058,7 +1059,7 @@ def test_build_handler_when_the_tree_and_the_configuration_are_whole_should_retu
 
 def test_build_handler_when_every_live_version_is_listed_should_return_a_handler(tmp_path):
     # Arrange
-    env = _changed(_whole_env(tmp_path), {"VH_ACCEPTED_PROTOCOL_VERSIONS": LIVE_PROTOCOL_VERSIONS})
+    env = _changed(_whole_env(tmp_path), {"VH_ACCEPTED_PROTOCOL_VERSIONS": LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV})
 
     # Act
     handler = build_handler(env)
@@ -1734,7 +1735,7 @@ def test_handler_when_the_encode_endpoint_is_sent_a_signed_acquire_request_shoul
     clock = FakeClock()
     transport = _transport(clock, _granted())
     runtime = dataclasses.replace(
-        _runtime(transport, clock), settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+        _runtime(transport, clock), settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV)
     )
     stand_in = _StandInJob()
     request = modified_fixture(ACQUIRE_REQUEST, {"/protocol_version": version})

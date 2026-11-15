@@ -49,6 +49,7 @@ from core.protocol.transport import HttpAnswer, HttpsTransport, TransportFailed
 from tests.contract.v2_support import (
     ACQUIRE_PROTOCOL_VERSION,
     CALLBACK_URL,
+    CAPABILITY_ENV,
     CLAIM_URL,
     GRANT_ENCRYPTED,
     HUB_KEY,
@@ -357,12 +358,13 @@ def _all_a_grant_holds(grant: Grant) -> types.SimpleNamespace:
     return types.SimpleNamespace(**{field.name: getattr(grant, field.name) for field in dataclasses.fields(grant)})
 
 
-def test_handle_when_a_dispatch_at_the_newer_version_meets_the_hubs_first_version_refusal_should_report_at_its_own_version():
-    # Arrange: the Hub's unsigned refusal speaks 2.0.0 whatever the dispatch's version; the worker lists both.
+def test_handle_when_a_dispatch_at_a_later_version_meets_the_hubs_first_version_refusal_should_report_at_its_own_version():
+    # Arrange: the Hub's unsigned refusal speaks 2.0.0 whatever the dispatch's version; the worker lists the three live
+    # versions.
     clock = FakeClock()
     transport = _transport(clock, CLAIM_REFUSED)
     runtime = dataclasses.replace(
-        _runtime(transport, clock), settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+        _runtime(transport, clock), settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV)
     )
     job = StandInJob()
     request = modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION})

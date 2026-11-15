@@ -29,7 +29,7 @@ from tests.job.capability_fakes import (
 
 DEADLINE_S = 3600.0
 SEGMENT_MD5 = "AAAAAAAAAAAAAAAAAAAAAA=="
-THUMBNAIL_MD5 = "BBBBBBBBBBBBBBBBBBBBBB=="
+THUMBNAIL_MD5 = "BBBBBBBBBBBBBBBBBBBBBA=="
 FINAL_CODES = (
     ("lease_expired", 403), ("stage_budget_exceeded", 403), ("capability_refused", 403),
     ("capability_conflict", 409), ("capability_limit_exceeded", 422), ("stale_capability_sequence", 409),

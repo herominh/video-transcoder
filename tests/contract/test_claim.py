@@ -34,6 +34,7 @@ from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import (
     ACQUIRE_GRANT,
     ACQUIRE_PROTOCOL_VERSION,
+    CAPABILITY_ENV,
     CELL_ID,
     CLAIM_URL,
     FIXTURE_NOW,
@@ -186,7 +187,7 @@ def _claim(
 
 def _claim_with_every_live_version_listed(dispatch_version: str, grant_version: str) -> tuple[Grant | Unclaimed, FakeTransport]:
     """What a worker that lists every live version makes of a dispatch and a validly signed grant at those versions."""
-    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV)
     clock = FakeClock()
     dispatch = accepted_dispatch(
         modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": dispatch_version}), settings=settings
@@ -434,7 +435,7 @@ NOT_A_GRANT_FOR_THIS_RUNTIME = [
 def test_claim_execution_when_an_acquire_grant_comes_at_the_dispatchs_version_should_end_invalid_at_the_kind_check(caplog):
     # Arrange: a Hub-signed acquire grant, at 2.1.0 like the encode dispatch: only its kind is wrong.
     caplog.set_level(logging.INFO, logger=claim_module.__name__)
-    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV)
     clock = FakeClock()
     dispatch = accepted_dispatch(
         modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": ACQUIRE_PROTOCOL_VERSION}), settings=settings

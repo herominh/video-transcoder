@@ -2,9 +2,10 @@
 
 Everything here comes from the worker's own configuration, never from a message:
 
-    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; both RunPod
-                                    endpoints use 2.0.0,2.1.0, an unknown or draft entry refuses the start,
-                                    and there is no default. Listing a version does not accept all its
+    VH_ACCEPTED_PROTOCOL_VERSIONS   comma list of live protocol versions versions.json defines; the images
+                                    installed today use 2.0.0,2.1.0; an image of this tree needs every live
+                                    version for acquire (2.0.0,2.1.0,2.2.0); an unknown or draft entry refuses
+                                    the start, and there is no default. Listing a version does not accept all its
                                     kinds: each RunPod entry point accepts only its own family's dispatch.
                                     Every entry point lists the first live version, which the Hub's
                                     unsigned last-resort refusal speaks; the acquire entry point also
