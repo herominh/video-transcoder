@@ -9,36 +9,39 @@ cannot carry (above 64 MiB).
 
 The artifacts go in batches of at most BATCH_MAX_OBJECTS, in the manifest's order. For a batch, each file is read
 once, its size and SHA-256 checked against the manifest and its MD5 computed (a file that changed is
-internal_error/artifact_changed_before_upload, and nothing of the batch is sent); then the batch's URLs are asked
-for (lifetime BATCH_URL_LIFETIME_S), declaring each object's path, size and MD5, which a path keeps whenever it is
-asked again (rule 4); then the objects are PUT by a pool of UPLOAD_PARALLELISM daemon threads, so never more than
-that many at once and never more bodies than that in memory. Each pool thread is a lane with an HTTP session of its
-own (core/net/transport.py), made by the caller's factory at the lane's first PUT and kept for its later ones; a lane
-makes one request at a time, each PUT on a connection of its own (its answer is closed unread, which closes its
-connection). One PUT reads the file into memory and checks it again against the declared MD5 (what is
+internal_error/artifact_changed_before_upload, and nothing of the batch is sent); then the batch's URLs are asked for
+(lifetime BATCH_URL_LIFETIME_S), declaring each object's path, size and MD5, which a path keeps whenever it is asked
+again (rule 4); then the objects are PUT by a pool of UPLOAD_PARALLELISM daemon threads, so never more than that many
+at once and never more bodies than that in memory, but a given-up PUT's body for the moment its helper thread needs to
+return after the cut (below): a lane lets go of each body as soon as its attempt ends. Each pool thread is a lane with
+an HTTP session of its own (core/net/transport.py), made by the caller's factory at the lane's first PUT and kept for
+its later ones; a lane makes one request at a time, each PUT on a connection of its own (its answer is closed unread,
+which closes its connection). One PUT reads the file into memory and checks it again against the declared MD5 (what is
 sent is what was declared), and carries `Content-MD5`, `Content-Length` and the object's content type, through its
 lane's session with a BoundedBody, a 10 s connect and the execution's deadline as its stop line. The PUT runs on a
-helper thread the pool's slot waits for no longer than the request's ceiling of core/job/storage.py
-(storage._within): its body stops at the ceiling, its socket reads are each held to it, and a PUT whose answer has
-not ended by then (one that trickles in after the body included) is given up there, counted with
-storage.abandoned_requests(), and tried again as output_write_failed/upload_stalled. A PUT given up while it still
-runs, at its ceiling or at the deadline, is closed with its lane's session: the lane cuts that session
-(RequestsSession.abandon(): every socket shut, the session refused from then on) and forgets it before anything else,
-so the request ends with a transfer error on its helper thread and no thread, body or connection of it outlives the
-cut but for the moment its thread needs to return; the lane's next PUT goes through a fresh session. A cut never
-touches another lane. A factory that raises is resource_exhausted/storage_request_start_failed (retryable), named in
-the log by the error's class alone. A 200 is success, its body never read. A 5xx, a time-out, a connection error or
-a stall is tried again after storage.py's waits (0.5, 2 and 8 s, each times a factor drawn between 0.5 and 1, a
-whole-seconds `Retry-After` honoured up to 30 s); so is any other 4xx but a 403 that storage.refusal_passes() lets
-pass: a 408, a 409 or a 429 by its status alone,
-and any other 4xx by an error code such as RequestTimeout, IncompleteBody or BadDigest, read
-from at most ERROR_BODY_MAX_BYTES of its error body (never logged; that body is read for no other answer). A 403 puts the object back to be asked again in a later batch, at most
+helper thread the pool's slot waits for no longer than the request's ceiling of core/job/storage.py (storage._within):
+its body stops at the ceiling, its socket reads are each held to it, and a PUT whose answer has not ended by then (one
+that trickles in after the body included) is given up there, counted with storage.abandoned_requests(), and tried
+again as output_write_failed/upload_stalled. A PUT given up while it still runs, at its ceiling or at the deadline, is
+closed with its lane's session: the lane cuts that session (RequestsSession.abandon(): every socket shut, the session
+refused from then on) and forgets it before anything else, so the request ends with a transfer error on its helper
+thread and no thread, body or connection of it outlives the cut but for the moment its thread needs to return; the
+lane's next PUT goes through a fresh session. A cut never touches another lane. What a cut does not end at once: a
+request still inside its TCP connect (its socket is not kept yet) ends when the connect does, within its 10 s
+time-out, and then goes no further; one still resolving its host's name, which nothing cuts short, goes no further
+once it has resolved. A factory that raises is resource_exhausted/storage_request_start_failed (retryable, its detail
+saying no session could be made), named in the log by the error's class alone. A 200 is success, its body never read.
+A 5xx, a time-out, a connection error or a stall is tried again after storage.py's waits (0.5, 2 and 8 s, each times a
+factor drawn between 0.5 and 1, a whole-seconds `Retry-After` honoured up to 30 s); so is any other 4xx but a 403 that
+storage.refusal_passes() lets pass: a 408, a 409 or a 429 by its status alone, and any other 4xx by an error code such
+as RequestTimeout, IncompleteBody or BadDigest, read from at most ERROR_BODY_MAX_BYTES of its error body (never
+logged; that body is read for no other answer). A 403 puts the object back to be asked again in a later batch, at most
 MAX_REASKS further times, then output_write_failed/upload_url_refused (retryable); a URL whose usable time (less
-URL_MARGIN_S) has passed before its PUT could start is asked again without counting, the store having refused
-nothing. An object's retry budget (the waits before its further attempts) is its own and is kept across the URLs it
-is given, so only a URL that was never used for an attempt runs out of time for free: once the budget is spent, the
-last attempt's failure is raised (upload_stalled or upload_failed, retryable), whatever the URL. A refusal whose error
-body is read for its code and could not be read whole counts as no answer. Any other answer, a redirect included, is
+URL_MARGIN_S) has passed before its PUT could start is asked again without counting, the store having refused nothing.
+An object's retry budget (the waits before its further attempts) is its own and is kept across the URLs it is given,
+so only a URL that was never used for an attempt runs out of time for free: once the budget is spent, the last
+attempt's failure is raised (upload_stalled or upload_failed, retryable), whatever the URL. A refusal whose error body
+is read for its code and could not be read whole counts as no answer. Any other answer, a redirect included, is
 output_write_failed/upload_refused, final.
 
 The first failure stops the rest: no new PUT starts, the PUTs under way are waited for (each within its ceiling or
@@ -74,7 +77,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, wait
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +154,11 @@ POOL_THREAD_PREFIX = "vh-url-upload"
 UPLOAD_URL_REFUSED = Failure(
     "output_write_failed", "upload_url_refused", True,
     "the storage refused the put URLs the Hub granted for an object, asked again each time",
+)
+# A lane's session that could not be made: the shared constant's failure, in words of its own.
+UPLOAD_SESSION_START_FAILED = replace(
+    STORAGE_REQUEST_START_FAILED,
+    detail="a storage request could not be started: no session could be made for it",
 )
 OBJECT_TOO_LARGE = Failure(
     "output_write_failed", "object_too_large", False,
@@ -373,7 +381,7 @@ class _Lanes:
             # Nothing of the error is kept but its class: its text could quote a URL.
             error_class = type(error).__name__
         logger.warning("an upload session could not be made: %s", error_class)
-        raise WorkerFailure(STORAGE_REQUEST_START_FAILED)
+        raise WorkerFailure(UPLOAD_SESSION_START_FAILED)
 
     def cut(self) -> None:
         """The calling lane's request was given up while it ran: its session is cut and forgotten, so the lane's next
@@ -475,6 +483,8 @@ class _UrlUpload:
             if self._stopped.is_set():
                 return _SKIPPED
             answer = self.put_once(item, url, data)
+            # Let go of the body now: a given-up attempt's must not live on through the wait and the next read.
+            del data
             if answer.status == HTTP_OK:
                 self._count(item.upload.size_bytes)
                 return None
@@ -508,7 +518,9 @@ class _UrlUpload:
         if timeout is None:
             raise WorkerFailure(UPLOAD_DEADLINE_EXCEEDED)
         session = self._lanes.session()
-        ended: WorkerFailure | None = None
+        # Only the failure is kept, never the error raised: its traceback holds this frame and _within's, which hold
+        # the body, and would keep it alive in a reference cycle until a collection.
+        ended: Failure | None = None
         try:
             answer = _within(
                 self._deadline,
@@ -516,15 +528,15 @@ class _UrlUpload:
                 expired=UPLOAD_DEADLINE_EXCEEDED, stalled=UPLOAD_STALLED, ceiling_s=ceiling_s,
             )
         except WorkerFailure as failed:
-            ended = failed
+            ended = failed.failure
         if ended is None:
             return answer
-        if ended.failure is UPLOAD_STALLED or ended.failure is UPLOAD_DEADLINE_EXCEEDED:
+        if ended is UPLOAD_STALLED or ended is UPLOAD_DEADLINE_EXCEEDED:
             # The request may still run on its helper thread: cutting the lane's session ends it, its connection and
             # its body with it, and the lane's next PUT gets a fresh session.
             self._lanes.cut()
-        if ended.failure is not UPLOAD_STALLED:
-            raise ended
+        if ended is not UPLOAD_STALLED:
+            raise WorkerFailure(ended)
         return _Answer(None, stalled=True)
 
     def _exchange(

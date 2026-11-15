@@ -12,9 +12,9 @@ import hashlib
 import logging
 import select
 import socketserver
+import sys
 import threading
 import time
-import weakref
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -672,10 +672,12 @@ def test_upload_when_its_session_factory_raises_should_fail_retryable_as_a_reque
             output_root=setup.generation.output_root, artifacts=setup.generation.artifacts,
             manifest=setup.generation.manifest, deadline=Deadline.after_ms(60_000), sleep=setup.waits,
         ))
-    # Assert: the error is neither the failure's cause nor its context, and no line quotes it.
+    # Assert: the failure says no session could be made, the error is neither its cause nor its context, and no line
+    # quotes it.
     failure = raised.failure
     assert (failure.error_class, failure.code, failure.retryable) == (
         "resource_exhausted", "storage_request_start_failed", True)
+    assert failure.detail == "a storage request could not be started: no session could be made for it"
     assert raised.__cause__ is None and raised.__context__ is None
     assert "X-Amz-Signature" not in caplog.text and "store.test.invalid" not in caplog.text
     assert setup.store.puts == []
@@ -734,14 +736,11 @@ class _Lane(RequestsSession):
         self._store = store
         self.cut_at: float | None = None
         self.puts: list[tuple[str, threading.Thread, float]] = []
-        # A weak reference to the body each PUT was handed (the BoundedBody over its bytes), by the object's path.
-        self.bodies: list[tuple[str, weakref.ref[Any]]] = []
 
     def put(self, url: str, data: Any, headers: Mapping[str, str], timeout: tuple[float, float], *,
             stop_line: StopLine) -> HttpResponse:
         path = urlsplit(url).path
         self.puts.append((path.removeprefix(self._store.prefix_path), threading.current_thread(), time.monotonic()))
-        self.bodies.append((path.removeprefix(self._store.prefix_path), weakref.ref(data)))
         return super().put(self._store.base + path, data, headers, timeout, stop_line=stop_line)
 
     def abandon(self) -> None:
@@ -897,28 +896,57 @@ def _ended(thread: threading.Thread) -> bool:
 def test_upload_when_a_put_is_given_up_at_its_ceiling_should_close_its_connection_end_its_thread_and_retry_anew(
     tmp_path, monkeypatch
 ):
-    # Arrange: the thumbnail's first answer never completes; a PUT of the thumbnail may take 0.3 s.
+    # Arrange: the thumbnail's first answer never completes; a PUT of the thumbnail may take 0.3 s. The bytes each
+    # PUT of the thumbnail is read into are noted (the list's reference is the only one the test keeps), and the
+    # first one's reference count is taken while the retry reads the file again, once the given-up PUT's thread has
+    # ended. The cyclic collector is off, so that a reference cycle keeping the body would show.
     setup = _Setup(tmp_path, segments=0)
     _short_ceiling_for(setup, monkeypatch, "thumbnail.jpg")
     before = storage_module.abandoned_requests()
-    with _loopback_store(setup) as store:
-        store.plan["thumbnail.jpg"] = [_Trickle()]
-        # Act
-        uploaded = _upload_to(store, setup, parallelism=1)
-        first, again = store.arrivals_of("thumbnail.jpg")
-        closed = first.connection.closed.wait(CUT_SEEN_WITHIN_S)
-        given_up_lane = store.lane_of("thumbnail.jpg")
-        thread_ended = _ended(store.put_thread_of("thumbnail.jpg"))
-        lanes = list(store.lanes)
-        given_up_body = next(body for path, body in given_up_lane.bodies if path == "thumbnail.jpg")
-        gc.collect()
-    # Assert: the given-up PUT's connection was closed by the client, its thread ended and nothing keeps its body; the
-    # lane was cut before the object's next attempt, which came on a new connection of a fresh session and was stored.
+    read_bodies: list[bytes] = []
+    counted_at_retry: list[int] = []
+    alone = [bytes(bytearray(len(b"the thumbnail")))]
+    held_by_a_list_alone = sys.getrefcount(alone[0])
+    bytes_of = url_upload._bytes_of
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        with _loopback_store(setup) as store:
+            def noting_bytes_of(item):
+                if item.upload.relative_path == "thumbnail.jpg" and read_bodies:
+                    wait_until(lambda: not store.put_thread_of("thumbnail.jpg").is_alive(), within_s=CUT_SEEN_WITHIN_S)
+                    counted_at_retry.append(sys.getrefcount(read_bodies[0]))
+                data = bytes_of(item)
+                if item.upload.relative_path == "thumbnail.jpg":
+                    read_bodies.append(data)
+                return data
+
+            monkeypatch.setattr(url_upload, "_bytes_of", noting_bytes_of)
+            store.plan["thumbnail.jpg"] = [_Trickle()]
+            # Act
+            uploaded = _upload_to(store, setup, parallelism=1)
+            first, _ = store.arrivals_of("thumbnail.jpg")
+            closed = first.connection.closed.wait(CUT_SEEN_WITHIN_S)
+            given_up_lane = store.lane_of("thumbnail.jpg")
+            thread_ended = _ended(store.put_thread_of("thumbnail.jpg"))
+            lanes = list(store.lanes)
+            counted_after = sys.getrefcount(read_bodies[0])
+            holders = [
+                type(holder).__name__ for holder in gc.get_referrers(read_bodies[0]) if holder is not read_bodies
+            ]
+    finally:
+        if collecting:
+            gc.enable()
+    # Assert: the given-up PUT's connection was closed by the client and its thread ended, and nothing but the test's
+    # list holds its body once the upload returned, nor while the retry read the file; the lane was cut before the
+    # object's next attempt, which went through a fresh session and was stored.
     assert uploaded == setup.generation.manifest.total_bytes + len(MANIFEST_BYTES)
     assert closed and thread_ended
-    assert given_up_body() is None
-    assert again.connection is not first.connection
+    assert len(read_bodies) == 2 and read_bodies[0] is not read_bodies[1]
+    assert counted_after == held_by_a_list_alone, holders
+    assert counted_at_retry == [held_by_a_list_alone]
     assert len(lanes) == 2 and lanes[0] is given_up_lane
+    assert [path for path, _, _ in given_up_lane.puts] == ["thumbnail.jpg"]
     retried_at = next(at for path, _, at in lanes[1].puts if path == "thumbnail.jpg")
     assert given_up_lane.cut_at is not None and given_up_lane.cut_at < retried_at
     assert store.answered.count("thumbnail.jpg") == 1
@@ -958,6 +986,8 @@ def test_upload_when_one_lanes_put_is_cut_should_let_another_lanes_put_in_flight
     assert playlist.connection is not thumbnail_first.connection
     assert playlist_lane is not thumbnail_lane
     assert thumbnail_lane.cut_at is not None and playlist_lane.cut_at is None
+    playlist_began_at = next(at for path, _, at in playlist_lane.puts if path == "v360/playlist.m3u8")
+    assert playlist_began_at < thumbnail_lane.cut_at
     assert store.answered.count("v360/playlist.m3u8") == 1
     assert len(store.arrivals_of("thumbnail.jpg")) == 2
 

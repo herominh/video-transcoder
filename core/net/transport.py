@@ -32,7 +32,9 @@ library bounds and which has no socket to shut; it ends where the latch is read 
 session go: the encode's 2.2.0 upload (core/job/url_upload.py) gives each of its lanes a session of its own, which
 makes one request at a time, and cuts that session when it gives up the lane's PUT at its ceiling
 or at the deadline, so that no thread, body or connection of a given-up PUT outlives the cut but for the moment its
-thread needs to return. The acquire never calls it.
+thread needs to return. A connect under way when the session is cut (its socket not kept yet) ends at its own time-out
+or when it connects, and goes no further; a name resolution is not cut short, as for the watchdog. The acquire never
+calls it.
 
 A transfer that fails (no connection, a reset, a time-out, an answer cut short, a socket shut at the stop line)
 raises an OSError: requests' own errors are OSErrors (RequestException derives from IOError). Their text names the
@@ -367,7 +369,9 @@ class RequestsSession:
         flight on it then ends with a transfer error on its own thread, and every later request on it is refused as
         an expired session refuses one (DeadlineReached). It never raises: a session cut or closed already is cut
         again, harmlessly, and an error of the requests session's close is dropped (its sockets are shut already, and
-        its text could quote a URL)."""
+        its text could quote a URL). What it does not end at once: a request still inside its TCP connect, whose
+        socket is not kept yet, ends when the connect does (within its connect time-out) and then goes no further,
+        and one still resolving its host's name, which nothing cuts short, goes no further once it has resolved."""
         self._sockets.expire()
         self._let_watchdog_go()
         try:
