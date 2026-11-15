@@ -19,11 +19,21 @@ Everything here comes from the worker's own configuration, never from a message:
     VH_CLAIM_URL, VH_CALLBACK_URL   absolute https URLs without userinfo or fragment (README 15.1, rule 2)
     VH_CLOCK_SKEW_S                 an integer within the trusted context's clock_skew_s bounds;
                                     default limits.json clock_skew_seconds
+    VH_CAPABILITIES_URL             (encode) the Hub's capability address: an absolute https URL without
+                                    userinfo or fragment, as the claim URL (README 15.4, runtime rule 3)
+    VH_STORAGE_HOST                 (encode) the bare lowercase DNS hostname every capability URL must name
+                                    (README 8.5, K5), as VH_ACQUIRE_STORAGE_HOST
     VH_STORAGE_PROFILES             comma list of credential_ref names; for each, with NAME the ref in
                                     upper case and `-` as `_`: VH_STORAGE_<NAME>_ENDPOINT (https URL),
                                     VH_STORAGE_<NAME>_REGION (one host label, not digits only; default
                                     `auto`), VH_STORAGE_<NAME>_ACCESS_KEY_ID and
                                     VH_STORAGE_<NAME>_SECRET_ACCESS_KEY
+
+For the encode entry: where VH_ACCEPTED_PROTOCOL_VERSIONS lists 2.2.0, the protocol of the capability exchange,
+VH_CAPABILITIES_URL and VH_STORAGE_HOST are required and VH_STORAGE_PROFILES is optional (a 2.2.0 runtime reaches
+both locations through capability URLs alone; a 2.0.0 dispatch whose profile is missing still ends
+configuration_error/unknown_credential_ref). Where it does not, VH_STORAGE_PROFILES is required, and the two are read
+and checked only when they are set.
 
 A key id is the contract `key_id`, a key at least 32 bytes in lowercase hex. Every value is printable
 ASCII without a leading or trailing space. A refusal (SettingsInvalid) names the variable and the rule,
@@ -43,7 +53,7 @@ from typing import Any, Mapping
 from urllib.parse import SplitResult, urlsplit
 
 from . import schema
-from .registry import VersionChannel, VersionLine, load_registry
+from .registry import REQUIRED_PROTOCOL_VERSION, MessageKind, VersionChannel, VersionLine, load_registry
 
 VERSIONS_VARIABLE = "VH_ACCEPTED_PROTOCOL_VERSIONS"
 AUDIENCE_VARIABLE = "VH_WORKER_AUDIENCE"
@@ -53,6 +63,8 @@ WORKER_KEY_VARIABLE = "VH_WORKER_TO_HUB_KEY"
 CLAIM_URL_VARIABLE = "VH_CLAIM_URL"
 CALLBACK_URL_VARIABLE = "VH_CALLBACK_URL"
 CLOCK_SKEW_VARIABLE = "VH_CLOCK_SKEW_S"
+CAPABILITIES_URL_VARIABLE = "VH_CAPABILITIES_URL"
+STORAGE_HOST_VARIABLE = "VH_STORAGE_HOST"
 ACQUIRE_GOOGLE_KEY_VARIABLE = "VH_GOOGLE_DRIVE_API_KEY"
 ACQUIRE_STORAGE_HOST_VARIABLE = "VH_ACQUIRE_STORAGE_HOST"
 STORAGE_PROFILES_VARIABLE = "VH_STORAGE_PROFILES"
@@ -61,6 +73,9 @@ STORAGE_ENDPOINT_SUFFIX = "_ENDPOINT"
 STORAGE_REGION_SUFFIX = "_REGION"
 STORAGE_ACCESS_KEY_ID_SUFFIX = "_ACCESS_KEY_ID"
 STORAGE_SECRET_ACCESS_KEY_SUFFIX = "_SECRET_ACCESS_KEY"
+
+# The protocol of the capability exchange (README 15.4): a runtime of it holds no storage credential.
+CAPABILITY_PROTOCOL_VERSION = REQUIRED_PROTOCOL_VERSION[MessageKind.EXECUTION_CAPABILITIES_REQUEST.value]
 
 LIST_SEPARATOR = ","
 KEY_SEPARATOR = "="
@@ -84,6 +99,7 @@ _DNS_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _REGION = re.compile(r"(?![0-9]+\Z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 # A host whose last label is a number is an IPv4 address to an HTTP client, whatever form it takes.
 _NUMERIC_LABEL = re.compile(r"[0-9]+|0[xX][0-9A-Fa-f]*")
+_DNS_HOSTNAME = re.compile(r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*")
 _LOWERCASE_HEX_PAIRS = re.compile(r"(?:[0-9a-f]{2})+")
 _DECIMAL_INTEGER = re.compile(r"0|[1-9][0-9]*")
 _COMMON_DEFINITIONS = schema.SCHEMA_BASE_URI + "schemas/common.schema.json#/$defs/"
@@ -166,9 +182,12 @@ class ProtocolSettings:
 
 @dataclass(frozen=True)
 class WorkerSettings(ProtocolSettings):
-    """Encode configuration additionally requires the named storage profiles."""
+    """Encode configuration: the named storage profiles (2.0.0) and the capability address and storage host
+    (2.2.0); either side may be absent where the accepted versions do not need it (the module's docstring)."""
 
     storage_profiles: Mapping[str, StorageProfile]
+    capabilities_url: str | None = field(repr=False)
+    storage_host: str | None = field(repr=False)
 
     def storage_profile(self, credential_ref: str) -> StorageProfile:
         """The profile a dispatch's credential_ref names; UnknownCredentialRef when this worker holds none."""
@@ -184,7 +203,22 @@ class WorkerSettings(ProtocolSettings):
         if first_live not in common.accepted_protocol_versions:
             # Every endpoint lists it: the Hub's unsigned last-resort refusal speaks the first live version.
             raise SettingsInvalid(VERSIONS_VARIABLE, "must list the first live protocol version, which the Hub's unsigned refusal speaks")
-        return cls(**vars(common), storage_profiles=MappingProxyType(_storage_profiles(env)))
+        capability = CAPABILITY_PROTOCOL_VERSION in common.accepted_protocol_versions
+        capabilities_url = (
+            _https_url(CAPABILITIES_URL_VARIABLE, _text(env, CAPABILITIES_URL_VARIABLE))
+            if capability or CAPABILITIES_URL_VARIABLE in env else None
+        )
+        storage_host = (
+            _storage_host(STORAGE_HOST_VARIABLE, _text(env, STORAGE_HOST_VARIABLE))
+            if capability or STORAGE_HOST_VARIABLE in env else None
+        )
+        profiles = _storage_profiles(env) if not capability or STORAGE_PROFILES_VARIABLE in env else {}
+        return cls(
+            **vars(common),
+            storage_profiles=MappingProxyType(profiles),
+            capabilities_url=capabilities_url,
+            storage_host=storage_host,
+        )
 
 
 @dataclass(frozen=True)
@@ -207,12 +241,13 @@ class AcquireSettings(ProtocolSettings):
         if re.fullmatch(r"[\x21-\x7e]+", key) is None:
             raise SettingsInvalid(ACQUIRE_GOOGLE_KEY_VARIABLE, "must hold non-space printable ASCII only")
         host = _text(env, ACQUIRE_STORAGE_HOST_VARIABLE)
-        return cls(**vars(common), google_api_key=key, storage_host=_acquire_host(host))
+        return cls(**vars(common), google_api_key=key, storage_host=_storage_host(ACQUIRE_STORAGE_HOST_VARIABLE, host))
 
 
-def _acquire_host(host: str) -> str:
-    if not re.fullmatch(r"(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*", host):
-        raise SettingsInvalid(ACQUIRE_STORAGE_HOST_VARIABLE, "must be a lowercase DNS hostname")
+def _storage_host(variable: str, host: str) -> str:
+    """A bare lowercase DNS hostname: labels of letters, digits and inner hyphens; no scheme, port or trailing dot."""
+    if _DNS_HOSTNAME.fullmatch(host) is None:
+        raise SettingsInvalid(variable, "must be a lowercase DNS hostname")
     return host
 
 
