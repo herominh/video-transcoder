@@ -781,3 +781,58 @@ def test_bounded_body_when_the_stop_line_passes_after_its_last_block_should_stil
 
     # Assert
     assert (first, end) == (b"0123", b"")
+
+
+# --- the session several requests share at once (the encode's protocol 2.2.0 upload) --------------------------------
+
+CONCURRENT_PUTS = 12
+
+
+def test_session_when_asked_for_a_number_of_connections_should_keep_that_many_per_host():
+    # Arrange
+    made = RequestsSession(connections=CONCURRENT_PUTS + 4)
+    try:
+        # Act
+        adapter = made._session.get_adapter("https://store.test.invalid/")
+        # Assert
+        assert adapter._pool_maxsize == CONCURRENT_PUTS + 4
+    finally:
+        made.close()
+
+
+@pytest.mark.parametrize("connections", [0, -1, True, 2.5, "12"])
+def test_session_when_the_number_of_connections_is_no_positive_integer_should_refuse_it(connections):
+    # Act / Assert
+    with pytest.raises(ValueError):
+        RequestsSession(connections=connections)
+
+
+def test_watchdog_when_many_puts_are_held_at_once_should_end_every_one_at_the_stop_line(tls, server_tls):
+    # Arrange: twelve PUTs at once on one session, each answer held by the server, all under one stop line.
+    session = RequestsSession(ca_bundle=str(tls.certificate), connections=CONCURRENT_PUTS)
+    stop_line = _near_stop_line()
+    outcomes: list[tuple[bool, float]] = []
+    lock = threading.Lock()
+
+    def put(base: str) -> None:
+        outcome = _ended_with_a_transfer_error(
+            lambda: session.put(base + "/hold", BoundedBody(PAYLOAD, _far_stop_line()),
+                                {"Content-Length": str(len(PAYLOAD))}, LONG_TIMEOUT, stop_line=stop_line)
+        )
+        with lock:
+            outcomes.append(outcome)
+
+    try:
+        with _loopback_server(tls=server_tls) as (base, _):
+            # Act
+            threads = [threading.Thread(target=put, args=(base,), daemon=True) for _ in range(CONCURRENT_PUTS)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(STOP_LINE_S + ENDED_WITHIN_S + 5)
+    finally:
+        session.close()
+    # Assert: every PUT, whether its server thread took it (the listen backlog may hold a connect) or not, ended at
+    # the stop line as a transfer error.
+    assert len(outcomes) == CONCURRENT_PUTS
+    assert all(failed and elapsed < ENDED_WITHIN_S for failed, elapsed in outcomes)

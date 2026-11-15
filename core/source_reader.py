@@ -38,7 +38,7 @@ REDIRECT_CONTEXT_KEY = "s3_redirect"
 REDIRECTED_KEY = "redirected"
 
 HTTP_PARTIAL_CONTENT = 206
-HTTP_FIRST_ERROR = 400
+HTTP_FIRST_REDIRECT = 300
 HTTP_FORBIDDEN = 403
 HTTP_NOT_FOUND = 404
 HTTP_PRECONDITION_FAILED = 412
@@ -424,14 +424,18 @@ class UrlRangeSource:
     """Range reads of one recorded object through the presigned GET URL the Hub grants (protocol 2.2.0), with the
     checks and the failures of S3RangeSource: exact byte ranges, each conditional on the recorded ETag; only a 206
     whose ETag, Content-Range and Content-Length are exactly the recorded object's and the asked range's, whose body
-    is in no content coding and holds exactly the range, is a read; a 200, another range, a redirect (none is
-    followed) or any other shape fails closed; a 412 is source_changed.
+    is in no content coding and holds exactly the range, is a read; a 200, another range or any other shape fails
+    closed; a redirect (none is followed) is the retryable storage_error S3RangeSource makes of one; a 412 is
+    source_changed.
 
     Every read goes through the shared session (core/net/transport.py) with the S3 reader's time-outs, held to the
     execution's deadline as its stop line. The URL comes from `ask_url` when the reader has none, or the one it has
     is past its usable time; a read the storage refuses with a 403 asks once more for a fresh URL (another read
     that refreshed it meanwhile gives its newer URL instead), and a second refusal in one read is
-    source_unavailable/source_url_refused, retryable. Thread-safe: the preflight reads from several threads.
+    source_unavailable/source_url_refused, retryable. `require_authority` is called before every read and before a
+    fresh URL is asked after a refusal: it raises the failure that ended the execution's authority, if one did, so
+    that no read is made once the authority is lost (that failure is not retryable, so a download ends at once).
+    Thread-safe: the preflight reads from several threads.
 
     Nothing of a URL, an answer's headers or its body goes into a failure or a log line; a typed failure is raised
     once the handler that caught the session's error has ended (that error quotes the whole URL).
@@ -446,19 +450,21 @@ class UrlRangeSource:
         stop_line: StopLine,
         monotonic: Callable[[], float],
         ask_url: Callable[[], SignedUrl],
+        require_authority: Callable[[], None],
     ) -> None:
         if isinstance(size_bytes, bool) or not isinstance(size_bytes, int) or size_bytes < 1:
             raise ValueError("size_bytes must be a positive integer")
         if not etag or '"' in etag:
             raise ValueError("etag must be the unquoted recorded ETag")
-        if not callable(ask_url) or not callable(monotonic):
-            raise TypeError("ask_url and monotonic must be callable")
+        if not callable(ask_url) or not callable(monotonic) or not callable(require_authority):
+            raise TypeError("ask_url, monotonic and require_authority must be callable")
         self._session = session
         self._size_bytes = size_bytes
         self._etag = etag
         self._stop_line = stop_line
         self._monotonic = monotonic
         self._ask_url = ask_url
+        self._require_authority = require_authority
         self._lock = threading.Lock()
         self._url: SignedUrl | None = None
 
@@ -473,9 +479,11 @@ class UrlRangeSource:
 
     def read(self, start: int, length: int) -> bytes:
         _check_range(start, length, self._size_bytes)
+        self._require_authority()
         url, refreshed = self._usable_url()
         data = self._read_once(url, start, length)
         if isinstance(data, _Refused) and not refreshed:
+            self._require_authority()
             data = self._read_once(self._fresh_url(replacing=url), start, length)
         if isinstance(data, _Refused):
             raise WorkerFailure(SOURCE_URL_REFUSED)
@@ -575,10 +583,11 @@ def _status_outcome(status: int) -> _Refused:
         )
     if status == HTTP_NOT_FOUND:
         raise _failure("source_unavailable", "source_missing", "the source object does not exist")
-    if status < HTTP_FIRST_ERROR:
+    if status < HTTP_FIRST_REDIRECT:
         raise _failure(
             "source_unavailable", "range_not_honoured", f"the storage answered a range read with status {status}",
         )
+    # A redirect (none is followed) is typed as S3RangeSource types one: a storage error worth another read.
     raise _failure("source_unavailable", "storage_error", f"the storage answered status {status}", retryable=True)
 
 

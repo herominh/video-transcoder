@@ -4,10 +4,12 @@ reader's do. The store and the Hub are fakes; no network."""
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from core.failure import WorkerFailure
-from core.net.clock import stop_line_within
+from core.net.clock import DeadlineReached, stop_line_within
 from core.protocol.capabilities_client import CapabilityClient
 from core.source_reader import UrlRangeSource
 from tests.contract.v2_support import FakeClock, uuid_source
@@ -19,6 +21,7 @@ from tests.job.capability_fakes import (
     FakeStore,
     capability_claimed,
     capability_settings,
+    hub_error,
 )
 
 SOURCE = bytes(range(256)) * 16
@@ -37,7 +40,7 @@ class _Setup:
         )
         self.source = UrlRangeSource(
             self.store, size_bytes=len(SOURCE), etag=SOURCE_ETAG, stop_line=stop_line_within(lambda: 3600.0),
-            monotonic=self.clock.monotonic, ask_url=self._ask,
+            monotonic=self.clock.monotonic, ask_url=self._ask, require_authority=self.client.raise_if_lost,
         )
 
     def _ask(self):
@@ -145,12 +148,10 @@ def test_read_when_the_object_changed_should_fail_as_source_changed():
                         "Content-Length": "10", "Content-Encoding": "gzip"}, SOURCE[:10]), "range_not_honoured"),
     (FakeResponse(206, {"ETag": f'"{SOURCE_ETAG}"', "Content-Range": f"bytes 0-9/{len(SOURCE)}",
                         "Content-Length": "10"}, SOURCE[:20]), "range_not_honoured"),
-    (FakeResponse(307, {"Location": "https://elsewhere.test.invalid/x"}), "range_not_honoured"),
     (FakeResponse(412), "source_changed"),
     (FakeResponse(404), "source_missing"),
     (FakeResponse(416), "source_size_mismatch"),
-], ids=["a-200", "a-wider-range", "another-size", "another-etag", "a-content-coding", "a-longer-body",
-        "a-redirect", "a-412", "a-404", "a-416"])
+], ids=["a-200", "a-wider-range", "another-size", "another-etag", "a-content-coding", "a-longer-body", "a-412", "a-404", "a-416"])
 def test_read_when_the_answer_is_not_the_asked_range_should_fail_closed(answer, code):
     # Arrange
     setup = _Setup()
@@ -163,10 +164,12 @@ def test_read_when_the_answer_is_not_the_asked_range_should_fail_closed(answer, 
     assert answer.closed
 
 
-def test_read_when_the_store_fails_for_now_should_fail_retryable_as_the_s3_reader_does():
+@pytest.mark.parametrize("answer", [FakeResponse(503), FakeResponse(307, {"Location": "https://elsewhere.test.invalid/x"})],
+                         ids=["a-503", "a-redirect"])
+def test_read_when_the_store_fails_for_now_or_redirects_should_fail_retryable_as_the_s3_reader_does(answer):
     # Arrange
     setup = _Setup()
-    setup.store.get_answers.append(FakeResponse(503))
+    setup.store.get_answers.append(answer)
     # Act
     failure = _failure(lambda: setup.source.read(0, 10)).failure
     # Assert
@@ -178,10 +181,99 @@ def test_read_when_the_stop_line_has_passed_should_send_nothing():
     setup = _Setup()
     passed = UrlRangeSource(
         setup.store, size_bytes=len(SOURCE), etag=SOURCE_ETAG, stop_line=stop_line_within(lambda: 0.0),
-        monotonic=setup.clock.monotonic, ask_url=setup._ask,
+        monotonic=setup.clock.monotonic, ask_url=setup._ask, require_authority=setup.client.raise_if_lost,
     )
     # Act
     failure = _failure(lambda: passed.read(0, 10)).failure
     # Assert
     assert (failure.error_class, failure.code) == ("deadline_exceeded", "source_read_deadline_exceeded")
     assert setup.store.gets == []
+
+
+# --- the round-1 review's cases ------------------------------------------------------------------------------
+
+
+def _range_answer(body: bytes, *, length: str | None = "10") -> FakeResponse:
+    headers = {"ETag": f'"{SOURCE_ETAG}"', "Content-Range": f"bytes 0-9/{len(SOURCE)}"}
+    if length is not None:
+        headers["Content-Length"] = length
+    return FakeResponse(206, headers, body)
+
+
+def test_read_when_the_body_is_shorter_than_its_range_should_fail_retryable_as_short_read():
+    # Arrange
+    setup = _Setup()
+    setup.store.get_answers.append(_range_answer(SOURCE[:5]))
+    # Act
+    failure = _failure(lambda: setup.source.read(0, 10)).failure
+    # Assert
+    assert (failure.code, failure.retryable) == ("short_read", True)
+
+
+def test_read_when_the_answer_has_no_content_length_should_fail_closed():
+    # Arrange
+    setup = _Setup()
+    setup.store.get_answers.append(_range_answer(SOURCE[:10], length=None))
+    # Act
+    failure = _failure(lambda: setup.source.read(0, 10)).failure
+    # Assert
+    assert (failure.code, failure.retryable) == ("range_not_honoured", False)
+
+
+def test_read_when_the_session_gets_no_answer_should_fail_retryable_as_storage_unreachable():
+    # Arrange
+    setup = _Setup()
+    setup.store.get_answers.append(ConnectionError("https://store.test.invalid/the-whole-url?X-Amz-Signature=0"))
+    # Act
+    failure = _failure(lambda: setup.source.read(0, 10))
+    # Assert
+    assert (failure.failure.code, failure.failure.retryable) == ("storage_unreachable", True)
+    assert "X-Amz" not in str(failure) and failure.__cause__ is None and failure.__context__ is None
+
+
+def test_read_when_the_session_stops_at_the_stop_line_should_fail_as_the_reads_deadline():
+    # Arrange
+    setup = _Setup()
+    setup.store.get_answers.append(DeadlineReached())
+    # Act
+    failure = _failure(lambda: setup.source.read(0, 10)).failure
+    # Assert
+    assert (failure.error_class, failure.code) == ("deadline_exceeded", "source_read_deadline_exceeded")
+
+
+def test_read_when_two_reads_meet_one_refusal_should_ask_for_one_fresh_url_only():
+    # Arrange: both reads hold the same URL, and the store refuses each of them once, together.
+    setup = _Setup()
+    setup.source.use(setup.client.ask("probing", source=True).source)
+    both_arrived = threading.Barrier(2, timeout=5)
+
+    def refused_when_both_arrived() -> FakeResponse:
+        both_arrived.wait()
+        return FakeResponse(403)
+
+    setup.store.get_answers.extend([refused_when_both_arrived, refused_when_both_arrived])
+    results: list[bytes] = []
+    readers = [threading.Thread(target=lambda start=start: results.append(setup.source.read(start, 10)))
+               for start in (0, 10)]
+    # Act
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join(5)
+    # Assert
+    assert sorted(results) == sorted([SOURCE[0:10], SOURCE[10:20]])
+    assert setup.source_asks() == 2
+
+
+def test_read_when_the_authority_is_lost_should_send_nothing():
+    # Arrange
+    setup = _Setup()
+    setup.source.read(0, 10)
+    setup.hub.script.append(hub_error(403, "capability_refused", retryable=False))
+    _failure(setup.client.heartbeat)
+    gets = len(setup.store.gets)
+    # Act
+    failure = _failure(lambda: setup.source.read(10, 10)).failure
+    # Assert
+    assert (failure.error_class, failure.code, failure.retryable) == ("authority_refused", "capability_refused", False)
+    assert len(setup.store.gets) == gets

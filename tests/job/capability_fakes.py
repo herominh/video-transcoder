@@ -142,6 +142,8 @@ class FakeHub:
         self.clock = clock
         self.lease_s = lease_s
         self.script: deque[Any] = deque()
+        # What answers the requests that ask for `result.json` alone, when set (the default answer otherwise).
+        self.result_answer: Any = None
         self.requests: list[dict[str, Any]] = []
         self.sent_at_monotonic: list[float] = []
         self.issued: dict[str, Issued] = {}
@@ -163,7 +165,11 @@ class FakeHub:
             self.timeouts.append(timeout_s)
             self.sent_at_monotonic.append(self.clock.monotonic())
             request = self._judged(body, signature)
-            scripted = self.script.popleft() if self.script else "grant"
+            asks_result = [o["path"] for o in (request["put"] or {}).get("objects", ())] == ["result.json"]
+            if asks_result and self.result_answer is not None:
+                scripted = self.result_answer
+            else:
+                scripted = self.script.popleft() if self.script else "grant"
         if isinstance(scripted, Exception):
             raise type(scripted)(*scripted.args)
         if isinstance(scripted, HttpAnswer):
@@ -288,18 +294,20 @@ class StoredPut:
     """One PUT the store received: the object's path under the prefix, its headers, and what came of it."""
 
     path: str
-    headers: dict[str, str]
-    length: int
-    md5: str | None
-    status: int
-    timeout: tuple[float, float]
-    stop_line: StopLine = field(repr=False)
+    url: str = field(repr=False)
+    headers: dict[str, str] = field(default_factory=dict)
+    length: int = 0
+    md5: str | None = None
+    status: int = 0
+    timeout: tuple[float, float] = (0.0, 0.0)
+    stop_line: StopLine | None = field(default=None, repr=False)
 
 
 class FakeStore:
     """The store behind the shared session (get and put). `source` is the source object's bytes. `put_answers` maps a
     path under the output prefix to what its next PUTs get (a status, an exception raised, or a callable run before
-    the default answer); `get_answers` lists what the next GETs get. `hold_until_active`, when set, holds each PUT
+    the default answer); `get_answers` lists what the next GETs get. A put answer may also be a FakeResponse (its status and body are the store's). `hold_until_active`, when set, holds
+    each PUT
     until that many are under way at once or `hold_s` passed, so that a test sees how many can run together."""
 
     def __init__(self, hub: FakeHub, source: bytes = b"", *, etag: str = SOURCE_ETAG) -> None:
@@ -309,6 +317,8 @@ class FakeStore:
         self.objects: dict[str, bytes] = {}
         self.stored_order: list[str] = []
         self.puts: list[StoredPut] = []
+        # The path of every PUT as it arrived, before anything of it was answered.
+        self.puts_started: list[str] = []
         self.gets: list[dict[str, Any]] = []
         self.put_answers: dict[str, list[Any]] = {}
         self.get_answers: list[Any] = []
@@ -336,6 +346,8 @@ class FakeStore:
         self.gets.append({"url": url, "headers": dict(headers), "timeout": timeout})
         if self.get_answers:
             scripted = self.get_answers.pop(0)
+            if callable(scripted) and not isinstance(scripted, FakeResponse):
+                scripted = scripted()
             if isinstance(scripted, BaseException):
                 raise scripted
             if isinstance(scripted, FakeResponse):
@@ -360,6 +372,7 @@ class FakeStore:
             stop_line: StopLine) -> FakeResponse:
         path = urlsplit(url).path.removeprefix(f"/{OUTPUT_BUCKET}/{self.prefix}/")
         with self._lock:
+            self.puts_started.append(path)
             self._active += 1
             self.peak = max(self.peak, self._active)
             self._lock.notify_all()
@@ -373,11 +386,14 @@ class FakeStore:
 
     def _put(self, url: str, path: str, data: Any, headers: Mapping[str, str], timeout: tuple[float, float],
              stop_line: StopLine) -> FakeResponse:
+        # The store judges a URL when the request arrives, as a store checks a signature's expiry.
+        issued = self._issued(url, "PUT")
         scripted_list = self.put_answers.get(path, [])
         scripted = scripted_list.pop(0) if scripted_list else None
         if isinstance(scripted, BaseException):
             raise scripted
-        if callable(scripted):
+        if callable(scripted) and not isinstance(scripted, FakeResponse):
+            # A callable is run before the default answer; what it returns is not an answer.
             scripted()
             scripted = None
         body = bytearray()
@@ -387,16 +403,19 @@ class FakeStore:
                 break
             body += block
         md5 = md5_of(bytes(body))
-        status = scripted if isinstance(scripted, int) else self._status_of(url, headers, md5, len(body))
-        self.puts.append(StoredPut(path, dict(headers), len(body), md5, status, timeout, stop_line))
+        answer = scripted if isinstance(scripted, FakeResponse) else None
+        if answer is not None:
+            status = answer.status_code
+        else:
+            status = scripted if isinstance(scripted, int) else self._status_of(issued, headers, md5, len(body))
+        self.puts.append(StoredPut(path, url, dict(headers), len(body), md5, status, timeout, stop_line))
         if status == HTTP_OK:
             with self._lock:
                 self.objects[path] = bytes(body)
                 self.stored_order.append(path)
-        return FakeResponse(status)
+        return answer if answer is not None else FakeResponse(status)
 
-    def _status_of(self, url: str, headers: Mapping[str, str], md5: str, length: int) -> int:
-        issued = self._issued(url, "PUT")
+    def _status_of(self, issued: Issued | None, headers: Mapping[str, str], md5: str, length: int) -> int:
         if issued is None or headers.get("Content-MD5") != issued.md5:
             return HTTP_FORBIDDEN
         if md5 != headers.get("Content-MD5") or str(length) != headers.get("Content-Length"):

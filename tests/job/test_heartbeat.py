@@ -13,6 +13,7 @@ import pytest
 from core.bounded_process import Deadline, run_bounded, stopped_when
 from core.job.heartbeat import HEARTBEAT_INTERVAL_S, THREAD_NAME, Heartbeat
 from core.protocol.capabilities_client import CapabilityClient
+from core.protocol.transport import HttpAnswer
 from tests.contract.v2_support import FakeClock, uuid_source
 from tests.job.capability_fakes import FakeHub, capability_claimed, capability_settings, hub_error, wait_until
 
@@ -147,3 +148,45 @@ def test_stop_check_when_it_holds_already_should_start_no_process_and_outside_it
     # Assert
     assert refused.stopped_by_monitor and refused.returncode is None
     assert ran.returncode == 0 and not ran.stopped_by_monitor
+
+
+def test_heartbeat_when_stopped_with_a_beat_in_flight_and_refusals_for_now_should_send_nothing_after_it():
+    # Arrange: the beat's answer is held, then refused for now; more refusals for now would follow.
+    setup = _Setup()
+    setup.client.ask("transcoding")
+    in_flight, release = threading.Event(), threading.Event()
+
+    def held(request, hub):
+        in_flight.set()
+        release.wait(5.0)
+        return HttpAnswer(503, b"", None)
+
+    setup.hub.script.extend([held] + [HttpAnswer(503, b"", None)] * 50)
+    setup.heartbeat.start()
+    setup.clock.advance(HEARTBEAT_INTERVAL_S)
+    assert wait_until(in_flight.is_set)
+    threading.Timer(0.1, release.set).start()
+    # Act
+    stopped = setup.heartbeat.stop()
+    sent = len(setup.hub.requests)
+    time.sleep(QUIET_S)
+    # Assert
+    assert stopped and not _heartbeat_threads()
+    assert sent == 2 and len(setup.hub.requests) == 2
+    assert setup.client.lost() is None
+
+
+def test_heartbeat_when_its_thread_meets_an_unexpected_error_should_end_the_work_as_internal_error():
+    # Arrange
+    setup = _Setup()
+    setup.client.ask("transcoding")
+    setup.hub.script.append(RuntimeError("an unexpected error of the transport"))
+    setup.heartbeat.start()
+    # Act
+    setup.clock.advance(HEARTBEAT_INTERVAL_S)
+    lost = wait_until(lambda: setup.client.lost() is not None)
+    setup.heartbeat.stop()
+    # Assert
+    assert lost
+    failure = setup.client.lost().failure
+    assert (failure.error_class, failure.code) == ("internal_error", "heartbeat_failed")

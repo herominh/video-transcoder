@@ -8,6 +8,7 @@ import dataclasses
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +18,13 @@ from core import profile as profile_module
 from core.bounded_process import Deadline, run_bounded
 from core.failure import Failure, WorkerFailure
 from core.job import runner as runner_module
+from core.job import storage as storage_module
 from core.job.heartbeat import HEARTBEAT_INTERVAL_S, THREAD_NAME
 from core.job.runner import JobRunner
 from core.profile import PILOT_PROFILE, profile_digest
 from core.protocol import pipeline
 from core.protocol.outbox import SealedMessage
+from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import FakeClock, uuid_source
 from tests.job.capability_fakes import (
     FakeHub,
@@ -29,6 +32,7 @@ from tests.job.capability_fakes import (
     capability_claimed,
     capability_settings,
     hub_error,
+    wait_until,
 )
 from tests.job.conftest import (
     COMPLETED_KIND,
@@ -43,6 +47,8 @@ from tests.job.test_runner import FFMPEG_VERSION, SOURCE_OBJECT, StandInStages, 
 
 RESULT_NAME = "result.json"
 STAGES = ["probing", "downloading", "transcoding", "finalizing", "uploading"]
+# A run whose stored result is not granted still reports within this many real seconds.
+STOPPED_WITHIN_S = 5.0
 ENCODER_STOPPED = Failure("encoder_failed", "stand_in_encode_stopped", True, "the stand-in encode was stopped")
 
 
@@ -186,3 +192,87 @@ def test_run_when_the_preflight_refuses_the_source_should_store_the_failed_resul
     stored = json.loads(harness.store.objects[RESULT_NAME])
     assert json.loads(stored["vh_message"])["message_id"] == result["message_id"]
     assert harness.client_factory_calls == []
+
+
+# --- the stored result never holds back the report (contract 15.1 rule 9) -------------------------------------
+
+
+def _result_requests(harness: _Harness) -> list[dict[str, Any]]:
+    return [request for request in harness.hub.requests
+            if [o["path"] for o in (request["put"] or {}).get("objects", ())] == [RESULT_NAME]]
+
+
+@pytest.mark.parametrize("answer", [HttpAnswer(503, b"", None), TransportFailed("NoAnswer")],
+                         ids=["refused-for-now", "no-answer"])
+def test_run_when_the_results_url_is_not_granted_should_return_the_result_after_one_request_and_no_wait(
+    harness, answer
+):
+    # Arrange
+    harness.hub.result_answer = answer
+    started = time.monotonic()
+    # Act
+    sealed = harness.run()
+    # Assert
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert result["message_kind"] == COMPLETED_KIND
+    assert len(_result_requests(harness)) == 1
+    assert harness.clock.waits == []
+    assert RESULT_NAME not in harness.store.objects
+    assert time.monotonic() - started < STOPPED_WITHIN_S
+
+
+@pytest.mark.parametrize("answer", [HttpAnswer(503, b"", None), TransportFailed("NoAnswer")],
+                         ids=["refused-for-now", "no-answer"])
+def test_run_when_it_fails_at_transcoding_and_the_results_url_is_not_granted_should_report_at_once(
+    harness, monkeypatch, answer
+):
+    # Arrange
+    harness.hub.result_answer = answer
+
+    def failing_encode(*args: Any, **named: Any) -> Any:
+        raise WorkerFailure(ENCODER_STOPPED)
+
+    monkeypatch.setattr(runner_module, "encode_rendition", failing_encode)
+    # Act
+    sealed = harness.run()
+    # Assert
+    result = accepted_by_the_hub(sealed, harness.claimed, now=harness.clock())
+    assert (result["error"]["code"], result["error"]["stage"]) == (ENCODER_STOPPED.code, "transcoding")
+    assert len(_result_requests(harness)) == 1
+    assert harness.clock.waits == []
+    assert not _heartbeat_threads()
+
+
+def test_run_when_the_result_is_stored_should_store_the_bytes_it_returns(harness):
+    # Act
+    sealed = harness.run()
+    # Assert
+    stored = json.loads(harness.store.objects[RESULT_NAME])
+    assert stored == {"vh_message": sealed.body.decode("ascii"), "vh_signature": sealed.signature}
+
+
+# --- a lost authority stops the download ---------------------------------------------------------------------
+
+
+def test_run_when_the_authority_is_lost_during_the_download_should_read_no_further_chunk(harness, monkeypatch):
+    # Arrange: the source is downloaded in chunks of 1 KiB; at the second chunk 120 s pass and the heartbeat that
+    # follows is refused for good.
+    monkeypatch.setattr(storage_module, "DOWNLOAD_CHUNK_BYTES", 1024)
+    gets_at_loss: list[int] = []
+
+    def lose_the_authority() -> None:
+        harness.hub.script.append(hub_error(403, "capability_refused", retryable=False))
+        asked = len(harness.hub.requests)
+        harness.clock.advance(HEARTBEAT_INTERVAL_S)
+        assert wait_until(lambda: len(harness.hub.requests) > asked)
+        gets_at_loss.append(len(harness.store.gets))
+
+    harness.store.get_answers.extend([lambda: None, lambda: None, lose_the_authority])
+    # Act
+    result = harness.result()
+    # Assert
+    error = result["error"]
+    assert (error["class"], error["code"], error["retryable"], error["stage"]) == (
+        "authority_refused", "capability_refused", False, "downloading")
+    assert len(harness.store.gets) - gets_at_loss[0] <= 1
+    assert len(harness.store.gets) < len(SOURCE_OBJECT) // 1024

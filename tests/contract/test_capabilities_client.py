@@ -8,8 +8,9 @@ from typing import Any, Callable
 
 import pytest
 
-from core.failure import WorkerFailure
-from core.protocol.capabilities_client import FIRST_LEASE_S, CapabilityClient
+from core.failure import Failure, WorkerFailure
+from core.protocol.capabilities_client import FIRST_LEASE_S, CapabilityClient, ExchangeEnded
+from core.protocol.claim import CLAIM_PATIENCE_S
 from core.protocol.messages import CapabilityObject, CapabilityPut
 from core.protocol.transport import HttpAnswer, TransportFailed
 from tests.contract.v2_support import SECOND_HUB_KEY, FakeClock, uuid_source
@@ -33,7 +34,9 @@ FINAL_CODES = (
 
 
 class _Setup:
-    def __init__(self, *, time_left_s: float = DEADLINE_S, lease_s: int = LEASE_S) -> None:
+    def __init__(
+        self, *, time_left_s: float = DEADLINE_S, lease_s: int = LEASE_S, sleep: Callable[[float], None] | None = None
+    ) -> None:
         self.claimed = capability_claimed()
         self.clock = FakeClock()
         self.hub = FakeHub(self.claimed, self.clock, lease_s=lease_s)
@@ -46,7 +49,7 @@ class _Setup:
             transport=self.hub,
             clock=self.clock,
             monotonic=self.clock.monotonic,
-            sleep=self.clock.sleep,
+            sleep=self.clock.sleep if sleep is None else sleep,
             new_message_id=uuid_source(),
             time_left=lambda: self.time_left_s - self.clock.monotonic(),
         )
@@ -98,7 +101,7 @@ def test_ask_when_the_hub_refuses_for_now_should_ask_again_after_its_retry_after
     answer = setup.client.ask("probing", source=True)
     # Assert
     assert answer.source is not None
-    assert setup.clock.waits == [5.0]
+    assert sum(setup.clock.waits) == pytest.approx(5.0)
     assert setup.client.lost() is None
 
 
@@ -138,15 +141,17 @@ def test_ask_when_the_deadline_comes_before_the_lease_should_stop_there_as_a_dea
     assert all(sent < 20.0 for sent in setup.hub.sent_at_monotonic)
 
 
-def test_ask_when_no_answer_was_ever_accepted_should_count_the_least_lease_from_the_client_made():
+def test_ask_when_no_answer_was_ever_accepted_should_stop_within_the_claims_patience_as_lease_unrenewed():
     # Arrange
     setup = _Setup()
     setup.hub.script.extend([TransportFailed("NoAnswer")] * 200)
     # Act
     refusal = _refusal(setup, lambda: setup.client.ask("probing"))
-    # Assert
+    # Assert: the waits are 1, 2, 4, 8, then 15 s each, so the last send lies within 15 s of the patience's end.
     assert refusal.failure.code == "lease_unrenewed"
-    assert all(sent < FIRST_LEASE_S for sent in setup.hub.sent_at_monotonic)
+    last_sent = setup.hub.sent_at_monotonic[-1]
+    assert CLAIM_PATIENCE_S - 15 <= last_sent < CLAIM_PATIENCE_S
+    assert setup.clock.monotonic() < FIRST_LEASE_S
 
 
 # --- final refusals -----------------------------------------------------------------------------------------
@@ -334,3 +339,106 @@ def test_exchange_when_logged_and_shown_should_hold_no_url_md5_path_list_or_runt
         assert secret not in shown
     for path in ("segment_0000", "segment_0001", "thumbnail.jpg"):
         assert path not in caplog.text
+
+
+# --- the claim's patience, late answers, the ending of the work --------------------------------------------------
+
+
+def test_ask_when_a_temporary_status_names_a_retry_after_should_wait_that_long():
+    # Arrange
+    setup = _Setup()
+    setup.hub.script.extend([HttpAnswer(429, b"", None, retry_after_s=7.0), "grant"])
+    # Act
+    setup.client.ask("probing")
+    # Assert
+    assert sum(setup.clock.waits) == pytest.approx(7.0)
+
+
+def test_answer_when_it_comes_after_the_lease_ended_by_the_runtimes_count_should_renew_nothing_and_end_the_work():
+    # Arrange: a first answer gives a lease of 900 s; the next one is accepted only 900 s after its request was sent.
+    setup = _Setup()
+    setup.client.ask("probing")
+    accepted_at = setup.client.last_accepted_sent_at()
+
+    def late(request: dict[str, Any], hub: FakeHub) -> HttpAnswer:
+        setup.clock.advance(LEASE_S)
+        return hub.grant(request)
+
+    setup.hub.script.append(late)
+    # Act
+    refusal = _refusal(setup, lambda: setup.client.ask("downloading"))
+    # Assert
+    assert refusal.failure.code == "lease_unrenewed"
+    assert setup.client.last_accepted_sent_at() == accepted_at
+
+
+def test_ask_once_when_the_route_refuses_or_is_silent_should_return_none_after_one_request_and_end_nothing():
+    # Arrange
+    for answer in (HttpAnswer(503, b"", None), TransportFailed("NoAnswer"),
+                   hub_error(403, "capability_refused", retryable=False)):
+        setup = _Setup()
+        setup.client.ask("finalizing")
+        setup.hub.script.append(answer)
+        # Act
+        granted = setup.client.ask_once(put=_put("result.json"))
+        # Assert
+        assert granted is None
+        assert len(setup.hub.requests) == 2
+        assert setup.clock.waits == []
+        assert setup.client.lost() is None
+
+
+def test_ask_once_when_the_work_has_ended_should_still_ask_once_and_renew_no_lease():
+    # Arrange
+    setup = _Setup()
+    setup.client.ask("finalizing")
+    accepted_at = setup.client.last_accepted_sent_at()
+    setup.clock.advance(10)
+    setup.client.end()
+    # Act
+    granted = setup.client.ask_once(put=_put("result.json"))
+    # Assert
+    assert granted is not None and [url.path for url in granted.puts] == ["result.json"]
+    assert setup.client.last_accepted_sent_at() == accepted_at
+
+
+def test_ask_when_the_work_has_ended_should_send_nothing_and_raise_no_failure():
+    # Arrange
+    setup = _Setup()
+    setup.client.ask("transcoding")
+    setup.client.end()
+    # Act / Assert
+    with pytest.raises(ExchangeEnded):
+        setup.client.heartbeat()
+    assert len(setup.hub.requests) == 1
+    assert setup.client.lost() is None
+
+
+def test_ask_when_the_work_ends_during_its_retries_should_stop_waiting_and_send_no_further_request():
+    # Arrange: the Hub refuses for now; end() comes while the client waits before its next try.
+    waited: list[float] = []
+
+    def sleep_until_ended(seconds: float) -> None:
+        waited.append(seconds)
+        setup.clock.advance(seconds)
+        setup.client.end()
+
+    setup = _Setup(sleep=sleep_until_ended)
+    setup.client.ask("transcoding")
+    setup.hub.script.extend([HttpAnswer(503, b"", None)] * 20)
+    # Act / Assert
+    with pytest.raises(ExchangeEnded):
+        setup.client.heartbeat()
+    assert len(setup.hub.requests) == 2
+    assert len(waited) == 1
+
+
+def test_fail_when_the_runtime_faults_should_end_the_work_with_that_failure():
+    # Arrange
+    setup = _Setup()
+    failure = Failure("internal_error", "heartbeat_failed", True, "the heartbeat failed: RuntimeError")
+    # Act
+    setup.client.fail(failure)
+    # Assert
+    lost = setup.client.lost()
+    assert lost is not None and lost.failure == failure

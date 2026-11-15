@@ -1310,7 +1310,15 @@ def _refused_for_good(error: BotoCoreError | ClientError) -> bool:
     status = _answered_status(error)
     if status is None or not HTTP_FIRST_REDIRECT <= status <= HTTP_LAST_CLIENT_ERROR:
         return False
-    return status not in PASSING_REFUSAL_STATUSES and _error_code(error) not in PASSING_REFUSAL_CODES
+    return not refusal_passes(status, _error_code(error))
+
+
+def refusal_passes(status: int, error_code: str | None) -> bool:
+    """Whether a storage's refusal of a PUT (a status from 300 to 499) passes, so that sending the object again can
+    change how it ends: one of PASSING_REFUSAL_STATUSES, or an answer whose error code (of ERROR_CODE_PATTERN's shape,
+    None otherwise) is one of PASSING_REFUSAL_CODES. The 2.2.0 upload through URLs asks it too
+    (core/job/url_upload.py)."""
+    return status in PASSING_REFUSAL_STATUSES or error_code in PASSING_REFUSAL_CODES
 
 
 def _answered_status(error: ClientError) -> int | None:

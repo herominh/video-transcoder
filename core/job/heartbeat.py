@@ -6,8 +6,11 @@ request of its newest accepted answer was sent (any request renews the lease, a 
 it sends a heartbeat (`put` null, `source` false) at the stage the execution is in. A failure the client raises
 ends the heartbeat: the client keeps it, lost() names it, and the job's thread meets it where it looks (a stage's
 entry, between the objects of a stage, and the stop check of every bounded process, core/bounded_process.py
-stopped_when()). The heartbeat's own exchange is held to the execution's deadline by the client. Nothing of a
-request or an answer is logged here; an unexpected error of the thread is logged by its class alone.
+stopped_when()). The heartbeat's own exchange is held to the execution's deadline by the client. Once the client's
+work is ended (CapabilityClient.end()) it sends nothing more and its waits between tries stop at once, so stop()
+waits for one exchange in flight at most. An unexpected error of the thread ends the work as a retryable
+internal_error/heartbeat_failed (the client's fail()), logged by its class alone; nothing of a request or an answer
+is logged here.
 """
 
 from __future__ import annotations
@@ -15,16 +18,22 @@ from __future__ import annotations
 import logging
 import threading
 
-from core.failure import WorkerFailure
-from core.protocol.capabilities_client import CAPABILITY_REQUEST_TIMEOUT_S, CapabilityClient
+from core.failure import Failure, WorkerFailure, make_detail
+from core.protocol.capabilities_client import (
+    CAPABILITY_REQUEST_TIMEOUT_S,
+    WAIT_SLICE_S,
+    CapabilityClient,
+    ExchangeEnded,
+)
 
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_INTERVAL_S = 120.0
 # How often, at most, the thread looks again at the time of the newest accepted request.
 POLL_S = 1.0
-# How long stop() waits for the thread: one exchange in flight and the longest wait between two tries of it.
-JOIN_TIMEOUT_S = 2 * CAPABILITY_REQUEST_TIMEOUT_S
+# How long stop() waits for the thread once the client's work is ended: one exchange in flight, and a margin for a
+# slice of a wait and the thread's own steps.
+JOIN_TIMEOUT_S = CAPABILITY_REQUEST_TIMEOUT_S + 10 * WAIT_SLICE_S
 THREAD_NAME = "vh-capability-heartbeat"
 
 
@@ -48,8 +57,9 @@ class Heartbeat:
         self._thread.start()
 
     def stop(self, timeout_s: float = JOIN_TIMEOUT_S) -> bool:
-        """Stop the thread and wait for it, at most `timeout_s`; whether it has ended. A thread never started counts
-        as ended."""
+        """End the client's work (CapabilityClient.end(): nothing more is sent, a wait between tries stops), stop the
+        thread and wait for it, at most `timeout_s`; whether it has ended. A thread never started counts as ended."""
+        self._client.end()
         self._stopped.set()
         if not self._thread.is_alive():
             return True
@@ -63,19 +73,22 @@ class Heartbeat:
         failed_on: str | None = None
         try:
             self._beat_until_stopped()
-        except WorkerFailure:
-            # The client keeps the failure: lost() names it to the job.
+        except (WorkerFailure, ExchangeEnded):
+            # The client keeps a failure (lost() names it to the job); an ended exchange is no failure.
             return
-        except Exception as error:  # noqa: BLE001 - the heartbeat never ends the process; the lease's count does the rest
+        except Exception as error:  # noqa: BLE001 - the heartbeat never ends the process; the client's lost() does
             failed_on = type(error).__name__
         if failed_on is not None:
-            # Logged here, after the `except` block has ended: the error's own text reaches no log handler.
+            # Logged and recorded here, after the `except` block has ended: the error's own text reaches no handler.
             logger.error("the capability heartbeat ended on an unexpected %s", failed_on)
+            self._client.fail(Failure(
+                "internal_error", "heartbeat_failed", True, make_detail(f"the capability heartbeat failed: {failed_on}")
+            ))
 
     def _beat_until_stopped(self) -> None:
         client = self._client
         while not self._stopped.is_set():
-            if client.lost() is not None:
+            if client.ended or client.lost() is not None:
                 return
             last_sent_at = client.last_accepted_sent_at()
             if last_sent_at is None or client.stage is None:

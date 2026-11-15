@@ -151,10 +151,10 @@ def test_runtime_modules_when_searched_should_have_no_v1_url_acquisition():
     # Act
     sources = {path.relative_to(REPOSITORY_ROOT).as_posix(): path.read_text(encoding="utf-8") for path in modules}
 
-    # Assert: the v2 job's separate exact-source downloader is retained. The v1 field is `source_url` as a whole
-    # word: the 2.2.0 failure code `source_url_refused` names the granted read URL, no acquisition.
+    # Assert: the v2 job's separate exact-source downloader is retained. The one `source_url` allowed is the 2.2.0
+    # failure code `source_url_refused`, which names the granted read URL, no acquisition.
     for name, source in sources.items():
-        assert re.search(r"\bsource_url\b", source) is None, name
+        assert re.search(r"source_url(?!_refused\b)", source) is None, name
         assert "upload_original" not in source, name
         if not name.startswith("core/job/"):
             assert "download_source" not in source, name

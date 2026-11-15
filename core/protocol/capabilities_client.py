@@ -16,9 +16,16 @@ reports its stage. One CapabilityClient serves one execution, made once its clai
   (`capability_deadline_exceeded`, a deadline_exceeded, when the execution's deadline came first).
 - The lease and every URL's usable time are counted on the monotonic clock from the instant the request was SENT:
   `expires_at` minus the answer's `sent_at` (rules 5 and 6). Before its first accepted answer the runtime has been
-  told no lease; it counts the least one an answer promises (FIRST_LEASE_S, Hub rule 6) from the client's making.
-- Once the work is ended (a final refusal, an answer not accepted, the lease run out by its own count), lost() names
-  that failure for good and no further request is sent (rule 6: a stopped runtime asks for no further URL).
+  told no lease; it counts the least one an answer promises (FIRST_LEASE_S, Hub rule 6) from the client's making,
+  and asks for no longer than a claim would (CLAIM_PATIENCE_S, 120 s) before it ends the work as `lease_unrenewed`.
+  An answer that comes after the lease ended by this count renews nothing and ends the work.
+- Once the work is ended (a final refusal, an answer not accepted, the lease run out by its own count, a fault of the
+  runtime's own through fail()), lost() names that failure for good and no further request is sent (rule 6: a stopped
+  runtime asks for no further URL).
+- end() says the execution's work is over: no further retried request or heartbeat is sent (ExchangeEnded), every
+  wait between tries (taken in slices of WAIT_SLICE_S) stops at once, and no later answer renews the lease.
+  ask_once(), the stored result's one exchange, is never tried again and ends nothing: its storing never holds back
+  the report (15.1 rule 9).
 
 Nothing of a request, an answer or a URL is logged, kept or put in an error (rule 10): a log line names the execution,
 the `seq`, the stage and a code. No repr of what this module returns shows a URL.
@@ -28,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Callable, Mapping
@@ -35,7 +43,7 @@ from typing import Any, Callable, Mapping
 from core.failure import Failure, WorkerFailure
 
 from . import messages
-from .claim import CLAIM_BACKOFF_S, Grant
+from .claim import CLAIM_BACKOFF_S, CLAIM_PATIENCE_S, Grant
 from .dispatch import AcceptedDispatch
 from .inbound import NotAccepted, accept_hub_error, accept_signed
 from .messages import CapabilityPut
@@ -67,6 +75,8 @@ AUTHORITY_REFUSED = "authority_refused"
 ANSWER_INVALID = "capability_answer_invalid"
 LEASE_UNRENEWED = "lease_unrenewed"
 PAYLOAD_TOO_LARGE = "payload_too_large"
+# How long one slice of a wait between two tries lasts: end() stops a wait within one.
+WAIT_SLICE_S = 0.1
 CAPABILITY_DEADLINE_EXCEEDED = Failure(
     "deadline_exceeded", "capability_deadline_exceeded", False,
     "the execution ran out of time before the Hub answered its capability request",
@@ -104,6 +114,10 @@ class CapabilityAnswer:
 @dataclass(frozen=True)
 class _Retry:
     retry_after_s: float | None
+
+
+class ExchangeEnded(Exception):
+    """The execution's work is over (CapabilityClient.end()): no request is sent. Not a failure of the work."""
 
 
 def _refused(code: str, detail: str) -> Failure:
@@ -154,9 +168,14 @@ class CapabilityClient:
         self._seq = 0
         self._stage: str | None = None
         self._media_duration_ms: int | None = None
-        self._lease_ends_at = monotonic() + FIRST_LEASE_S
+        made_at = monotonic()
+        self._lease_ends_at = made_at + FIRST_LEASE_S
+        # Until a first answer is accepted the client waits no longer than a claim would.
+        self._first_patience_ends_at = made_at + CLAIM_PATIENCE_S
         self._last_accepted_sent_at: float | None = None
         self._lost: Failure | None = None
+        self._ended = False
+        self._ended_event = threading.Event()
 
     # --- what the next requests report --------------------------------------------------------------
 
@@ -236,11 +255,70 @@ class CapabilityClient:
             raise ValueError("a heartbeat reports a stage: none was set")
         return self._ask(False, None)
 
+    def ask_once(self, *, put: CapabilityPut) -> CapabilityAnswer | None:
+        """One exchange at the stage the execution is in, never tried again, for the stored result (15.1 rule 9: its
+        storing never holds back the report): the accepted answer, or None for any other ending, which ends nothing
+        (lost() is not set by it). Allowed after end(); None once the work was lost. It waits for a request in
+        flight and makes its own within one exchange's time together."""
+        if not isinstance(put, CapabilityPut):
+            raise TypeError("put must be a CapabilityPut")
+        if self.lost() is not None or self.stage is None:
+            return None
+        # A real wait for the lock, and the exchange after it, share one exchange's time.
+        exchange_ends_at = time.monotonic() + CAPABILITY_REQUEST_TIMEOUT_S
+        if not self._exchange_lock.acquire(timeout=CAPABILITY_REQUEST_TIMEOUT_S):
+            return None
+        try:
+            if self.lost() is not None:
+                return None
+            request, sealed = self._sealed(False, put)
+            left_s = min(self._bound_left_s(), exchange_ends_at - time.monotonic())
+            if left_s <= 0:
+                return None
+            sent_at = self._monotonic()
+            answer = self._post(sealed, min(CAPABILITY_REQUEST_TIMEOUT_S, left_s), request)
+            outcome = None if answer is None else self._judge(answer, request, sent_at)
+        finally:
+            self._exchange_lock.release()
+        return outcome if isinstance(outcome, CapabilityAnswer) else None
+
+    def end(self) -> None:
+        """The execution's work is over: no further retried request or heartbeat is sent (the one in flight is let
+        finish), every wait between tries ends at once, and no later answer renews the lease. ask_once() may still
+        store the result. Idempotent."""
+        with self._state_lock:
+            self._ended = True
+        self._ended_event.set()
+
+    @property
+    def ended(self) -> bool:
+        with self._state_lock:
+            return self._ended
+
+    def fail(self, failure: Failure) -> None:
+        """End the work with `failure` (a fault of this runtime's own, such as the heartbeat's): lost() names it."""
+        if not isinstance(failure, Failure):
+            raise TypeError("failure must be a Failure")
+        self._lose(failure)
+
+    def _require_not_ended(self) -> None:
+        if self.ended:
+            raise ExchangeEnded()
+
+    def _wait(self, seconds: float) -> None:
+        """Wait `seconds` between two tries, in slices, so that end() stops the wait within one slice."""
+        waited = 0.0
+        while waited < seconds and not self._ended_event.is_set():
+            step = min(WAIT_SLICE_S, seconds - waited)
+            self._sleep(step)
+            waited += step
+
     def _ask(self, source: bool, put: CapabilityPut | None) -> CapabilityAnswer:
         attempt = 0
         while True:
             retry_after_s: float | None = None
             with self._exchange_lock:
+                self._require_not_ended()
                 self.raise_if_lost()
                 if self._bound_left_s() <= 0:
                     break
@@ -260,18 +338,25 @@ class CapabilityClient:
             attempt += 1
             if wait_s >= self._bound_left_s():
                 break
-            self._sleep(wait_s)
+            self._wait(wait_s)
         raise self._lose(self._unanswered())
 
     def _bound_left_s(self) -> float:
-        """Seconds until the nearer of the lease's end by this runtime's count and the execution's deadline."""
+        """Seconds until the nearest of the lease's end by this runtime's count, the execution's deadline and, until a
+        first answer is accepted, the claim's patience."""
         with self._state_lock:
-            lease_left_s = self._lease_ends_at - self._monotonic()
-        return min(lease_left_s, self._time_left())
+            now = self._monotonic()
+            left_s = self._lease_ends_at - now
+            if self._last_accepted_sent_at is None:
+                left_s = min(left_s, self._first_patience_ends_at - now)
+        return min(left_s, self._time_left())
 
     def _unanswered(self) -> Failure:
         with self._state_lock:
-            lease_left_s = self._lease_ends_at - self._monotonic()
+            now = self._monotonic()
+            lease_left_s = self._lease_ends_at - now
+            if self._last_accepted_sent_at is None:
+                lease_left_s = min(lease_left_s, self._first_patience_ends_at - now)
         if self._time_left() < lease_left_s:
             return CAPABILITY_DEADLINE_EXCEEDED
         return _refused(LEASE_UNRENEWED, "no accepted capability answer came before the lease ended")
@@ -365,6 +450,8 @@ class CapabilityClient:
         return _refused(ANSWER_INVALID, "the Hub's capability answer is not accepted")
 
     def _answer_of(self, granted: Mapping[str, Any], sent_at: float, request: Mapping[str, Any]) -> CapabilityAnswer | Failure:
+        """The accepted answer; the lease's own failure when the lease had ended by this runtime's count before it came
+        (it renews nothing, rule 6). After end() an answer renews nothing either, and is still returned."""
         sent_ms = parse_timestamp_ms(granted["sent_at"])
 
         def use_before(expires_at: str) -> float:
@@ -382,15 +469,13 @@ class CapabilityClient:
             ),
         )
         with self._state_lock:
-            # An answer that came after the lease had already ended by this runtime's count renews nothing (rule 6).
-            if self._lost is None and self._monotonic() < self._lease_ends_at:
+            live = self._lost is None and self._monotonic() < self._lease_ends_at
+            if live and not self._ended:
                 self._lease_ends_at = answer.lease_ends_at
                 self._last_accepted_sent_at = sent_at
-                renewed = True
-            else:
-                renewed = False
-        if not renewed:
-            self.raise_if_lost()
+        if not live:
+            self._log("granted after the lease ended by this runtime's count", request)
+            return _refused(LEASE_UNRENEWED, "the lease ended before the Hub's answer came")
         self._log("granted", request)
         return answer
 

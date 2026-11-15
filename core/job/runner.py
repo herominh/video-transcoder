@@ -36,8 +36,10 @@ through put URLs (core/job/url_upload.py). The execution looks at its authority 
 the objects it uploads, and every bounded process it runs is stopped once the authority is lost
 (core/bounded_process.py stopped_when()); an execution whose authority was lost ends with that failure
 (authority_refused, not retryable, at the stage it was in), whatever its stage then failed with. The heartbeat is
-stopped and the session closed before run() returns, however it ends. A dispatch of any other version runs as it
-always did.
+stopped and the session closed before run() returns, however it ends. Once the terminal result is sealed the
+client's work is ended (no further retried request or heartbeat), and the stored result is one exchange and one PUT,
+never tried again (contract 15.1 rule 9: storing it never holds back the report). A dispatch of any other version runs
+as it always did.
 
 Everything the execution writes locally lives in one scratch directory of its own, removed whatever
 the ending. The media key of the grant goes to the encode and nowhere else, and the storage credentials
@@ -462,6 +464,10 @@ class _Execution:
         try:
             result = self._ending()
             self._grant.drop_media_key()
+            # The work is over: from here to the report, a 2.2.0 execution sends one exchange more at most (its stored
+            # result's), and waits for no retry and no heartbeat's backoff.
+            if self._capabilities is not None:
+                self._capabilities.end()
             self._store_result(result)
             return result
         finally:
@@ -637,6 +643,7 @@ class _Execution:
             stop_line=stop_line_within(self._deadline.remaining_s),
             monotonic=capabilities.monotonic,
             ask_url=fresh_url,
+            require_authority=capabilities.raise_if_lost,
         )
         return self._url_source
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from core.failure import WorkerFailure
 from core.job import storage as storage_module
 from core.job import url_upload
 from core.job.url_upload import upload_generation_by_urls, upload_result_by_url
+from tests.drive_import.fakes import FakeResponse
 from core.package import ManifestOutput
 from core.protocol.capabilities_client import CapabilityClient
 from tests.contract.v2_support import FakeClock, uuid_source
@@ -178,7 +180,7 @@ def test_upload_when_the_store_fails_for_now_should_try_the_object_again_and_sto
     setup.upload()
     # Assert
     assert "v360/segment_0000.ts" in setup.store.objects
-    assert len(setup.waits.seconds) == 1
+    assert 0.25 <= sum(setup.waits.seconds) <= 0.5
 
 
 def test_upload_when_the_store_refuses_a_url_should_ask_for_it_again_and_store_the_object(tmp_path):
@@ -247,14 +249,15 @@ def test_upload_when_the_authority_is_lost_during_it_should_stop_and_end_with_th
     setup = _Setup(tmp_path, segments=10)
     setup.store.put_answers["thumbnail.jpg"] = [lambda: setup.clock.advance(3600)]
     # Act
-    _failure(lambda: upload_generation_by_urls(
+    raised = _failure(lambda: upload_generation_by_urls(
         setup.client, setup.store, prefix=setup.claimed.grant.output_prefix, output_root=setup.generation.output_root,
         artifacts=setup.generation.artifacts, manifest=setup.generation.manifest,
         deadline=Deadline.after_ms(60_000), sleep=setup.waits, parallelism=1,
     ))
     # Assert
+    assert (raised.failure.error_class, raised.failure.code) == ("authority_refused", "lease_unrenewed")
     lost = setup.client.lost()
-    assert lost is not None and lost.failure.code == "lease_unrenewed"
+    assert lost is not None and lost.failure == raised.failure
     assert len(setup.store.puts) == 1
     assert MANIFEST_NAME not in setup.store.objects
 
@@ -326,3 +329,148 @@ def test_result_when_the_authority_was_lost_should_ask_for_no_url_and_store_noth
     assert stored is False
     assert len(setup.hub.requests) == asked
     assert setup.store.puts == []
+
+
+# --- the round-1 review's cases ------------------------------------------------------------------------------
+
+
+def _s3_error(status: int, code: str) -> FakeResponse:
+    return FakeResponse(status, {"Content-Type": "application/xml"},
+                        f"<?xml version='1.0'?><Error><Code>{code}</Code><Message>no</Message></Error>".encode())
+
+
+def _upload_at(setup: _Setup, parallelism: int, deadline: Deadline | None = None) -> int:
+    return upload_generation_by_urls(
+        setup.client, setup.store, prefix=setup.claimed.grant.output_prefix, output_root=setup.generation.output_root,
+        artifacts=setup.generation.artifacts, manifest=setup.generation.manifest,
+        deadline=deadline or Deadline.after_ms(60_000), sleep=setup.waits, parallelism=parallelism,
+    )
+
+
+@pytest.mark.parametrize("answer", [
+    _s3_error(400, "RequestTimeout"), _s3_error(400, "IncompleteBody"), _s3_error(400, "BadDigest"),
+    FakeResponse(409), FakeResponse(408), FakeResponse(429, {"Retry-After": "3"}), FakeResponse(503),
+], ids=["400-RequestTimeout", "400-IncompleteBody", "400-BadDigest", "409", "408", "429", "503"])
+def test_upload_when_the_store_refuses_in_a_way_that_passes_should_try_again_and_store_the_object(tmp_path, answer):
+    # Arrange
+    setup = _Setup(tmp_path)
+    setup.store.put_answers["thumbnail.jpg"] = [answer]
+    # Act
+    setup.upload()
+    # Assert
+    assert "thumbnail.jpg" in setup.store.objects
+    assert [put.path for put in setup.store.puts].count("thumbnail.jpg") == 2
+    if answer.status_code == 429:
+        assert sum(setup.waits.seconds) == pytest.approx(3.0)
+
+
+def test_upload_when_the_store_refuses_with_a_code_that_does_not_pass_should_end_for_good(tmp_path):
+    # Arrange
+    setup = _Setup(tmp_path)
+    setup.store.put_answers["thumbnail.jpg"] = [_s3_error(400, "InvalidArgument")]
+    # Act
+    failure = _failure(setup.upload).failure
+    # Assert
+    assert (failure.code, failure.retryable) == ("upload_refused", False)
+    assert MANIFEST_NAME not in setup.store.objects
+
+
+def test_upload_when_a_put_times_out_should_try_it_again(tmp_path):
+    # Arrange
+    setup = _Setup(tmp_path)
+    setup.store.put_answers["thumbnail.jpg"] = [TimeoutError("timed out")]
+    # Act
+    setup.upload()
+    # Assert
+    assert "thumbnail.jpg" in setup.store.objects
+
+
+def test_upload_when_its_urls_run_out_of_time_before_their_puts_start_should_ask_again_uncounted_and_complete(tmp_path):
+    # Arrange: one PUT at a time, each taking 60 s of the 180 s its batch's URLs live: three start per batch.
+    setup = _Setup(tmp_path, segments=20)
+    for artifact in setup.generation.artifacts:
+        setup.store.put_answers[artifact.path] = [lambda: setup.clock.advance(60)] * 10
+    # Act
+    _upload_at(setup, parallelism=1)
+    # Assert
+    assert set(setup.store.objects) == {a.path for a in setup.generation.artifacts} | {MANIFEST_NAME}
+    assert len(setup.put_requests()) > 5
+    assert all(put.status == 200 for put in setup.store.puts)
+
+
+def test_upload_when_a_url_is_within_five_seconds_of_its_end_should_ask_again_without_a_put(tmp_path):
+    # Arrange: the first PUT takes the clock to 4 s before the batch's URLs end.
+    setup = _Setup(tmp_path, segments=1)
+    setup.store.put_answers["thumbnail.jpg"] = [lambda: setup.clock.advance(176)]
+    # Act
+    _upload_at(setup, parallelism=1)
+    # Assert: the playlist's URL of the first batch was never used; its one PUT went through a later URL.
+    first_expiry = min(issued.expires_at for issued in setup.hub.issued.values())
+    (playlist_put,) = [put for put in setup.store.puts if put.path == "v360/playlist.m3u8"]
+    assert setup.hub.issued[playlist_put.url].expires_at > first_expiry
+    assert [len(request["put"]["objects"]) for request in setup.put_requests()] == [3, 2, 1]
+
+
+def test_upload_when_a_file_changes_after_its_batch_was_asked_should_refuse_it_before_its_put(tmp_path):
+    # Arrange: the PUT before it changes the file's bytes, not its size, after its batch's URLs were asked.
+    setup = _Setup(tmp_path, segments=1)
+    changed = setup.generation.output_root / "v360/playlist.m3u8"
+    setup.store.put_answers["thumbnail.jpg"] = [lambda: changed.write_bytes(b"#EXTM3X\n")]
+    # Act
+    failure = _failure(lambda: _upload_at(setup, parallelism=1)).failure
+    # Assert
+    assert failure.code == "artifact_changed_before_upload"
+    assert [put.path for put in setup.store.puts] == ["thumbnail.jpg"]
+
+
+def test_upload_when_one_object_fails_at_full_parallelism_should_start_no_put_after_it(tmp_path):
+    # Arrange: forty objects; twelve PUTs start together, the thumbnail's is refused for good at once while the
+    # others take a fifth of a second.
+    setup = _Setup(tmp_path, segments=40)
+    setup.store.hold_until_active = url_upload.UPLOAD_PARALLELISM
+    for artifact in setup.generation.artifacts[1:]:
+        setup.store.put_answers[artifact.path] = [lambda: time.sleep(0.2)]
+    setup.store.put_answers["thumbnail.jpg"] = [400]
+    # Act
+    failure = _failure(setup.upload).failure
+    # Assert
+    assert failure.code == "upload_refused"
+    assert len(setup.store.puts_started) == url_upload.UPLOAD_PARALLELISM
+    assert MANIFEST_NAME not in setup.store.objects
+
+
+def test_upload_when_the_deadline_passes_with_puts_in_flight_should_give_them_up_and_start_no_other(tmp_path):
+    # Arrange: every PUT is held far longer than the 0.5 s the deadline leaves.
+    setup = _Setup(tmp_path, segments=30)
+    release = threading.Event()
+    for artifact in setup.generation.artifacts:
+        setup.store.put_answers[artifact.path] = [lambda: release.wait(5.0)]
+    before = storage_module.abandoned_requests()
+    try:
+        # Act
+        failure = _failure(lambda: setup.upload(deadline=Deadline.after_ms(500))).failure
+        started = len(setup.store.puts_started)
+    finally:
+        release.set()
+    # Assert
+    assert failure.code == "upload_deadline_exceeded"
+    assert started == url_upload.UPLOAD_PARALLELISM
+    assert storage_module.abandoned_requests() - before == url_upload.UPLOAD_PARALLELISM
+
+
+def test_upload_when_an_answer_outlasts_its_ceiling_should_give_it_up_and_store_the_object_again(tmp_path, monkeypatch):
+    # Arrange: the first PUT of the thumbnail holds its answer past a ceiling of a fifth of a second.
+    setup = _Setup(tmp_path, segments=1)
+    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: 0.2)
+    release = threading.Event()
+    setup.store.put_answers["thumbnail.jpg"] = [lambda: release.wait(5.0)]
+    before = storage_module.abandoned_requests()
+    try:
+        # Act
+        _upload_at(setup, parallelism=1)
+    finally:
+        release.set()
+    # Assert
+    assert "thumbnail.jpg" in setup.store.objects
+    assert storage_module.abandoned_requests() - before == 1
+    assert setup.store.puts_started.count("thumbnail.jpg") == 2
