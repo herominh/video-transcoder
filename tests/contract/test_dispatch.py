@@ -22,6 +22,7 @@ from core.protocol.reasons import Layer, ReasonCode
 from tests.contract.v2_support import (
     ACQUIRE_PROTOCOL_VERSION,
     ACQUIRE_REQUEST,
+    CAPABILITY_ENV,
     FIXTURE_NOW,
     GRANT_ENCRYPTED,
     HUB_KEY,
@@ -416,7 +417,7 @@ def test_accept_dispatch_when_a_correctly_signed_request_fails_validation_should
 @pytest.mark.parametrize("version", [PROTOCOL_VERSION, ACQUIRE_PROTOCOL_VERSION])
 def test_accept_dispatch_when_every_live_version_is_listed_should_accept_a_transcode_request_and_keep_its_version(version):
     # Arrange
-    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV)
     job_input = signed_carrier(modified_fixture(REQUEST_ENCRYPTED, {"/protocol_version": version}), HUB_KEY)
 
     # Act
@@ -435,7 +436,7 @@ def test_accept_dispatch_when_every_live_version_is_listed_should_accept_a_trans
 )
 def test_accept_dispatch_when_the_encode_endpoint_is_sent_a_signed_acquire_request_should_refuse_the_kind(version, reason):
     # Arrange: the version is listed, the signature is the Hub's; only the kind is not this endpoint's.
-    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS)
+    settings = worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV)
     job_input = signed_carrier(modified_fixture(ACQUIRE_REQUEST, {"/protocol_version": version}), HUB_KEY)
 
     # Act

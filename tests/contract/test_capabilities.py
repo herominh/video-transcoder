@@ -1,5 +1,6 @@
-"""Capability exchange (protocol 2.2.0, a draft) conformance beyond the paired catalog: measured maxima, the
-version gate both ways, context normalization and order, and that no live list holds the draft."""
+"""Capability exchange (protocol 2.2.0, live since Hub 0.11.0) conformance beyond the paired catalog: measured maxima,
+the version gate both ways, context normalization and order, and that the live list holds 2.2.0 and no draft is
+left."""
 
 import copy
 import json
@@ -18,13 +19,13 @@ MAXIMA = [case for case in CATALOG
 CONTEXT_ROWS = [case for case in CATALOG if case["rule"] == "capabilities-contexts" and case["purpose"].endswith("valid")]
 # The measured bytes of the catalog's maximal escaped instances, which pass K5 too (README section 13).
 MEASURED_MAXIMA = {
-    MessageKind.EXECUTION_CAPABILITIES_REQUEST: 29_062,
+    MessageKind.EXECUTION_CAPABILITIES_REQUEST: 28_934,
     MessageKind.EXECUTION_CAPABILITIES_GRANTED: 959_619,
 }
 # The schema-only worst cases: the longest version and audience strings, and every URL of the answer 4,096
 # characters of the costliest schema-valid character after `https://` (`/`, written `\/`). They need not pass K5.
 SCHEMA_MAXIMA = {
-    MessageKind.EXECUTION_CAPABILITIES_REQUEST: 29_080,
+    MessageKind.EXECUTION_CAPABILITIES_REQUEST: 28_952,
     MessageKind.EXECUTION_CAPABILITIES_GRANTED: 1_076_500,
 }
 URL_SCHEME = "https://"
@@ -127,7 +128,7 @@ def test_byte_caps_when_read_should_be_every_cap_the_contract_states():
     assert dict(registry.limits["max_bytes"]) == ALL_MAX_BYTES
     assert dict(registry.limits["carrier_max_bytes"]) == ALL_CARRIER_MAX_BYTES
     assert registry.max_tokens == 277_507
-    assert registry.limits["capability_closure_margin_seconds"] == 60
+    assert registry.limits["capability_closure_margin_seconds"] == 120
 
 
 # The kinds that exist at one protocol version only, by their literal names (README section 5).
@@ -165,7 +166,7 @@ def test_version_gate_when_a_kind_is_named_at_a_known_version_should_select_it_o
         assert (selected.layer, selected.reason) == (Layer.VERSION, ReasonCode.UNEXPECTED_MESSAGE_KIND)
 
 
-def test_capability_request_when_the_context_lists_only_the_live_versions_should_be_refused_before_its_kind():
+def test_capability_request_when_the_context_lists_the_live_versions_should_be_accepted():
     # Arrange
     case = _case("heartbeat at transcoding")
     data = files.read_json(case["context"])
@@ -173,19 +174,30 @@ def test_capability_request_when_the_context_lists_only_the_live_versions_should
     # Act
     verdict = pipeline.validate(files.read_bytes(case["payload"]), TrustedContext.from_dict(data))
     # Assert
+    assert verdict.accepted
+
+
+def test_capability_request_when_the_context_lists_only_the_versions_before_it_should_be_refused_before_its_kind():
+    # Arrange: what every runtime before this tree lists.
+    case = _case("heartbeat at transcoding")
+    data = files.read_json(case["context"])
+    data["accepted_protocol_versions"] = ["2.0.0", "2.1.0"]
+    # Act
+    verdict = pipeline.validate(files.read_bytes(case["payload"]), TrustedContext.from_dict(data))
+    # Assert
     assert (verdict.layer, verdict.reason, verdict.instance_path) == (
         Layer.VERSION, ReasonCode.UNSUPPORTED_VERSION, "/protocol_version")
 
 
-def test_versions_when_read_should_list_two_two_zero_as_a_draft_and_never_as_live():
+def test_versions_when_read_should_list_two_two_zero_as_live_and_no_draft():
     # Arrange
     registry = load_registry()
     # Act
     live = registry.accepted_versions(VersionLine.PROTOCOL, VersionChannel.LIVE)
     draft = registry.accepted_versions(VersionLine.PROTOCOL, VersionChannel.DRAFT)
     # Assert
-    assert "2.2.0" not in live
-    assert draft == ("2.2.0",)
+    assert live == ("2.0.0", "2.1.0", "2.2.0")
+    assert draft == ()
     assert registry.accepted_versions(VersionLine.MANIFEST, VersionChannel.LIVE) == ("1.0.0",)
 
 

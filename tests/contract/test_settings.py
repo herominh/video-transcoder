@@ -362,19 +362,28 @@ def test_from_env_when_the_first_live_version_is_missing_should_refuse_showing_n
     assert [version for version in newer_only if version in str(refusal)] == []
 
 
-def test_from_env_when_every_live_version_is_listed_should_accept_them_in_order():
+def test_from_env_when_every_live_version_is_listed_with_the_capability_configuration_should_accept_them_in_order():
     # Act
+    settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.1.0,2.2.0", **CAPABILITY_ENV))
+
+    # Assert
+    assert settings.accepted_protocol_versions == ("2.0.0", "2.1.0", "2.2.0")
+
+
+def test_from_env_when_the_live_versions_before_two_two_zero_are_listed_should_accept_them_without_the_capability_variables():
+    # Act: what the encode endpoint sets until the writer release of 2.2.0.
     settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.1.0"))
 
     # Assert
     assert settings.accepted_protocol_versions == ("2.0.0", "2.1.0")
+    assert (settings.capabilities_url, settings.storage_host) == (None, None)
 
 
-@pytest.mark.parametrize("value", ["2.2.0", "2.0.0,2.2.0"], ids=["alone", "beside-a-live-version"])
+@pytest.mark.parametrize("value", ["2.3.0", "2.0.0,2.3.0"], ids=["alone", "beside-a-live-version"])
 def test_from_env_when_an_entry_is_a_draft_version_should_refuse_the_start(monkeypatch, value):
-    # Arrange: this test's registry defines its own draft, whatever draft the shipped tree lists.
+    # Arrange: the shipped tree lists no draft since 2.2.0 went live; this test's registry defines one.
     shipped = ContractRegistry.load()
-    versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.2.0"]}}
+    versions = {**shipped.versions, "protocol": {**shipped.versions["protocol"], "draft": ["2.3.0"]}}
     registry = dataclasses.replace(shipped, versions=versions)
     monkeypatch.setattr(worker_settings, "load_registry", lambda: registry)
 
@@ -1015,7 +1024,7 @@ def test_from_env_when_the_environment_is_not_a_mapping_should_raise_type_error(
         WorkerSettings.from_env(not_a_mapping)
 
 
-# --- the capability exchange (protocol 2.2.0, a draft: these tests' registry lists it as live) ----------------
+# --- the capability exchange (protocol 2.2.0, live since Hub 0.11.0: the committed registry lists it) ----------
 
 CAPABILITIES_URL = "https://hub.test.invalid/api/transcode/v2/capabilities"
 STORAGE_HOST = "store.test.invalid"
@@ -1023,16 +1032,7 @@ CAPABILITY_ENV = {"VH_CAPABILITIES_URL": CAPABILITIES_URL, "VH_STORAGE_HOST": ST
 STORAGE_PROFILE_VARIABLES = {variable: None for variable in VALID_ENV if variable.startswith("VH_STORAGE_")}
 
 
-@pytest.fixture
-def capability_live(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A registry that lists 2.2.0 as live, as the release that makes it live will."""
-    shipped = ContractRegistry.load()
-    versions = {**shipped.versions, "protocol": {"live": ["2.0.0", "2.1.0", "2.2.0"], "draft": []}}
-    registry = dataclasses.replace(shipped, versions=versions)
-    monkeypatch.setattr(worker_settings, "load_registry", lambda: registry)
-
-
-def test_from_env_when_two_two_zero_is_accepted_should_need_no_storage_profile(capability_live):
+def test_from_env_when_two_two_zero_is_accepted_should_need_no_storage_profile():
     # Arrange
     env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **CAPABILITY_ENV, **STORAGE_PROFILE_VARIABLES)
 
@@ -1046,7 +1046,7 @@ def test_from_env_when_two_two_zero_is_accepted_should_need_no_storage_profile(c
         settings.storage_profile("default")
 
 
-def test_from_env_when_two_two_zero_is_accepted_beside_profiles_should_hold_both(capability_live):
+def test_from_env_when_two_two_zero_is_accepted_beside_profiles_should_hold_both():
     # Arrange
     env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **CAPABILITY_ENV)
 
@@ -1059,9 +1059,7 @@ def test_from_env_when_two_two_zero_is_accepted_beside_profiles_should_hold_both
 
 
 @pytest.mark.parametrize("variable", ["VH_CAPABILITIES_URL", "VH_STORAGE_HOST"])
-def test_from_env_when_two_two_zero_is_accepted_without_a_capability_variable_should_refuse_naming_it(
-    capability_live, variable
-):
+def test_from_env_when_two_two_zero_is_accepted_without_a_capability_variable_should_refuse_naming_it(variable):
     # Arrange
     env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **{**CAPABILITY_ENV, variable: None})
 
@@ -1078,7 +1076,7 @@ def test_from_env_when_two_two_zero_is_accepted_without_a_capability_variable_sh
     ("https://hub.test.invalid/capabilities#here", CARRIES_A_FRAGMENT),
     ("hub.test.invalid/capabilities", NOT_AN_HTTPS_URL),
 ])
-def test_from_env_when_the_capabilities_url_is_not_a_bare_https_url_should_refuse(capability_live, value, rule):
+def test_from_env_when_the_capabilities_url_is_not_a_bare_https_url_should_refuse(value, rule):
     # Arrange
     env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **{**CAPABILITY_ENV, "VH_CAPABILITIES_URL": value})
 
@@ -1093,7 +1091,7 @@ def test_from_env_when_the_capabilities_url_is_not_a_bare_https_url_should_refus
     "Store.test.invalid", "store.test.invalid:443", "https://store.test.invalid", "store.test.invalid.",
     "store_test.invalid", "-store.test.invalid", "store.test.invalid/bucket",
 ], ids=["upper-case", "port", "scheme", "trailing-dot", "underscore", "leading-hyphen", "path"])
-def test_from_env_when_the_storage_host_is_no_lowercase_dns_hostname_should_refuse(capability_live, value):
+def test_from_env_when_the_storage_host_is_no_lowercase_dns_hostname_should_refuse(value):
     # Arrange
     env = _env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **{**CAPABILITY_ENV, "VH_STORAGE_HOST": value})
 
@@ -1131,7 +1129,7 @@ def test_from_env_when_two_two_zero_is_not_accepted_should_still_check_the_capab
     assert refusal.variable == "VH_STORAGE_HOST"
 
 
-def test_settings_when_they_hold_the_capability_variables_should_show_neither(capability_live):
+def test_settings_when_they_hold_the_capability_variables_should_show_neither():
     # Arrange
     settings = WorkerSettings.from_env(_env(VH_ACCEPTED_PROTOCOL_VERSIONS="2.0.0,2.2.0", **CAPABILITY_ENV))
 

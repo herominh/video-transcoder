@@ -63,6 +63,7 @@ from core.thumbnail import ThumbnailResult
 from tests.contract.v2_support import (
     ACQUIRE_PROTOCOL_VERSION,
     CALLBACK_URL,
+    CAPABILITY_ENV,
     CLAIM_URL,
     GRANT_ENCRYPTED,
     HUB_KEY,
@@ -827,7 +828,7 @@ def test_run_when_the_dispatch_speaks_the_newer_live_version_should_report_and_s
     # Arrange: a worker that lists every live version, and a dispatch at the newer one.
     newer = Harness(
         tmp_path, monkeypatch, request_changes={"/protocol_version": ACQUIRE_PROTOCOL_VERSION},
-        settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS),
+        settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV),
     )
 
     # Act
@@ -2775,7 +2776,7 @@ def test_run_when_a_writer_stamps_the_other_live_version_should_fail_its_self_ch
     tmp_path, monkeypatch
 ):
     # Arrange: a worker that lists every live version, a dispatch at 2.0.0, and a writer of the result that stamps 2.1.0.
-    harness = Harness(tmp_path, monkeypatch, settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS))
+    harness = Harness(tmp_path, monkeypatch, settings=worker_settings(VH_ACCEPTED_PROTOCOL_VERSIONS=LIVE_PROTOCOL_VERSIONS, **CAPABILITY_ENV))
     real_result_completed = runner_module.messages.result_completed
 
     def stamping_the_other_version(**arguments: Any) -> dict[str, Any]:

@@ -17263,7 +17263,7 @@
       "payload": "fixtures/capabilities-version/N1089-capability-request-at-2-2-0-under-a-context-listing-only-the-live-versions.json",
       "context": "fixtures/contexts/ctx-cap-n1089.json",
       "rule": "capabilities-version",
-      "purpose": "capability request at 2.2.0 under a context listing only the live versions",
+      "purpose": "capability request at 2.2.0 under a context listing only 2.0.0 and 2.1.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -17277,7 +17277,7 @@
       "payload": "fixtures/capabilities-version/N1090-capability-answer-at-2-2-0-under-a-context-listing-only-the-live-versions.json",
       "context": "fixtures/contexts/ctx-cap-n1090.json",
       "rule": "capabilities-version",
-      "purpose": "capability answer at 2.2.0 under a context listing only the live versions",
+      "purpose": "capability answer at 2.2.0 under a context listing only 2.0.0 and 2.1.0",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -23570,6 +23570,34 @@
         "layer": null,
         "reason": null,
         "instance_path": null
+      }
+    },
+    {
+      "id": "N1528",
+      "payload": "fixtures/capabilities-request/N1528-request-md5-a-non-canonical-spelling-of-its-digest.json",
+      "context": "fixtures/contexts/ctx-cap-request.json",
+      "rule": "capabilities-bounds",
+      "purpose": "request md5 a non-canonical spelling of its digest",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/put/objects/0/md5"
+      }
+    },
+    {
+      "id": "N1529",
+      "payload": "fixtures/capabilities-request/N1529-request-md5-with-a-slash-as-its-22nd-character.json",
+      "context": "fixtures/contexts/ctx-cap-request.json",
+      "rule": "capabilities-bounds",
+      "purpose": "request md5 with a slash as its 22nd character",
+      "context_needed": false,
+      "expect": {
+        "outcome": "reject",
+        "layer": "schema",
+        "reason": "schema_violation",
+        "instance_path": "/put/objects/0/md5"
       }
     }
   ]

@@ -1,6 +1,6 @@
 # Transcode contract v2
 
-Protocols `2.0.0` and `2.1.0` live, protocol `2.2.0` a draft, generation manifest `1.0.0`. **This file is normative.** The Hub
+Protocols `2.0.0`, `2.1.0` and `2.2.0` live, generation manifest `1.0.0`. **This file is normative.** The Hub
 validator (PHP, `App\Protocol\Transcode`) and the worker validator (Python, `tests/contract/` in the
 worker repository) both implement exactly the rules below. When a fixture and this file disagree,
 this file wins and the fixture is a bug. `versions.json` lists the versions accepted in production; every fixture is synthetic.
@@ -302,8 +302,10 @@ The capability kinds (`2.2.0`) use the local `capabilities-common.schema.json` d
 1 to 2,147,483,647; `media_duration_ms` is null or 1 to 21,600,000; a request's `put` is null or
 `{lifetime_seconds, objects}` with `lifetime_seconds` 60 to 300 and 1 to 128 objects `{path, size_bytes,
 md5}`: `path` a common `rel_path` (relative to the granted prefix), `size_bytes` 1 to 67,108,864 (64 MiB,
-one single PUT), `md5` the base64 of the 16-byte MD5 of the object's bytes, exactly 24 characters
-`^[A-Za-z0-9+/]{22}==$`. An answer carries `lease.expires_at`, `stage {name, ends_at}`, `source` null or
+one single PUT), `md5` the base64 of the 16-byte MD5 of the object's bytes in its canonical spelling,
+exactly 24 characters `^[A-Za-z0-9+/]{21}[AQgw]==$`: the 22nd character carries the digest's last 2 bits
+followed by 4 zero bits, so only `A`, `Q`, `g` and `w` can stand there, and one digest has one spelling.
+An answer carries `lease.expires_at`, `stage {name, ends_at}`, `source` null or
 `{expires_at, url}` and `put` null or `{expires_at, objects}` with 1 to 128 objects `{path, url}`; a URL
 has the bounds and refusals of the acquire's `presigned_put_url` (1 to 4,096 characters, `https://`, no
 backslash, `#`, bracket or user information), defined again in that file. Every object is closed, every
@@ -720,8 +722,8 @@ The record rules apply to both encode and acquire:
 | C1 | A version field that is absent, not a string, or not accepted is rejected at L2 (`unsupported_version`) before any schema runs. |
 | C2 | No protocol major other than 2 and no manifest major other than 1 is accepted. |
 | C3 | Versions match by exact string; no draft is compatible with another version. |
-| C4 | `versions.json` `live` lists the versions production accepts; `draft` lists versions under development, accepted only by a context built for tests. A version absent from the list of the context's channel is `unsupported_version`. |
-| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` went live with its readers: `live` is `["2.0.0", "2.1.0"]`, and a runtime's list holds live values only; a dispatch keeps its one recorded version (section 5). `2.2.0`, the capability exchange, is a draft: `draft` is `["2.2.0"]`, `live` is unchanged, no runtime lists it and no Hub writes it; only a context built for tests accepts it. |
+| C4 | `versions.json` `live` lists the versions production accepts; `draft` lists versions under development, accepted only by a context built for tests. A version absent from the list of the context's channel is `unsupported_version`. A manifest's version does not follow the protocol's channel: a receiver accepts the versions of `manifest.live`, and one built for tests on the draft channel also those of `manifest.draft`. |
+| C5 | A receiver accepts a minor version only when it lists it. Readers upgrade first (accept N and N+1), writers second. There is no "accept a newer minor and ignore what is unknown" path. `2.1.0` went live with its readers, and `2.2.0`, the capability exchange, went live with its readers too: `live` is `["2.0.0", "2.1.0", "2.2.0"]`, `draft` is empty, and a runtime's list holds live values only; a dispatch keeps its one recorded version (section 5). An encode runtime lists `2.2.0` only with its capability configuration (15.4, runtime rule 3). |
 | C6 | Every object of every schema has `additionalProperties: false` (the fifteen kinds, the context, the carriers, the catalog), except `ext`. |
 | C7 | `ext` is the only extension point: optional on encode progress and encode results, at most 8 members named `x_[a-z0-9_]{1,30}`, values a string of at most 64 printable ASCII characters that does not contain `://`, an integer within +-(2^53 - 1) or a boolean. Receivers ignore `ext` in every decision. |
 | C8 | Every identity field is required and non-null, with no default; an identity field equal to `video_uuid` where it names another entity is S7. |
@@ -804,7 +806,7 @@ key line.
   capability address is the worker's trusted configuration, `https` only, its certificate verified and
   no redirect followed; the route is served only over TLS, never redirects plain HTTP, and every
   response it gives, a `hub.error` included, carries `Cache-Control: no-store` (section 15.4).
-  Its HTTP readers and their caps are the Hub's capability route (a later slice) and the worker's
+  Its HTTP readers and their caps are the Hub's capability route and the worker's
   capability client: only a reader of this one answer permits 2,097,152 bytes, as only the acquire
   grant's reader does for that kind.
 * **Live receiver order:** L0, L1, L2, then key lookup by `key_id` (`unknown_key_id`),
@@ -864,17 +866,18 @@ without a valid `hub.error` is `unreachable`; a non-envelope `413` is reported a
 33,024, `runpod.acquire.output` 131,328); acquire request 4,096, grant 2,097,152,
 completed 65,536 and failed 4,096; `max_json_depth` 32, `max_tokens` (section 4, step 2), `clock_skew_seconds` 300,
 `max_segments_per_rendition` 3,600, `storage_call_margin_seconds` 600 (15.1, rule 8; 15.2); capability
-request 32,768 and answer 2,097,152, and `capability_closure_margin_seconds` 60 (section 15.4, Hub rule
+request 32,768 and answer 2,097,152, and `capability_closure_margin_seconds` 120 (section 15.4, Hub rule
 7), which no validator reads. The worst case of every kind (every string at its maximum length
 in the costliest characters, every integer at its maximum, every array full, every optional member
 present, `/` written as `\/`) passes its schema and fits its limit; both suites build it, prove it
 maximal against the schema's bounds, and measure it. Both suites measure two capability maxima of each
 kind. The maximal positives of the catalog, which pass K5 as well: the request with 128 objects of
-128-character paths, every integer at its maximum and the escaped maximal MD5 is 29,062 bytes (945
-tokens), and the answer with 128 put URLs and a source URL of 4,096 characters each, `/` escaped
-wherever K5 lets it stand, 959,619 bytes (699 tokens). The schema-only maxima, which need not pass K5:
+128-character paths, every integer at its maximum and the escaped maximal MD5 (21 `/`, each written `\/`,
+then `w`, one of the four characters a canonical spelling ends in) is 28,934 bytes (945 tokens), and
+the answer with 128 put URLs and a source URL of 4,096 characters each, `/` escaped wherever K5 lets it
+stand, 959,619 bytes (699 tokens). The schema-only maxima, which need not pass K5:
 the same with the longest version and audience strings the schema allows, and in the answer every URL
-`https://` followed by 4,088 `/` (the costliest schema-valid character, written `\/`), are 29,080 and
+`https://` followed by 4,088 `/` (the costliest schema-valid character, written `\/`), are 28,952 and
 1,076,500 bytes. `max_tokens` needs no change.
 
 **Writer convention.** Senders serialize compactly: no insignificant whitespace, only the escapes
@@ -913,7 +916,7 @@ Catalog counts are calculated from `cases.json`; positive and negative ids conti
 and `N149`, without renumbering old cases (two to four digits). The acquire groups are
 `acquire-request`, `acquire-grant`, `acquire-results`, `acquire-contexts`, `acquire-version`,
 `acquire-semantics`, `acquire-bounds`, `acquire-carriers`, named by `rule`. The capability groups
-(`2.2.0`, ids `P112` to `P157` and `N945` to `N1527`, payloads under `fixtures/capabilities-request/`,
+(`2.2.0`, ids `P112` to `P157` and `N945` to `N1529`, payloads under `fixtures/capabilities-request/`,
 `fixtures/capabilities-granted/` and `fixtures/capabilities-version/`) are `capabilities-request` (12
 cases: every stage, the heartbeat, source only, put only with 1 and 128 objects, both, a null and a set
 duration, the worker's self-check, the minimal and the maximal escaped request),
@@ -921,11 +924,12 @@ duration, the worker's self-check, the minimal and the maximal escaped request),
 bound or before the sending, a put URL the receiver's clock already sees expired, escapes decoded once
 and a security token, an allowed name escaped once, the minimal and the maximal escaped answer), `capabilities-contexts` (144: a valid row and the absent and null case of every
 required field, for each of the four role and kind pairs), `capabilities-version` (21: both kinds at
-`2.0.0` and `2.1.0`, both at `2.2.0` under the live lists, the four acquire kinds at `2.2.0`, the eight
+`2.0.0` and `2.1.0`, both at `2.2.0` under a context listing only `2.0.0` and `2.1.0`, the four acquire kinds at `2.2.0`, the eight
 encode-family kinds at `2.2.0` with their `2.0.0` shapes, a `hub.error` carrying a reserved capability
 code, the manifest at `1.0.0` and at `2.2.0`), `capabilities-semantics` (122: the S checks of both
-kinds, every branch of K1 to K5 and every K5 URL rule, the list of query names included) and `capabilities-bounds` (311: the absent, null,
+kinds, every branch of K1 to K5 and every K5 URL rule, the list of query names included) and `capabilities-bounds` (313: the absent, null,
 wrong-type and both bound negatives of every member of both kinds, the URL refusals of the schema,
+two MD5 spellings that are not canonical,
 closed objects and enums, the parse layer, the request's cap exactly, both caps one byte over, and 23
 invalid contexts). Context-construction
 cases use outcome `context_invalid` or `context_incomplete`, layer `context`, the matching
@@ -1248,14 +1252,15 @@ check compares them, and the residual risk is accepted until then (publication s
 manifest being read from the named location). The claim address and encode prefix layout are the Hub's;
 acquire fixes its source layout and PUT authority in `2.1.0` as specified above.
 
-Protocol `2.2.0`, a draft (C5), brings what B07 promised a later version: the capability exchange of
+Protocol `2.2.0` (C5) brings what B07 promised a later version: the capability exchange of
 section 15.4, by which a runtime holds no storage credential and asks for short-lived signed URLs, one
 per object, with the lease that its requests renew and the stage it reports. `credential_ref` still names
-the location (section 7, "Reaching a location"); at `2.2.0` no configured profile is used for it. These
-are rules of a draft: no runtime lists `2.2.0` and no Hub writes it. What stays outside the contract:
-the records of the Hub's seal (the declared objects, their expiries and the closure's evidence are the
-Hub's own, and a later slice builds them), and promotion by copy to a second bucket, which the closure
-seal of 15.4 replaces and which is not built.
+the location (section 7, "Reaching a location"); at `2.2.0` no configured profile is used for it. It is
+live for readers: a Hub writes it only from the release whose manifest names it as the writer of
+`video.process`, and an encode runtime lists it only with its capability configuration (15.4, runtime rule 3).
+What stays outside the contract: the records of the Hub's seal (the declared objects, their expiries and
+the closure's evidence are the Hub's own, and built with its seal), and promotion by copy to a second
+bucket, which the closure seal of 15.4 replaces and which is not built.
 
 ### 15.4 The capability exchange (`2.2.0`)
 
@@ -1277,32 +1282,57 @@ messages (sections 7 to 9).
    `https` URL: the runtime refuses any other scheme, verifies the Hub's certificate and follows no
    redirect, because the answer carries URLs that are write capabilities. An answer it does not accept
    (a signature that does not verify, a verdict other than accepted at `worker_receiver`, K3 to K5
-   included) is discarded unused: no URL of it is used.
+   included) is discarded unused: no URL of it is used. An encode runtime that lists `2.2.0` needs its
+   capability address and its storage host (`expect.capability_storage_host`, K5) from trusted
+   configuration, and does not start without either: the worker's `VH_CAPABILITIES_URL` and
+   `VH_STORAGE_HOST`; the storage host is a host name, not one of the `VH_STORAGE_<NAME>_…` credential
+   profiles. An acquire runtime, whose request exists at `2.1.0` only, never runs a `2.2.0` dispatch and
+   needs neither.
 4. It declares for every object its path relative to the granted prefix, its exact size and the base64
-   MD5 of its bytes, and sends the PUT with exactly that `Content-MD5`. A path keeps the size and MD5 it
-   was first declared with.
+   MD5 of its bytes in its canonical spelling (section 7), and sends the PUT with exactly that
+   `Content-MD5`. A path keeps the size and MD5 it was first declared with.
 5. It uses a URL only for the object it was granted for, and only before the duration `expires_at`
    minus the answer's `sent_at` has passed since the instant it **sent** the request, on a monotonic
    clock. It asks again for a URL it could not use in time: renewal is asking again.
 6. `put` null with `source` false is the heartbeat. A runtime sends a request at least every 180 seconds
    while it works. Its lease ends, by its own count, once `lease.expires_at` minus the answer's
    `sent_at` has passed since the instant it sent the request that answer answers, on the same monotonic
-   clock. When it cannot obtain an accepted answer before its lease ends, or the Hub answers
+   clock. Until its first accepted answer it has been told no lease: it counts its lease as 600 seconds
+   (the least an answer promises, Hub rule 6) from the moment it was granted its claim, on the same
+   clock; the Hub records 900 seconds from the grant, so the runtime's count ends first. When it cannot
+   obtain an accepted answer before its lease ends, or the Hub answers
    `lease_expired`, `stage_budget_exceeded` or `capability_refused`, it stops: it starts no further
    write and asks for no further URL, ends its work, and reports its failed result (15.1 rules 8 and 9
    unchanged). A stopped runtime may still store its result (15.1 rule 9) through a URL it already holds
    and whose expiry has not passed; it writes nothing else.
-7. A `hub.error` whose `retryable` is true, or an answer that section 12 ("Answers that are not a
-   hub.error") says to retry, is asked again as a new message (rule 2), with the claim's backoff and
-   its reading of `Retry-After` (15.1, rule 6), never at or after the end of its lease (rule 6). Every
-   other `hub.error`, every other status and an answer it does not accept (rule 3) end the work as
-   rule 6 does.
+7. A `hub.error` whose `retryable` is true, an answer that section 12 ("Answers that are not a
+   hub.error") says to retry, and a request that got no answer at all (a transport failure, a timeout)
+   are asked again as a new message (rule 2), with the claim's backoff and its reading of `Retry-After`
+   (15.1, rule 6), never at or after the end of its lease (rule 6), and never at or after its deadline
+   (15.1 rule 8) when that comes before the lease's end: the runtime then ends the work and reports
+   `deadline_exceeded`. A `413` that is no `hub.error` envelope ends the work and is reported with the
+   code section 12 gives it (`payload_too_large`). Every other `hub.error`, every other status and an
+   answer it does not accept (rule 3) end the work as rule 6 does.
 8. `stage` is the stage it is in; stages only move forward, in the order `probing`, `downloading`,
-   `transcoding`, `finalizing`, `uploading`. `media_duration_ms` is null until the probe admitted the
-   source, then the admitted duration, unchanged afterwards.
+   `transcoding`, `finalizing`, `uploading`. The request for the stored result's URL (rule 9) names the
+   stage the execution is in when its work ends: `uploading` after a completed generation, and the
+   stage it failed at otherwise, never an earlier one. `media_duration_ms` is null until the probe
+   admitted the source, then the admitted duration, unchanged afterwards.
 9. The manifest and the stored result are objects like the others, at their fixed keys (15.1 rule 9),
-   asked for last.
+   asked for last. A runtime that failed before it entered any stage stores no result: a request must
+   name a stage (rule 8), and it has none to name.
 10. URLs, request bodies and answers are never logged, persisted, or put in an error or a message.
+
+What a runtime reports when the exchange ended its work (rules 6 and 7), as the `error` of its
+`transcode.result.failed`, never retryable, at the stage it was in:
+
+| `error.class` | `error.code` | When |
+|---|---|---|
+| `authority_refused` | the Hub's `error.code` | a `hub.error` that ends the work: not retryable, among them `capability_refused`, `lease_expired` and `stage_budget_exceeded` (Hub rule 3), `capability_conflict` and `capability_limit_exceeded` (Hub rule 5) |
+| `authority_refused` | `payload_too_large` | a `413` that is no `hub.error` envelope (rule 7, section 12) |
+| `authority_refused` | `capability_answer_invalid` | an answer it does not accept (rule 3), or any other status |
+| `authority_refused` | `lease_unrenewed` | no accepted answer before its lease ended by its own count (rule 6) |
+| `deadline_exceeded` | `capability_deadline_exceeded` | its deadline came before an accepted answer (rule 7) |
 
 **The Hub.**
 
@@ -1339,10 +1369,9 @@ messages (sections 7 to 9).
    the Hub answers ends at least 600 seconds after the answer's `sent_at`, or at the execution's hard
    deadline when that is sooner: the runtime's 180-second heartbeat (runtime rule 6) rests on it.
 7. The Hub publishes a `2.2.0` generation only after its closure: the newest put expiry it recorded plus
-   `limits.json` `capability_closure_margin_seconds` (60), and the store's listing of the prefix in
-   agreement with the record. The stored result (`result.json`) is no artifact and its write may fail
+   its closure margin, and the store's listing of the prefix in agreement with the record. The stored result (`result.json`) is no artifact and its write may fail
    without holding back the report (15.1 rule 9), so the listing may lack it: the listing holds every
    other recorded object, the manifest included, at its recorded size, and nothing that is not
-   recorded; the stored result, when listed, has its recorded size. The seal is the Hub's, and a later
-   slice builds it. `write_deadline_at` (15.2, "The last write") stays the bound a deletion and a
-   cleanup wait for.
+   recorded; the stored result, when listed, has its recorded size. The margin is at least `limits.json`
+   `capability_closure_margin_seconds` (120), the least a Hub waits; a Hub's own setting may only raise
+   it. `write_deadline_at` (15.2, "The last write") stays the bound a deletion and a cleanup wait for.

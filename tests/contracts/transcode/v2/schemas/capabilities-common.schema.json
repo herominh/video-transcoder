@@ -34,7 +34,7 @@
       "type": "string",
       "minLength": 24,
       "maxLength": 24,
-      "pattern": "^[A-Za-z0-9+/]{22}==$",
+      "pattern": "^[A-Za-z0-9+/]{21}[AQgw]==$",
       "not": {
         "pattern": "[\\x00-\\x1f\\x7f]"
       }
