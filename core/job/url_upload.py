@@ -252,12 +252,14 @@ def _bytes_of(item: _Item) -> bytes:
 
 def _clear_frames_of(error: BaseException) -> None:
     """Clear the frames the tracebacks of `error` and of every error it is chained to hold (a frame still running is
-    left as it is). Not to be deleted: urllib3 (HTTPConnectionPool.urlopen, in the 2.8.0 that requirements.txt pins)
-    binds the error it handles to a local (`new_e = e`) and raises it again, so that finished frame and the error refer
-    to each other, and a finished frame holds the one that called it: without this, a failed request's whole stack, the
-    body of a PUT included (up to 64 MiB), would live on until a cyclic collection, as the release tests of
-    tests/job/test_url_upload.py show (a PUT given up with no answer, a refusal whose error body breaks off). Nothing
-    of the error is kept or logged, and no error of this cleanup escapes: the outcome is the caller's."""
+    left as it is). Not to be deleted: urllib3 (the 2.8.0 that requirements.txt pins) keeps a failed request's error in
+    a reference cycle with its finished frames, in two places: on a request that got no answer, the local `new_e` of
+    HTTPConnectionPool.urlopen (the error is raised again through Retry.increment); on an answer body cut short, its
+    `_error_catcher` context manager, whose contextlib `__exit__` frame keeps the error thrown into it. A finished frame
+    holds the one that called it, so without this a failed request's whole stack, the body of a PUT included (up to
+    64 MiB), would live on until a cyclic collection, as the release tests of tests/job/test_url_upload.py show, one
+    for each place (a PUT given up with no answer, a refusal whose error body breaks off). Nothing of the error is kept
+    or logged, and no error of this cleanup escapes: the outcome is the caller's."""
     seen: set[int] = set()
     links: list[BaseException] = [error]
     while links:
