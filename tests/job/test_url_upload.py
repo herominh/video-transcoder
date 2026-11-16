@@ -727,6 +727,14 @@ class _Trickle:
     after: Callable[[], object] | None = None
 
 
+@dataclass(frozen=True)
+class _Silent:
+    """No answer at all: nothing is sent back until the client closes the connection, so that a request given up and
+    cut ends with a transfer error, not with the answer cut short that a _Trickle leaves. The request's read time-out
+    is the ceiling, so against a silent store it could end the request itself, at the same instant as the give-up:
+    a test that means the give-up to end it sets the store's `read_timeout_s` longer."""
+
+
 class _Lane(RequestsSession):
     """A lane's real session (one connection, as the runner's upload_session() makes it) whose PUTs go to the loopback
     store, the granted URL's path kept; it notes the thread each PUT runs on and when it was cut."""
@@ -740,6 +748,8 @@ class _Lane(RequestsSession):
     def put(self, url: str, data: Any, headers: Mapping[str, str], timeout: tuple[float, float], *,
             stop_line: StopLine) -> HttpResponse:
         path = urlsplit(url).path
+        if self._store.read_timeout_s is not None:
+            timeout = (timeout[0], self._store.read_timeout_s)
         self.puts.append((path.removeprefix(self._store.prefix_path), threading.current_thread(), time.monotonic()))
         return super().put(self._store.base + path, data, headers, timeout, stop_line=stop_line)
 
@@ -762,6 +772,8 @@ class _LoopbackStore:
         self.answered: list[str] = []
         self.plan: dict[str, list[Any]] = {}
         self.lanes: list[_Lane] = []
+        # A read time-out each lane's PUTs are sent with instead of the upload's (None: the upload's own).
+        self.read_timeout_s: float | None = None
 
     def lane(self) -> _Lane:
         """The upload's session factory."""
@@ -809,6 +821,9 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
             if isinstance(behaviour, _Trickle):
                 self._trickle(behaviour)
                 return
+            if isinstance(behaviour, _Silent):
+                self._stay_silent()
+                return
             if callable(behaviour):
                 behaviour()
             self.send_response(200)
@@ -831,6 +846,20 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
                         self.accepted.close_seen()
                         return
                     self.wfile.write(b"a")
+            except OSError:
+                # The client shut the connection: what the test waits for.
+                self.accepted.close_seen()
+
+        def _stay_silent(self) -> None:
+            self.close_connection = True
+            sock = self.connection
+            started = time.monotonic()
+            try:
+                while not store.stop.is_set() and time.monotonic() - started < HOLDS_AT_MOST_S:
+                    readable, _, _ = select.select([sock], [], [], TRICKLE_EVERY_S)
+                    if readable and sock.recv(1) == b"":
+                        self.accepted.close_seen()
+                        return
             except OSError:
                 # The client shut the connection: what the test waits for.
                 self.accepted.close_seen()
@@ -893,13 +922,15 @@ def _ended(thread: threading.Thread) -> bool:
         running is not thread for running in threading.enumerate())
 
 
+@pytest.mark.parametrize("withheld", [_Trickle(), _Silent()], ids=["answer-trickles", "no-answer"])
 def test_upload_when_a_put_is_given_up_at_its_ceiling_should_close_its_connection_end_its_thread_and_retry_anew(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, withheld
 ):
-    # Arrange: the thumbnail's first answer never completes; a PUT of the thumbnail may take 0.3 s. The bytes each
-    # PUT of the thumbnail is read into are noted (the list's reference is the only one the test keeps), and the
-    # first one's reference count is taken while the retry reads the file again, once the given-up PUT's thread has
-    # ended. The cyclic collector is off, so that a reference cycle keeping the body would show.
+    # Arrange: the thumbnail's first answer never completes (its head trickles: the cut request ends with what was read
+    # of it; or nothing comes: it ends with a transfer error); a PUT of the thumbnail may take 0.3 s. The bytes each PUT
+    # of the thumbnail is read into are noted (the list's reference is the only one the test keeps), and the first one's
+    # reference count is taken while the retry reads the file again, once the given-up PUT's thread has ended. The
+    # cyclic collector is off, so that a reference cycle keeping the body would show.
     setup = _Setup(tmp_path, segments=0)
     _short_ceiling_for(setup, monkeypatch, "thumbnail.jpg")
     before = storage_module.abandoned_requests()
@@ -922,7 +953,9 @@ def test_upload_when_a_put_is_given_up_at_its_ceiling_should_close_its_connectio
                 return data
 
             monkeypatch.setattr(url_upload, "_bytes_of", noting_bytes_of)
-            store.plan["thumbnail.jpg"] = [_Trickle()]
+            store.plan["thumbnail.jpg"] = [withheld]
+            # Only the give-up at the ceiling may end the withheld answer, never the read time-out.
+            store.read_timeout_s = LONG_CEILING_S
             # Act
             uploaded = _upload_to(store, setup, parallelism=1)
             first, _ = store.arrivals_of("thumbnail.jpg")

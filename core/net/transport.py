@@ -364,14 +364,16 @@ class RequestsSession:
         self._session.close()
 
     def abandon(self) -> None:
-        """Cut the session now, from any thread: every socket it keeps is shut and the session is latched as expired,
-        as the watchdog does at the stop line; its watchdog is let go and its requests session closed. A request in
-        flight on it then ends with a transfer error on its own thread, and every later request on it is refused as
-        an expired session refuses one (DeadlineReached). It never raises: a session cut or closed already is cut
-        again, harmlessly, and an error of the requests session's close is dropped (its sockets are shut already, and
-        its text could quote a URL). What it does not end at once: a request still inside its TCP connect, whose
-        socket is not kept yet, ends when the connect does (within its connect time-out) and then goes no further,
-        and one still resolving its host's name, which nothing cuts short, goes no further once it has resolved."""
+        """Cut the session now, from any thread: every socket it keeps is shut and the session is latched as expired, as
+        the watchdog does at the stop line; its watchdog is let go and its requests session closed. A request in flight
+        on it then ends at once on its own thread, with a transfer error, or with what was read of an answer cut short
+        (http.client ends a head at the end of the stream and returns an answer), which its caller drops; every later
+        request on it is refused as an expired session refuses one (DeadlineReached). It never raises: a session cut or
+        closed already is cut again, harmlessly, and an error of the requests session's close is dropped (its sockets
+        are shut already, and its text could quote a URL). What it does not end at once: a request still inside its TCP
+        connect, whose socket is not kept yet, ends when the connect does (within its connect time-out) and then goes no
+        further, and one still resolving its host's name, which nothing cuts short, goes no further once it has
+        resolved."""
         self._sockets.expire()
         self._let_watchdog_go()
         try:
