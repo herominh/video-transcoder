@@ -695,6 +695,9 @@ TRICKLE_EVERY_S = 0.05
 HOLDS_AT_MOST_S = 15.0
 CUT_SEEN_WITHIN_S = 3.0
 DEADLINE_MS = 800
+# How long a refusal's error body says it is, and how much of it comes before the connection closes.
+ERROR_BODY_DECLARED_BYTES = 100
+ERROR_BODY_SENT_BYTES = 10
 
 
 @dataclass
@@ -735,6 +738,12 @@ class _Silent:
     a test that means the give-up to end it sets the store's `read_timeout_s` longer."""
 
 
+@dataclass(frozen=True)
+class _RefusalBrokenOff:
+    """A 400 whose error body breaks off: its head declares ERROR_BODY_DECLARED_BYTES, then ERROR_BODY_SENT_BYTES of
+    them come and the connection closes, so that reading the body for its error code ends with a transfer error."""
+
+
 class _Lane(RequestsSession):
     """A lane's real session (one connection, as the runner's upload_session() makes it) whose PUTs go to the loopback
     store, the granted URL's path kept; it notes the thread each PUT runs on and when it was cut."""
@@ -759,8 +768,9 @@ class _Lane(RequestsSession):
 
 
 class _LoopbackStore:
-    """A store on the loopback address. `plan` maps an object's path to what its next PUTs get: a _Trickle, or a
-    callable run before the 200; every other PUT is answered 200 at once, with an empty body."""
+    """A store on the loopback address. `plan` maps an object's path to what its next PUTs get: a _Trickle, a _Silent,
+    a _RefusalBrokenOff, or a callable run before the 200; every other PUT is answered 200 at once, with an empty
+    body."""
 
     def __init__(self, prefix_path: str) -> None:
         self.prefix_path = prefix_path
@@ -824,6 +834,9 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
             if isinstance(behaviour, _Silent):
                 self._stay_silent()
                 return
+            if isinstance(behaviour, _RefusalBrokenOff):
+                self._refuse_and_break_off()
+                return
             if callable(behaviour):
                 behaviour()
             self.send_response(200)
@@ -849,6 +862,14 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
             except OSError:
                 # The client shut the connection: what the test waits for.
                 self.accepted.close_seen()
+
+        def _refuse_and_break_off(self) -> None:
+            self.close_connection = True
+            self.wfile.write(
+                b"HTTP/1.1 400 Bad Request\r\nContent-Type: application/xml\r\n"
+                + f"Content-Length: {ERROR_BODY_DECLARED_BYTES}\r\nConnection: close\r\n\r\n".encode("ascii")
+                + b"<Error><Co"[:ERROR_BODY_SENT_BYTES]
+            )
 
         def _stay_silent(self) -> None:
             self.close_connection = True
@@ -1079,3 +1100,45 @@ def test_upload_when_one_lane_puts_two_objects_in_turn_should_open_a_connection_
     assert len(lanes) == 1 and lanes[0].cut_at is None
     assert [put[0] for put in lanes[0].puts] == ["thumbnail.jpg", "v360/playlist.m3u8", MANIFEST_NAME]
     assert playlist.connection is not thumbnail.connection
+
+
+def test_upload_when_a_refusals_error_body_breaks_off_should_keep_no_reference_to_that_puts_body(tmp_path, monkeypatch):
+    # Arrange: the thumbnail's first PUT is refused with a 400 whose error body breaks off (read for its error code,
+    # it ends with a transfer error: no answer, tried again); its second is stored. The bytes each PUT of the thumbnail
+    # is read into are noted (the list's reference is the only one the test keeps). The cyclic collector is off, so
+    # that a reference cycle keeping the first body would show.
+    setup = _Setup(tmp_path, segments=0)
+    read_bodies: list[bytes] = []
+    alone = [bytes(bytearray(len(b"the thumbnail")))]
+    held_by_a_list_alone = sys.getrefcount(alone[0])
+    bytes_of = url_upload._bytes_of
+
+    def noting_bytes_of(item):
+        data = bytes_of(item)
+        if item.upload.relative_path == "thumbnail.jpg":
+            read_bodies.append(data)
+        return data
+
+    monkeypatch.setattr(url_upload, "_bytes_of", noting_bytes_of)
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        with _loopback_store(setup) as store:
+            store.plan["thumbnail.jpg"] = [_RefusalBrokenOff()]
+            # Act
+            _upload_to(store, setup, parallelism=1)
+            first_put_thread = store.put_thread_of("thumbnail.jpg")
+            thread_ended = _ended(first_put_thread)
+            counted_after = sys.getrefcount(read_bodies[0])
+            holders = [
+                type(holder).__name__ for holder in gc.get_referrers(read_bodies[0]) if holder is not read_bodies
+            ]
+    finally:
+        if collecting:
+            gc.enable()
+    # Assert: the refusal was tried again and stored, and nothing but the test's list holds the refused PUT's body.
+    assert store.answered.count("thumbnail.jpg") == 1
+    assert len(store.arrivals_of("thumbnail.jpg")) == 2
+    assert thread_ended
+    assert len(read_bodies) == 2 and read_bodies[0] is not read_bodies[1]
+    assert counted_after == held_by_a_list_alone, holders

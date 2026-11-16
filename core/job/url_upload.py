@@ -33,20 +33,20 @@ host's name, which nothing cuts short, goes no further once it has resolved. A f
 resource_exhausted/storage_request_start_failed (retryable, its detail saying no session could be made), named in the
 log by the error's class alone. A request that ends with a transfer error has its traceback's frames cleared where it
 is caught (_clear_frames_of(): urllib3 keeps such an error in a reference cycle with its frames, which would hold the
-body until a cyclic collection). A failure that ends the upload (the deadline, a thread or session that cannot be
-made) may still hold its request's body, through the raised failure's traceback, until the next cyclic collection: the
-upload ends there. A 200 is success, its body never read. A 5xx, a time-out, a connection error or a stall is tried
-again after storage.py's waits (0.5, 2 and 8 s, each times a factor drawn between 0.5 and 1, a whole-seconds
-`Retry-After` honoured up to 30 s); so is any other 4xx but a 403 that storage.refusal_passes() lets pass: a 408, a
-409 or a 429 by its status alone, and any other 4xx by an error code such as RequestTimeout, IncompleteBody or
-BadDigest, read from at most ERROR_BODY_MAX_BYTES of its error body (never logged; that body is read for no other
-answer). A 403 puts the object back to be asked again in a later batch, at most MAX_REASKS further times, then
-output_write_failed/upload_url_refused (retryable); a URL whose usable time (less URL_MARGIN_S) has passed before its
-PUT could start is asked again without counting, the store having refused nothing. An object's retry budget (the waits
-before its further attempts) is its own and is kept across the URLs it is given, so only a URL that was never used for
-an attempt runs out of time for free: once the budget is spent, the last attempt's failure is raised (upload_stalled
-or upload_failed, retryable), whatever the URL. A refusal whose error body is read for its code and could not be read
-whole counts as no answer. Any other answer, a redirect included, is output_write_failed/upload_refused, final.
+body until a cyclic collection). Any failure that ends the upload may still hold its request's body, through the
+raised failure's traceback, until the next cyclic collection, the upload ending there. A 200 is success, its body
+never read. A 5xx, a time-out, a connection error or a stall is tried again after storage.py's waits (0.5, 2 and 8 s,
+each times a factor drawn between 0.5 and 1, a whole-seconds `Retry-After` honoured up to 30 s); so is any other 4xx
+but a 403 that storage.refusal_passes() lets pass: a 408, a 409 or a 429 by its status alone, and any other 4xx by an
+error code such as RequestTimeout, IncompleteBody or BadDigest, read from at most ERROR_BODY_MAX_BYTES of its error
+body (never logged; that body is read for no other answer). A 403 puts the object back to be asked again in a later
+batch, at most MAX_REASKS further times, then output_write_failed/upload_url_refused (retryable); a URL whose usable
+time (less URL_MARGIN_S) has passed before its PUT could start is asked again without counting, the store having
+refused nothing. An object's retry budget (the waits before its further attempts) is its own and is kept across the
+URLs it is given, so only a URL that was never used for an attempt runs out of time for free: once the budget is
+spent, the last attempt's failure is raised (upload_stalled or upload_failed, retryable), whatever the URL. A refusal
+whose error body is read for its code and could not be read whole counts as no answer. Any other answer, a redirect
+included, is output_write_failed/upload_refused, final.
 
 The first failure stops the rest: no new PUT starts, the PUTs under way are waited for (each within its ceiling or
 the deadline), and that failure is the upload's. A lost authority (the capability client's lost()) is such a
@@ -252,11 +252,12 @@ def _bytes_of(item: _Item) -> bytes:
 
 def _clear_frames_of(error: BaseException) -> None:
     """Clear the frames the tracebacks of `error` and of every error it is chained to hold (a frame still running is
-    left as it is). Not to be deleted: urllib3 (2.0.6, HTTPConnectionPool.urlopen) binds the error it handles to a
-    local (`new_e = e`) and raises it again, so that finished frame and the error refer to each other, and a finished
-    frame holds the one that called it: without this, a failed request's whole stack, the body of a PUT included (up to
-    64 MiB), would live on until a cyclic collection. Nothing of the error is kept or logged, and no error of this
-    cleanup escapes: the outcome is the caller's."""
+    left as it is). Not to be deleted: urllib3 (HTTPConnectionPool.urlopen, in the 2.8.0 that requirements.txt pins)
+    binds the error it handles to a local (`new_e = e`) and raises it again, so that finished frame and the error refer
+    to each other, and a finished frame holds the one that called it: without this, a failed request's whole stack, the
+    body of a PUT included (up to 64 MiB), would live on until a cyclic collection, as the release tests of
+    tests/job/test_url_upload.py show (a PUT given up with no answer, a refusal whose error body breaks off). Nothing
+    of the error is kept or logged, and no error of this cleanup escapes: the outcome is the caller's."""
     seen: set[int] = set()
     links: list[BaseException] = [error]
     while links:
