@@ -66,6 +66,7 @@ def test_job_when_the_dispatch_is_two_two_zero_should_complete_through_urls_alon
         source_client_factory=lambda access: factories.append("source"),
         output_client_factory=lambda access: factories.append("output"),
         url_session_factory=lambda: store,
+        upload_session_factory=lambda: store,
     )
     runtime = dataclasses.replace(runtime_of(hub, clock, capability_settings()), new_uuid=uuid_source())
     # Act
@@ -106,6 +107,7 @@ def test_job_when_the_same_media_comes_at_two_zero_zero_should_take_the_credenti
     runner = JobRunner(
         job_settings(scratch_root), source_client_factory=lambda access: s3, output_client_factory=lambda access: s3,
         url_session_factory=lambda: sessions.append("made"),
+        upload_session_factory=lambda: sessions.append("made"),
     )
     # Act
     with pytest.MonkeyPatch.context() as patched:
