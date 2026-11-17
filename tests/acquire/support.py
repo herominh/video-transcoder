@@ -19,8 +19,9 @@ from tests.contract.v2_support import (
     worker_env,
 )
 from tests.drive_import.fakes import (
-    API_KEY, FILE_ID, HEAD_REVISION, RESOURCE_KEY, STORAGE_HOST, DriveFile, FakeClock, FakeSession,
+    API_KEY, FILE_ID, HEAD_REVISION, RESOURCE_KEY, STORAGE_HOST, DriveFile, FakeSession,
 )
+from tests.support.fake_clock import FakeClock
 from tests.support.fake_response import FakeResponse
 from wrappers.runpod_acquire_handler import job_handler
 

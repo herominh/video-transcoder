@@ -1,5 +1,5 @@
 """A scripted answer of the shared HTTP session (core/net/), for the tests of every path that speaks through it: the
-Drive acquire's (tests/acquire/, tests/drive_import/) and the capability path's (tests/job/, tests/contract/).
+Drive acquire's (tests/acquire/, tests/drive_import/fakes.py) and the capability path's (tests/job/).
 
 Not a test module. It imports nothing of either runtime, so it loads on the encode image's Python (3.10) as well as on
 the acquire image's (3.12).

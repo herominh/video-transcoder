@@ -1,7 +1,7 @@
-"""Shared helpers of the Drive transfer's tests (tests/acquire/ and tests/drive_import/): a clock, a Drive file, and
-one session that stands for Google and the store at once. Nothing here opens a connection.
+"""Shared helpers of the Drive transfer's tests (tests/acquire/ and tests/drive_import/): a Drive file, and one session
+that stands for Google and the store at once. Nothing here opens a connection.
 
-Not a test module. FakeClock moves only when the transfer waits or a test moves it. DriveFile is the file's bytes,
+Not a test module. The clock the transfer is read on is tests/support/fake_clock.py's. DriveFile is the file's bytes,
 made lazily block by block (each block of 1 MiB starts with its own number, so a byte out of place changes every
 checksum), with its checksums computed once. FakeSession answers the transfer's requests as the test scripts them:
 Google's metadata and download by default from the DriveFile, the store's PUTs with a 200 and the body's MD5 as the
@@ -16,7 +16,6 @@ import json
 import random
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from functools import cached_property
 from typing import Any
 
@@ -24,9 +23,8 @@ import requests
 
 from core.net.clock import DeadlineReached, StopLine
 from core.drive_import.transfer import PART_SIZE
+from tests.support.fake_clock import FakeClock
 from tests.support.fake_response import FakeResponse
-
-START = datetime(2026, 10, 17, 8, 0, 0, tzinfo=timezone.utc)
 
 STORAGE_HOST = "storage.example.invalid"
 BUCKET = "videohub-school-a"
@@ -52,35 +50,11 @@ REDIRECT_TARGET = "https://elsewhere.example.invalid/somewhere"
 BLOCK_BYTES = 1_048_576
 # The blocks urllib3 reads a file-like request body in.
 BODY_BLOCK_BYTES = 16_384
-MIB = 1_048_576
 
 
 def part_url(n: int) -> str:
     query = f"partNumber={n}&uploadId={UPLOAD_ID}&X-Amz-Expires=1013&X-Amz-Signature={SIGNATURE_CANARY}-{n:03}"
     return f"{ORIGINALS}original.mp4?{query}"
-
-
-class FakeClock:
-    """now() and monotonic() move only when the transfer sleeps or the test advances them; sleeps are recorded."""
-
-    def __init__(self, start: datetime = START) -> None:
-        self._now = start
-        self._monotonic = 1_000.0
-        self.slept: list[float] = []
-
-    def now(self) -> datetime:
-        return self._now
-
-    def monotonic(self) -> float:
-        return self._monotonic
-
-    def sleep(self, seconds: float) -> None:
-        self.slept.append(seconds)
-        self.advance(seconds)
-
-    def advance(self, seconds: float) -> None:
-        self._now += timedelta(seconds=seconds)
-        self._monotonic += seconds
 
 
 class DriveFile:
