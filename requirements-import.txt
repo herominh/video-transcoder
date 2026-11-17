@@ -1,7 +1,7 @@
 # Direct requirements of the Google Drive acquire. Dockerfile.acquire installs requirements-import.lock compiled
 # from this input, never this file. requests and urllib3 stay pinned exactly: the watchdog's connection classes
 # and the redirect rule rest on their internals, and urllib3 2 refuses a body cut short (enforce_content_length),
-# where 1.26 reads it as a clean end. tests/drive_import/test_transport.py drives the real session at these pins.
+# where 1.26 reads it as a clean end. tests/net/test_transport.py drives the real session at these pins.
 # Regenerate the lock from the repository root, then re-add its generated-file header:
 # docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 sh -c 'pip install pip-tools==7.5.2 && pip-compile --generate-hashes --allow-unsafe --strip-extras --no-header --output-file requirements-import.lock requirements-import.txt'
 requests==2.34.2

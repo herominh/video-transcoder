@@ -6,9 +6,9 @@
 # a path given among them does not narrow the run.
 #
 # The checkout is mounted read-only at /src (never over the image's own /app copy) and is the working directory, so
-# `core`, `wrappers` and `tests` are the checkout's. Its `.env`, when there is one, is hidden behind an empty file: no
-# test reads it, and no secret goes into the container. Nothing is written into the checkout: no pytest cache, no
-# bytecode. /tmp is a writable tmpfs (the scratch directories of the job tests live there). The container has no
+# `core`, `wrappers` and `tests` are the checkout's. The working tree's `.env`, when there is one, is hidden behind an
+# empty file: no test reads it (the checkout's `.git` is still mounted; the container has no network). Nothing is
+# written into the checkout: no pytest cache, no bytecode. /tmp is a writable tmpfs (the scratch directories of the job tests live there). The container has no
 # network and runs an init process (the process-group tests need one). The image is amd64, so on an arm64 machine it
 # runs emulated and slowly. The image must already be on this machine: the script never pulls one.
 set -euo pipefail
