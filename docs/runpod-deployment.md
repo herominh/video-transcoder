@@ -82,24 +82,15 @@ Things an operator should know:
   pool therefore leaves no line of urllib3's; a request that fails is still logged in the worker's own words.
 - **Python.** The image starts the worker with `python3`, which is Python 3.10 there; the suite is run in the image
   for that reason.
-- **Running the whole suite in a rebuilt image.** The image ships what the worker runs and none of the tests, so the
-  repository's tree is mounted read-only and copied into the container without `.git`, `.claude`, `__pycache__` and
-  `.env`, and the suite runs on the copy. From the repository's root, with the rebuilt image in the place of `<image>`:
-
-  ```bash
-  docker run --rm --init -v "$PWD":/src:ro <image> bash -c '
-    mkdir /work && cd /src &&
-    tar --exclude=./.git --exclude=./.claude --exclude=__pycache__ --exclude=./.env -cf - . | tar -xf - -C /work &&
-    cd /work && pip install -r requirements-dev.txt &&
-    PYTHONDONTWRITEBYTECODE=1 python3 -m pytest tests -q -p no:cacheprovider'
-  ```
-
-  It must end with no failure; the five cases that drive the handler through the SDK run there (they are skipped
-  where the SDK is not installed). Keep `--init`: some tests of `tests/preflight/test_bounded_process.py` (those in
-  which a killed grandchild must be gone) need a first process in the container that reaps killed children. A
-  `bash -c` that stays the container's first process reaps them as well, but bash runs the last command of its line
-  in its own place, so here pytest would be the first process; without `--init`, end the line with a pipeline
-  (`... 2>&1 | tail -25`), for which bash stays.
+- **Running the whole suite in a rebuilt image.** Before an encode image is handed over for a push, run
+  `scripts/test-in-encode-image.sh <image>` from the repository's root (the image must be on this machine; the script
+  never pulls one) and record its counts (passed, skipped, xfailed) with the image's reference. It runs the whole suite
+  on the image's own Python and installed packages against the checkout, mounted read-only with its `.env` hidden, with
+  no network, no `pip install` and an init process (`--init`: some tests of `tests/preflight/test_bounded_process.py`,
+  those in which a killed grandchild must be gone, need a first process that reaps killed children). Extra arguments
+  are pytest options added to that whole-suite run. It must end with no failure; the five cases that drive the handler
+  through the SDK run there (they are skipped where the SDK is not installed). On the image's Python 3.10 the Drive
+  acquire's own test modules are reported skipped by name (`tests/conftest.py`): the acquire runs on 3.12 only.
 
 ## Architecture
 

@@ -33,7 +33,6 @@ from core.job import url_upload
 from core.job.url_upload import upload_generation_by_urls, upload_result_by_url
 from core.net.clock import StopLine
 from core.net.transport import HttpResponse, RequestsSession
-from tests.drive_import.fakes import FakeResponse
 from core.package import ManifestOutput
 from core.protocol.capabilities_client import CapabilityClient
 from tests.contract.v2_support import FakeClock, uuid_source
@@ -48,6 +47,7 @@ from tests.job.capability_fakes import (
     wait_until,
 )
 from tests.job.conftest import ScriptedDeadline
+from tests.support.fake_response import FakeResponse
 
 MANIFEST_NAME = "generation-manifest.json"
 MANIFEST_BYTES = b'{"the":"manifest"}'

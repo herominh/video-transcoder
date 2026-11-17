@@ -22,9 +22,12 @@ from core.drive_import.failure import Code, ImportFailed, Stage
 from core.drive_import.transfer import DOWNLOAD_CHUNK_BYTES, Part, TransferPlan, TransferResult, transfer
 from tests.acquire.support import PART_SIZE, SIGNATURE_CANARY, Scenario, grant_for
 from tests.drive_import.fakes import (
-    API_KEY, FILE_ID, HEAD_REVISION, METADATA_URL, MEDIA_URL, MIB, REDIRECT_TARGET, RESOURCE_KEY, STORAGE_HOST, DriveFile,
-    Fail, FakeClock, FakeResponse, FakeSession, Late, Put, Serve, google_error, json_answer, part_url, redirect,
+    API_KEY, FILE_ID, HEAD_REVISION, METADATA_URL, MEDIA_URL, REDIRECT_TARGET, RESOURCE_KEY, STORAGE_HOST, DriveFile,
+    Fail, FakeSession, Late, Put, Serve, google_error, json_answer, part_url, redirect,
 )
+from tests.support.fake_clock import FakeClock
+from tests.support.fake_response import FakeResponse
+from tests.support.sizes import MIB
 
 TWO_PARTS = PART_SIZE + 37
 COMPLETED = "source.acquire.result.completed"

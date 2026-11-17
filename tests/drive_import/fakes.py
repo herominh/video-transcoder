@@ -1,11 +1,12 @@
-"""Shared helpers of the Drive transfer's tests (tests/acquire/ and tests/drive_import/): a clock, a Drive file, and
-one session that stands for Google and the store at once. Nothing here opens a connection.
+"""Shared helpers of the Drive transfer's tests (tests/acquire/ and tests/drive_import/): a Drive file, and one session
+that stands for Google and the store at once. Nothing here opens a connection.
 
-Not a test module. FakeClock moves only when the transfer waits or a test moves it. DriveFile is the file's bytes,
+Not a test module. The clock the transfer is read on is tests/support/fake_clock.py's. DriveFile is the file's bytes,
 made lazily block by block (each block of 1 MiB starts with its own number, so a byte out of place changes every
 checksum), with its checksums computed once. FakeSession answers the transfer's requests as the test scripts them:
 Google's metadata and download by default from the DriveFile, the store's PUTs with a 200 and the body's MD5 as the
-ETag (as S3 answers an UploadPart); every request is recorded, and a PUT's body is read as urllib3 reads one.
+ETag (as S3 answers an UploadPart); every request is recorded, and a PUT's body is read as urllib3 reads one. Its
+answers are tests/support/fake_response.py's FakeResponse, which the capability path's tests share.
 """
 
 from __future__ import annotations
@@ -13,19 +14,17 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from functools import cached_property
 from typing import Any
 
 import requests
-from requests.structures import CaseInsensitiveDict
 
 from core.net.clock import DeadlineReached, StopLine
 from core.drive_import.transfer import PART_SIZE
-
-START = datetime(2026, 10, 17, 8, 0, 0, tzinfo=timezone.utc)
+from tests.support.fake_clock import FakeClock
+from tests.support.fake_response import FakeResponse
 
 STORAGE_HOST = "storage.example.invalid"
 BUCKET = "videohub-school-a"
@@ -51,35 +50,11 @@ REDIRECT_TARGET = "https://elsewhere.example.invalid/somewhere"
 BLOCK_BYTES = 1_048_576
 # The blocks urllib3 reads a file-like request body in.
 BODY_BLOCK_BYTES = 16_384
-MIB = 1_048_576
 
 
 def part_url(n: int) -> str:
     query = f"partNumber={n}&uploadId={UPLOAD_ID}&X-Amz-Expires=1013&X-Amz-Signature={SIGNATURE_CANARY}-{n:03}"
     return f"{ORIGINALS}original.mp4?{query}"
-
-
-class FakeClock:
-    """now() and monotonic() move only when the transfer sleeps or the test advances them; sleeps are recorded."""
-
-    def __init__(self, start: datetime = START) -> None:
-        self._now = start
-        self._monotonic = 1_000.0
-        self.slept: list[float] = []
-
-    def now(self) -> datetime:
-        return self._now
-
-    def monotonic(self) -> float:
-        return self._monotonic
-
-    def sleep(self, seconds: float) -> None:
-        self.slept.append(seconds)
-        self.advance(seconds)
-
-    def advance(self, seconds: float) -> None:
-        self._now += timedelta(seconds=seconds)
-        self._monotonic += seconds
 
 
 class DriveFile:
@@ -151,28 +126,6 @@ class DriveFile:
 # --- what the fake answers -----------------------------------------------------------------------------------------
 
 
-class FakeResponse:
-    """An answer: a status, headers (case-insensitive) and a body given as chunks, possibly lazy."""
-
-    def __init__(
-        self,
-        status_code: int,
-        headers: Mapping[str, str] | None = None,
-        body: bytes = b"",
-        chunks: Callable[[int], Iterator[bytes]] | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.headers = CaseInsensitiveDict(dict(headers or {}))
-        self._chunks = chunks if chunks is not None else (lambda size: _split(body, size))
-        self.closed = False
-
-    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
-        return self._chunks(chunk_size)
-
-    def close(self) -> None:
-        self.closed = True
-
-
 def _blocks_of(body: Any) -> Iterator[bytes]:
     """A request body as urllib3 sends a file-like one: read() in blocks until it gives nothing."""
     while True:
@@ -180,11 +133,6 @@ def _blocks_of(body: Any) -> Iterator[bytes]:
         if not block:
             return
         yield block
-
-
-def _split(body: bytes, size: int) -> Iterator[bytes]:
-    for start in range(0, len(body), size):
-        yield body[start:start + size]
 
 
 def json_answer(status: int, document: Any) -> FakeResponse:

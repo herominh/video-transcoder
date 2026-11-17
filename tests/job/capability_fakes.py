@@ -49,8 +49,8 @@ from tests.contract.v2_support import (
     timestamp_text,
     worker_settings,
 )
-from tests.drive_import.fakes import FakeResponse
 from tests.job.conftest import DELIVERED, claimed_execution
+from tests.support.fake_response import FakeResponse
 
 CAPABILITY_VERSION = "2.2.0"
 CAPABILITIES_URL = "https://hub.test.invalid/api/transcode/v2/capabilities"

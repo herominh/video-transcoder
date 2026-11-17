@@ -18,10 +18,12 @@ from core.protocol.acquire_claim import AcquireGrant, claim_execution
 from core.protocol.acquire_dispatch import accept_dispatch
 from tests.acquire.support import Scenario, wire
 from tests.contract.v2_support import HUB_KEY, RUNTIME_ID, signed_carrier
-from tests.drive_import.test_transport import (
-    ENDED_WITHIN_S, HANDED_OVER, ONE, STOP_LINE_S, _Tls, _loopback_server, tls,
-)
+from tests.drive_import.fakes import DriveFile
+from tests.net.test_transport import ENDED_WITHIN_S, HANDED_OVER, STOP_LINE_S, _Tls, _loopback_server, tls
+from tests.support.sizes import MIB
 
+# The file the loopback server's Google routes serve.
+ONE = DriveFile(MIB)
 DNS_STOP_S = 0.1
 DNS_HELD_S = 0.25
 
@@ -89,7 +91,9 @@ def test_acquire_when_a_peer_holds_io_should_close_at_the_wall_deadline(
     # Arrange
     scenario = Scenario(ONE.size)
     runtime = replace(scenario.runtime, monotonic=time.monotonic, sleep=time.sleep)
-    with _loopback_server(tls=tls, drive_behaviour=phase, handshake_delay=10 if phase == "handshake" else 0) as (base, seen):
+    with _loopback_server(
+        tls=tls, drive_behaviour=phase, handshake_delay=10 if phase == "handshake" else 0, drive_file=ONE,
+    ) as (base, seen):
         monkeypatch.setattr(google, "FILES_URL", base + "/drive/v3/files/")
         session = LocalSession(base, str(tls.certificate))
         authority = claimed(scenario, STOP_LINE_S)
@@ -116,7 +120,7 @@ def test_acquire_when_google_trickles_an_answer_that_ends_its_connection_should_
     # Arrange: http.client hands the connection's socket over to such an answer; the watchdog must still reach it
     scenario = Scenario(ONE.size)
     runtime = replace(scenario.runtime, monotonic=time.monotonic, sleep=time.sleep)
-    with _loopback_server(phase, tls=tls, framing=framing) as (base, seen):
+    with _loopback_server(phase, tls=tls, framing=framing, drive_file=ONE) as (base, seen):
         monkeypatch.setattr(google, "FILES_URL", base + "/drive/v3/files/")
         session = LocalSession(base, str(tls.certificate))
         authority = claimed(scenario, STOP_LINE_S)
