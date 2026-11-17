@@ -13,7 +13,6 @@ from core.net.clock import DeadlineReached, stop_line_within
 from core.protocol.capabilities_client import CapabilityClient
 from core.source_reader import UrlRangeSource
 from tests.contract.v2_support import FakeClock, uuid_source
-from tests.drive_import.fakes import FakeResponse
 from tests.job.capability_fakes import (
     SOURCE_ETAG,
     SOURCE_URL_S,
@@ -23,6 +22,7 @@ from tests.job.capability_fakes import (
     capability_settings,
     hub_error,
 )
+from tests.support.fake_response import FakeResponse
 
 SOURCE = bytes(range(256)) * 16
 

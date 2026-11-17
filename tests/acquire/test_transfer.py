@@ -19,7 +19,8 @@ from core.protocol.outbox import seal_message
 from core.protocol.registry import MessageKind
 from tests.acquire.support import EXECUTION, PART_SIZE, Scenario, wire
 from tests.contract.v2_support import HUB_KEY, signed_carrier
-from tests.drive_import.fakes import DriveFile, Fail, FakeResponse, Late, Put, Serve, google_error, json_answer
+from tests.drive_import.fakes import DriveFile, Fail, Late, Put, Serve, google_error, json_answer
+from tests.support.fake_response import FakeResponse
 
 ERROR_RELATION = [
     ("file_removed", "source_unavailable", False, "downloading"),

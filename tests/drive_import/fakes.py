@@ -5,7 +5,8 @@ Not a test module. FakeClock moves only when the transfer waits or a test moves 
 made lazily block by block (each block of 1 MiB starts with its own number, so a byte out of place changes every
 checksum), with its checksums computed once. FakeSession answers the transfer's requests as the test scripts them:
 Google's metadata and download by default from the DriveFile, the store's PUTs with a 200 and the body's MD5 as the
-ETag (as S3 answers an UploadPart); every request is recorded, and a PUT's body is read as urllib3 reads one.
+ETag (as S3 answers an UploadPart); every request is recorded, and a PUT's body is read as urllib3 reads one. Its
+answers are tests/support/fake_response.py's FakeResponse, which the capability path's tests share.
 """
 
 from __future__ import annotations
@@ -13,17 +14,17 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from functools import cached_property
 from typing import Any
 
 import requests
-from requests.structures import CaseInsensitiveDict
 
 from core.net.clock import DeadlineReached, StopLine
 from core.drive_import.transfer import PART_SIZE
+from tests.support.fake_response import FakeResponse
 
 START = datetime(2026, 10, 17, 8, 0, 0, tzinfo=timezone.utc)
 
@@ -151,28 +152,6 @@ class DriveFile:
 # --- what the fake answers -----------------------------------------------------------------------------------------
 
 
-class FakeResponse:
-    """An answer: a status, headers (case-insensitive) and a body given as chunks, possibly lazy."""
-
-    def __init__(
-        self,
-        status_code: int,
-        headers: Mapping[str, str] | None = None,
-        body: bytes = b"",
-        chunks: Callable[[int], Iterator[bytes]] | None = None,
-    ) -> None:
-        self.status_code = status_code
-        self.headers = CaseInsensitiveDict(dict(headers or {}))
-        self._chunks = chunks if chunks is not None else (lambda size: _split(body, size))
-        self.closed = False
-
-    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
-        return self._chunks(chunk_size)
-
-    def close(self) -> None:
-        self.closed = True
-
-
 def _blocks_of(body: Any) -> Iterator[bytes]:
     """A request body as urllib3 sends a file-like one: read() in blocks until it gives nothing."""
     while True:
@@ -180,11 +159,6 @@ def _blocks_of(body: Any) -> Iterator[bytes]:
         if not block:
             return
         yield block
-
-
-def _split(body: bytes, size: int) -> Iterator[bytes]:
-    for start in range(0, len(body), size):
-        yield body[start:start + size]
 
 
 def json_answer(status: int, document: Any) -> FakeResponse:
