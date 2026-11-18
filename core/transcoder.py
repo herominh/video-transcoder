@@ -214,7 +214,7 @@ def transcode_to_hls(
     Returns dict with master_playlist, qualities, duration, thumbnail.
     """
     if enabled_qualities is None:
-        enabled_qualities = ["1080p", "720p", "480p"]
+        enabled_qualities = ["1080p", "720p", "540p"]
 
     video_info = probe_video(input_path)
     source_height = video_info["height"]

@@ -633,13 +633,13 @@ def _reference(width: int, height: int) -> RenditionPlan:
         ((1920, 1080), (640, 360)),
         ((1080, 1920), (360, 640)),
         ((3840, 2160), (640, 360)),
-        ((854, 480), (640, 360)),
+        ((960, 540), (640, 360)),
         ((320, 240), (320, 240)),
         ((640, 360), (640, 360)),
         ((360, 640), (360, 640)),
         ((3840, 362), (3818, 360)),
     ],
-    ids=["1080p", "portrait 1080p", "2160p", "480p", "smaller", "exactly the edge", "portrait at the edge", "wide"],
+    ids=["1080p", "portrait 1080p", "2160p", "540p", "smaller", "exactly the edge", "portrait at the edge", "wide"],
 )
 def test_thumbnail_geometry_when_given_the_largest_rendition_should_scale_its_short_edge_down_to_the_profiles(
     reference_size: tuple[int, int], expected: tuple[int, int]

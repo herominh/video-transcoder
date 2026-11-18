@@ -41,13 +41,13 @@ QUALITY_PRESETS: dict[str, dict] = {
         "maxrate": "2675k",
         "bufsize": "3750k",
     },
-    "480p": {
-        "width": 854,
-        "height": 480,
-        "bitrate": "1200k",
+    "540p": {
+        "width": 960,
+        "height": 540,
+        "bitrate": "1500k",
         "audio_bitrate": "96k",
-        "maxrate": "1280k",
-        "bufsize": "1800k",
+        "maxrate": "1600k",
+        "bufsize": "2250k",
     },
     "360p": {
         "width": 640,

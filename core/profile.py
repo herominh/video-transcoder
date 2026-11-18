@@ -102,7 +102,7 @@ class ProbeBudget:
 
 
 # Contract v2's rendition_name enum, largest first.
-RENDITION_NAMES = ("2160p", "1440p", "1080p", "720p", "480p", "360p", "240p")
+RENDITION_NAMES = ("2160p", "1440p", "1080p", "720p", "540p", "360p", "240p")
 # Contract v2's limit on segments per rendition (limits.json, max_segments_per_rendition).
 CONTRACT_MAX_SEGMENTS_PER_RENDITION = 3600
 # What the encode stage can produce today. A GPU encoder joins only when Q2/D7 qualifies its resource.
@@ -304,21 +304,24 @@ PILOT_THUMBNAIL_WALL_MS = 60_000
 PILOT_THUMBNAIL_AT_PER_MILLE = 100
 PILOT_THUMBNAIL_AT_MAX_MS = 5_000
 # The bitrates of the Hub's quality presets (and the draft worker's), one rung per contract name.
+# 540p replaced 480p in version 2 (the Hub's Vimeo spec, K3): 1.5 Mbps keeps 480p's bits per pixel
+# (1.2 Mbps at 854x480) and equals Vimeo's own 540p ceiling, as 720p's 2.5 Mbps equals Vimeo's 720p one.
 PILOT_LADDER = (
     LadderRung("2160p", 2160, 15_000_000, 16_000_000, 22_500_000, 192_000),
     LadderRung("1440p", 1440, 10_000_000, 10_700_000, 15_000_000, 192_000),
     LadderRung("1080p", 1080, 5_000_000, 5_350_000, 7_500_000, 192_000),
     LadderRung("720p", 720, 2_500_000, 2_675_000, 3_750_000, 128_000),
-    LadderRung("480p", 480, 1_200_000, 1_280_000, 1_800_000, 96_000),
+    LadderRung("540p", 540, 1_500_000, 1_600_000, 2_250_000, 96_000),
     LadderRung("360p", 360, 600_000, 640_000, 900_000, 64_000),
     LadderRung("240p", 240, 300_000, 320_000, 450_000, 48_000),
 )
 
 # The worker's ceilings. A dispatch's own limits carry the measured envelope of issue #50,
-# and the effective limit is always the smaller of the two.
+# and the effective limit is always the smaller of the two. Version 1, whose ladder held 480p, is not
+# held any more: its rendition name left contract v2, so a dispatch naming it is refused.
 PILOT_PROFILE = MediaProfile(
     profile_id="pilot-h264-sdr",
-    version=1,
+    version=2,
     source=SourceCaps(
         max_source_bytes=PILOT_MAX_SOURCE_BYTES,
         max_duration_ms=PILOT_MAX_DURATION_MS,

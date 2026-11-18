@@ -429,4 +429,4 @@ def test_context_when_its_source_mapping_changes_afterwards_should_keep_its_own_
 
     # Assert
     assert context.expect["profile"]["version"] == 1
-    assert context.value("expect.renditions") == ("720p", "480p", "360p")
+    assert context.value("expect.renditions") == ("720p", "540p", "360p")

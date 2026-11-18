@@ -66,7 +66,7 @@ PAL_RATE = (25, 1)
 NTSC_RATE = (30000, 1001)
 THREE_RUNGS = (
     ("720p", 1280, 720, 2_800_000, 2_400_000),
-    ("480p", 854, 480, 1_400_000, 1_200_000),
+    ("540p", 960, 540, 1_400_000, 1_200_000),
     ("360p", 640, 360, 800_000, 700_000),
 )
 PORTRAIT_RUNGS = (("720p", 720, 1280, 2_800_000, 2_400_000), ("360p", 360, 640, 800_000, 700_000))
@@ -279,9 +279,9 @@ def test_master_playlist_bytes_when_three_renditions_carry_audio_should_list_the
         "#EXT-X-STREAM-INF:BANDWIDTH=2800000,AVERAGE-BANDWIDTH=2400000,RESOLUTION=1280x720,FRAME-RATE=25.000,"
         'CODECS="avc1.64001f,mp4a.40.2"\n'
         "720p/playlist.m3u8\n"
-        "#EXT-X-STREAM-INF:BANDWIDTH=1400000,AVERAGE-BANDWIDTH=1200000,RESOLUTION=854x480,FRAME-RATE=25.000,"
+        "#EXT-X-STREAM-INF:BANDWIDTH=1400000,AVERAGE-BANDWIDTH=1200000,RESOLUTION=960x540,FRAME-RATE=25.000,"
         'CODECS="avc1.64001f,mp4a.40.2"\n'
-        "480p/playlist.m3u8\n"
+        "540p/playlist.m3u8\n"
         "#EXT-X-STREAM-INF:BANDWIDTH=800000,AVERAGE-BANDWIDTH=700000,RESOLUTION=640x360,FRAME-RATE=25.000,"
         'CODECS="avc1.64001f,mp4a.40.2"\n'
         "360p/playlist.m3u8\n"
@@ -745,7 +745,7 @@ def test_manifest_bytes_when_created_at_is_in_another_zone_should_write_utc_with
 def _profile_with_two_segments() -> dict[str, Any]:
     profile = fast_profile(max_segments_per_rendition=2)
     renditions = _renditions(encrypted=True)
-    renditions[1] = _rendition("480p", 854, 480, segments=3, encrypted=True)
+    renditions[1] = _rendition("540p", 960, 540, segments=3, encrypted=True)
     return {"profile": profile, "renditions": renditions}
 
 
@@ -773,7 +773,7 @@ def _beyond_one_tib() -> dict[str, Any]:
         lambda: {"renditions": []},
         lambda: {"renditions": _renditions(encrypted=True) * 3},
         lambda: {"renditions": [_renditions(encrypted=True)[0]] * 2},
-        lambda: {"requested_renditions": ["720p", "480p"]},
+        lambda: {"requested_renditions": ["720p", "540p"]},
         lambda: {"requested_renditions": "720p"},
         lambda: {"renditions": _renditions(encrypted=False)},
         lambda: {"encryption": PLAIN},
@@ -1217,10 +1217,10 @@ def _literal_rendition(
 def _literal_arguments() -> dict[str, Any]:
     return {
         "identity": LITERAL_IDENTITY,
-        "profile_ref": ProfileRef(id="pilot-h264-sdr", version=1, sha256="9" * 64),
+        "profile_ref": ProfileRef(id="pilot-h264-sdr", version=2, sha256="9" * 64),
         "profile": PILOT_PROFILE,
         "encryption": EncryptionRef(mode="aes-128", media_key_id=LITERAL_MEDIA_KEY_ID),
-        "requested_renditions": ["720p", "480p", "360p"],
+        "requested_renditions": ["720p", "540p", "360p"],
         "renditions": [
             _literal_rendition(
                 "720p", (1280, 720), "avc1.64001f,mp4a.40.2", 12_345, (2_811_111, 2_422_222),
@@ -1254,7 +1254,7 @@ LITERAL_DOCUMENT = {
         "dispatch_id": "e5e5e5e5-0000-7000-8000-000000000005",
         "execution_id": "f6f6f6f6-0000-7000-8000-000000000006",
     },
-    "profile": {"id": "pilot-h264-sdr", "version": 1, "sha256": "9" * 64},
+    "profile": {"id": "pilot-h264-sdr", "version": 2, "sha256": "9" * 64},
     "encryption": {"mode": "aes-128", "media_key_id": "0a0a0a0a-0000-7000-8000-00000000000a"},
     "media": {"duration_ms": 12_345, "max_width": 1280, "max_height": 720, "has_audio": True, "rendition_count": 2},
     "renditions": [

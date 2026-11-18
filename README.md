@@ -69,7 +69,7 @@ Returns 503 with `{"detail":"The v1 execution path is a development-only adapter
 ```json
 {
   "uuid": "550e8400-e29b-41d4-a716-446655440000",
-  "qualities": ["720p", "480p", "360p"],
+  "qualities": ["720p", "540p", "360p"],
   "encryption_key_hex": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
   "segment_duration": 6,
   "callback_url": "https://videohub.example.com/api/transcode/callback",
@@ -82,7 +82,7 @@ Returns 503 with `{"detail":"The v1 execution path is a development-only adapter
 | Field | Required | Description |
 |-------|----------|-------------|
 | `uuid` | yes | Video UUID (canonical form — validated) |
-| `qualities` | yes | Quality names: `2160p`, `1440p`, `1080p`, `720p`, `480p`, `360p`, `240p` |
+| `qualities` | yes | Quality names: `2160p`, `1440p`, `1080p`, `720p`, `540p`, `360p`, `240p` |
 | `encryption_key_hex` | no | AES-128 key as hex (32 chars). Omit to skip encryption |
 | `segment_duration` | no | HLS segment length in seconds (default: 6) |
 | `callback_url` | yes | URL to POST progress + result callbacks to (HMAC-signed) |
@@ -130,8 +130,8 @@ The development adapter uses the presets in `core/config.py`:
 | 1440p | 2560×1440 | 10000k | 192k |
 | 1080p | 1920×1080 | 5000k | 192k |
 | 720p | 1280×720 | 2500k | 128k |
-| 480p | 854×480 | 1200k | 96k |
+| 540p | 960×540 | 1500k | 96k |
 | 360p | 640×360 | 600k | 64k |
 | 240p | 426×240 | 300k | 48k |
 
-Quality selection caps at source resolution — a 480p source will never be upscaled to 720p.
+Quality selection caps at source resolution — a 540p source will never be upscaled to 720p.
