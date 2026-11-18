@@ -1308,7 +1308,7 @@
       "payload": "fixtures/manifest/N66-dangling-playlist-reference.json",
       "context": "fixtures/contexts/ctx-hub-storage.json",
       "rule": "S25",
-      "purpose": "The 480p playlist path names no artifact",
+      "purpose": "The 540p playlist path names no artifact",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -1826,7 +1826,7 @@
       "payload": "fixtures/manifest/N103-duplicate-rendition-entry.json",
       "context": "fixtures/contexts/ctx-hub-storage.json",
       "rule": "S24 d",
-      "purpose": "The 480p rendition listed twice (counts kept consistent)",
+      "purpose": "The 540p rendition listed twice (counts kept consistent)",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -1854,7 +1854,7 @@
       "payload": "fixtures/manifest/N105-rendition-without-segments.json",
       "context": "fixtures/contexts/ctx-hub-storage.json",
       "rule": "S24 f",
-      "purpose": "The 480p rendition has a playlist but no segment",
+      "purpose": "The 540p rendition has a playlist but no segment",
       "context_needed": true,
       "expect": {
         "outcome": "reject",
@@ -1882,7 +1882,7 @@
       "payload": "fixtures/manifest/N107-playlist-of-another-rendition.json",
       "context": "fixtures/contexts/ctx-hub-storage.json",
       "rule": "S25 b",
-      "purpose": "The 720p entry names the 480p playlist",
+      "purpose": "The 720p entry names the 540p playlist",
       "context_needed": true,
       "expect": {
         "outcome": "reject",

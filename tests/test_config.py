@@ -28,20 +28,20 @@ class TestParseBitrate:
 
 class TestSelectQualities:
     def test_filters_by_source_height(self):
-        result = select_qualities(["1080p", "720p", "480p"], source_height=720)
+        result = select_qualities(["1080p", "720p", "540p"], source_height=720)
         assert "1080p" not in result
         assert "720p" in result
-        assert "480p" in result
+        assert "540p" in result
 
     def test_all_qualities_when_source_is_large(self):
-        result = select_qualities(["1080p", "720p", "480p"], source_height=1080)
+        result = select_qualities(["1080p", "720p", "540p"], source_height=1080)
         assert len(result) == 3
 
     def test_fallback_caps_at_source_resolution(self):
-        # Source is 480p, requested only 1080p/720p — should pick 480p (not upscale).
-        result = select_qualities(["1080p", "720p"], source_height=480)
+        # Source is 540p, requested only 1080p/720p — should pick 540p (not upscale).
+        result = select_qualities(["1080p", "720p"], source_height=540)
         assert len(result) == 1
-        assert "480p" in result
+        assert "540p" in result
 
     def test_fallback_to_240p_when_source_smaller_than_all_presets(self):
         result = select_qualities(["1080p", "720p"], source_height=100)

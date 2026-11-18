@@ -31,12 +31,12 @@ class TestParseFps:
 class TestGenerateMasterPlaylist:
     def test_sorted_by_bitrate_descending(self):
         qualities = {
-            "480p": {
-                "name": "480p",
-                "width": 854,
-                "height": 480,
-                "bitrate": 1200000,
-                "playlist": "480p/playlist.m3u8",
+            "540p": {
+                "name": "540p",
+                "width": 960,
+                "height": 540,
+                "bitrate": 1500000,
+                "playlist": "540p/playlist.m3u8",
             },
             "720p": {
                 "name": "720p",
@@ -52,10 +52,10 @@ class TestGenerateMasterPlaylist:
         assert result.startswith("#EXTM3U\n")
         lines = result.strip().split("\n")
 
-        # 720p (higher bitrate) should come before 480p.
+        # 720p (higher bitrate) should come before 540p.
         stream_inf_lines = [l for l in lines if l.startswith("#EXT-X-STREAM-INF")]
         assert "BANDWIDTH=2500000" in stream_inf_lines[0]
-        assert "BANDWIDTH=1200000" in stream_inf_lines[1]
+        assert "BANDWIDTH=1500000" in stream_inf_lines[1]
 
     def test_contains_resolution_and_name(self):
         qualities = {

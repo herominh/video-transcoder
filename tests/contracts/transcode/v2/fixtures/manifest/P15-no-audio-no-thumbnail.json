@@ -37,13 +37,13 @@
       "playlist_path": "720p/playlist.m3u8"
     },
     {
-      "name": "480p",
-      "width": 854,
-      "height": 480,
+      "name": "540p",
+      "width": 960,
+      "height": 540,
       "bandwidth_bps": 1400000,
       "average_bandwidth_bps": 1200000,
       "codecs": "avc1.64001f",
-      "playlist_path": "480p/playlist.m3u8"
+      "playlist_path": "540p/playlist.m3u8"
     },
     {
       "name": "360p",
@@ -88,25 +88,25 @@
       "rendition": "720p"
     },
     {
-      "path": "480p/playlist.m3u8",
+      "path": "540p/playlist.m3u8",
       "kind": "hls_media_playlist",
       "size_bytes": 384,
       "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
-      "rendition": "480p"
+      "rendition": "540p"
     },
     {
-      "path": "480p/segment_000.ts",
+      "path": "540p/segment_000.ts",
       "kind": "hls_segment",
       "size_bytes": 1000000,
       "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
-      "rendition": "480p"
+      "rendition": "540p"
     },
     {
-      "path": "480p/segment_001.ts",
+      "path": "540p/segment_001.ts",
       "kind": "hls_segment",
       "size_bytes": 800000,
       "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
-      "rendition": "480p"
+      "rendition": "540p"
     },
     {
       "path": "360p/playlist.m3u8",

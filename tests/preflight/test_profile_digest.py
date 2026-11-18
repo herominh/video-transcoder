@@ -14,7 +14,7 @@ from core.profile import PILOT_PROFILE, SUPPORTED_PROFILES, MediaProfile, profil
 # a changed profile is a new revision: bump PILOT_PROFILE's `version`, then pin the new digest here, and
 # tell the Hub the new `{id, version, sha256}`: it dispatches the old one until then, which this worker
 # refuses (`unsupported_profile`). Never update this value alone.
-PILOT_PROFILE_SHA256 = "0c6b34361abe8b124e90aec0d6ee74d2ae6c9048baf6c2d5db68e0fa1be50d53"
+PILOT_PROFILE_SHA256 = "7886f49534ee439c96008ac1455447310c0599a03b3c8713a3497e236e063e2f"
 LOWERCASE_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -62,7 +62,7 @@ def test_profile_digest_when_an_equal_profile_is_built_anew_should_give_the_same
 @pytest.mark.parametrize(
     "changed",
     [
-        pytest.param(dataclasses.replace(PILOT_PROFILE, version=2), id="version"),
+        pytest.param(dataclasses.replace(PILOT_PROFILE, version=3), id="version"),
         pytest.param(dataclasses.replace(PILOT_PROFILE, profile_id="pilot-h264-sdr-b"), id="profile-id"),
         pytest.param(
             dataclasses.replace(
@@ -115,7 +115,7 @@ def test_profile_digest_when_given_something_else_than_a_profile_should_raise_ty
 
 def test_supported_profile_when_the_id_version_and_digest_are_the_pilots_should_return_the_pilot_profile():
     # Act
-    found = supported_profile("pilot-h264-sdr", 1, PILOT_PROFILE_SHA256)
+    found = supported_profile("pilot-h264-sdr", 2, PILOT_PROFILE_SHA256)
 
     # Assert
     assert found is PILOT_PROFILE
@@ -125,12 +125,18 @@ def test_supported_profile_when_the_id_version_and_digest_are_the_pilots_should_
 @pytest.mark.parametrize(
     ("profile_id", "version", "sha256"),
     [
-        pytest.param("pilot-h264-hdr", 1, PILOT_PROFILE_SHA256, id="another-id"),
-        pytest.param("pilot-h264-sdr", 2, PILOT_PROFILE_SHA256, id="another-version"),
-        pytest.param("pilot-h264-sdr", 1, "ab" * 32, id="another-digest"),
-        pytest.param("pilot-h264-sdr", 1, PILOT_PROFILE_SHA256.upper(), id="the-digest-in-upper-case"),
-        pytest.param("pilot-h264-sdr", True, PILOT_PROFILE_SHA256, id="a-bool-for-version-1"),
-        pytest.param("pilot-h264-sdr", "1", PILOT_PROFILE_SHA256, id="the-version-as-text"),
+        pytest.param("pilot-h264-hdr", 2, PILOT_PROFILE_SHA256, id="another-id"),
+        pytest.param("pilot-h264-sdr", 3, PILOT_PROFILE_SHA256, id="another-version"),
+        pytest.param("pilot-h264-sdr", 2, "ab" * 32, id="another-digest"),
+        pytest.param("pilot-h264-sdr", 2, PILOT_PROFILE_SHA256.upper(), id="the-digest-in-upper-case"),
+        pytest.param("pilot-h264-sdr", "2", PILOT_PROFILE_SHA256, id="the-version-as-text"),
+        # Version 1 (its ladder held 480p, which left the contract) under its own pinned digest
+        pytest.param(
+            "pilot-h264-sdr",
+            1,
+            "0c6b34361abe8b124e90aec0d6ee74d2ae6c9048baf6c2d5db68e0fa1be50d53",
+            id="the-retired-version-1",
+        ),
     ],
 )
 def test_supported_profile_when_one_of_the_three_differs_should_return_none(profile_id, version, sha256):
@@ -151,9 +157,21 @@ def test_supported_profile_when_a_held_profile_was_changed_without_a_new_digest_
     monkeypatch.setattr(profile_module, "SUPPORTED_PROFILES", (changed,))
 
     # Act
-    by_the_old_digest = supported_profile("pilot-h264-sdr", 1, PILOT_PROFILE_SHA256)
-    by_its_own_digest = supported_profile("pilot-h264-sdr", 1, profile_digest(changed))
+    by_the_old_digest = supported_profile("pilot-h264-sdr", 2, PILOT_PROFILE_SHA256)
+    by_its_own_digest = supported_profile("pilot-h264-sdr", 2, profile_digest(changed))
 
     # Assert
     assert by_the_old_digest is None
     assert by_its_own_digest is changed
+
+
+def test_supported_profile_when_the_version_is_a_bool_equal_to_a_held_version_should_return_none(monkeypatch):
+    # Arrange: the worker holds a profile of version 1, which True equals in Python
+    held = dataclasses.replace(PILOT_PROFILE, version=1)
+    monkeypatch.setattr(profile_module, "SUPPORTED_PROFILES", (held,))
+
+    # Act
+    found = supported_profile("pilot-h264-sdr", True, profile_digest(held))
+
+    # Assert
+    assert found is None

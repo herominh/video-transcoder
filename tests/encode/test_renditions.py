@@ -11,7 +11,7 @@ from core.profile import PILOT_PROFILE, RENDITION_NAMES
 from core.renditions import RenditionPlan, plan_renditions
 from core.source_facts import VideoStreamFacts
 
-LANDSCAPE_NAMES = ["1080p", "720p", "480p", "360p", "240p"]
+LANDSCAPE_NAMES = ["1080p", "720p", "540p", "360p", "240p"]
 SEGMENT_DURATION_S = PILOT_PROFILE.encode.segment_duration_s
 
 
@@ -65,7 +65,7 @@ def test_plan_renditions_when_1080p_landscape_asks_for_every_name_should_plan_10
     assert _geometry(plans) == [
         ("1080p", 1920, 1080),
         ("720p", 1280, 720),
-        ("480p", 854, 480),
+        ("540p", 960, 540),
         ("360p", 640, 360),
         ("240p", 426, 240),
     ]

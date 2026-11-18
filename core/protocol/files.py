@@ -16,7 +16,7 @@ from typing import Any
 
 CONTRACT_ROOT: Path = Path(__file__).resolve().parents[2] / "tests" / "contracts" / "transcode" / "v2"
 CHECKSUM_FILE = "SHA256SUMS"
-EXPECTED_CONTRACT_DIGEST = "ea33ce5d9dd75b1c7a7e154ee7cf7540697151538db42428f7c954e9277d1ba1"
+EXPECTED_CONTRACT_DIGEST = "91ffba5df77c28b2df97715411419ca24d5926fdbb43eb8c62242630a36dc8e1"
 
 _FORBIDDEN_SEGMENTS = frozenset({"", ".", ".."})
 # One SHA256SUMS line without its LF: the lowercase digest, two spaces, the relative path.

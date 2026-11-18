@@ -20,7 +20,7 @@
   "manifest": {
     "location_id": "bbbbbbbb-bbbb-7bbb-8bbb-bbbbbbbbbbbb",
     "path": "generation-manifest.json",
-    "sha256": "13cc0e2614d02048138874dc3106d89c7a3edf896e99040910163e4a41f8d0a0",
+    "sha256": "ce506b3544d76adebd5bb3f2af8045cd22288b99d58b4275bfac6c3251960019",
     "size_bytes": 4138,
     "artifact_count": 11,
     "total_bytes": 6391664

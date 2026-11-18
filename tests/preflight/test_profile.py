@@ -96,7 +96,7 @@ def test_pilot_profile_when_rebuilt_from_its_own_values_should_be_valid() -> Non
 
     # Assert
     assert rebuilt == PILOT_PROFILE
-    assert (rebuilt.profile_id, rebuilt.version) == ("pilot-h264-sdr", 1)
+    assert (rebuilt.profile_id, rebuilt.version) == ("pilot-h264-sdr", 2)
 
 
 def test_pilot_profile_when_checked_against_its_purpose_should_admit_60_fps_uhd_and_refuse_hdr_and_interlace() -> None:

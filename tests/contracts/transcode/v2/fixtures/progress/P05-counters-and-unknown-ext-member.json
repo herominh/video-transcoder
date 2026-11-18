@@ -19,7 +19,7 @@
   "event_seq": 6,
   "stage": "transcoding",
   "stage_progress_pct": 40,
-  "message": "Encoding the 480p rendition.",
+  "message": "Encoding the 540p rendition.",
   "counters": {
     "renditions_total": 3,
     "renditions_done": 1,

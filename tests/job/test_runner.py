@@ -1039,7 +1039,7 @@ def test_run_when_it_encodes_should_take_the_renditions_one_by_one_in_plan_order
     harness.run()
 
     # Assert: largest first, and each already on disk when the next starts
-    assert [call.name for call in harness.stages.encodes] == ["720p", "480p", "360p"]
+    assert [call.name for call in harness.stages.encodes] == ["720p", "540p", "360p"]
     assert "720p/segment_0001.ts" in {
         Path(*Path(path).parts[2:]).as_posix() for path in harness.stages.encodes[1].scratch_files
     }
@@ -1114,7 +1114,7 @@ def test_run_when_it_makes_the_thumbnail_should_take_the_largest_rendition_as_it
     # Act
     harness.run()
 
-    # Assert: the first of the plan, which the dispatch's 720p, 480p and 360p make the largest
+    # Assert: the first of the plan, which the dispatch's 720p, 540p and 360p make the largest
     (reference,) = harness.stages.thumbnail_references
     assert (reference.name, reference.width, reference.height) == ("720p", 1280, 720)
     assert reference.height == max(output.height for output in harness.stages.outputs)
@@ -1182,7 +1182,7 @@ def test_run_when_the_output_limit_holds_one_rendition_only_should_fail_at_the_s
 
     # Assert
     assert _error_of(result) == ("input_limits_exceeded", "output_too_large", False, "transcoding")
-    assert [call.name for call in harness.stages.encodes] == ["720p", "480p"]
+    assert [call.name for call in harness.stages.encodes] == ["720p", "540p"]
     assert harness.stages.outputs[0].total_bytes == rendition_bytes
     _assert_only_result_stored(harness, result)
 
@@ -1657,7 +1657,7 @@ def test_run_when_a_credential_ref_is_unknown_should_fail_before_reading_and_att
     "named",
     [
         pytest.param({**PILOT_TRIPLE, "sha256": "ab" * 32}, id="another-digest"),
-        pytest.param({**PILOT_TRIPLE, "version": 2}, id="another-version"),
+        pytest.param({**PILOT_TRIPLE, "version": 1}, id="the-retired-version-1"),
         pytest.param({**PILOT_TRIPLE, "id": "test-h264-sdr"}, id="another-id"),
     ],
 )
@@ -1989,7 +1989,7 @@ def test_run_when_the_source_is_refused_for_more_reasons_than_a_result_holds_sho
 
 
 def test_run_when_a_requested_rendition_is_not_in_the_profile_should_fail_before_the_download(tmp_path, monkeypatch):
-    # Arrange: the worker holds a profile whose ladder ends at 1080p; the dispatch asks for 720p, 480p and 360p
+    # Arrange: the worker holds a profile whose ladder ends at 1080p; the dispatch asks for 720p, 540p and 360p
     encode = PILOT_PROFILE.encode
     held = dataclasses.replace(PILOT_PROFILE, encode=dataclasses.replace(encode, ladder=encode.ladder[:3]))
     harness = Harness(tmp_path, monkeypatch, profile=held)

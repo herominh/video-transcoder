@@ -40,7 +40,7 @@ CREDENTIAL_REF = "r" * files.read_json("schemas/common.schema.json")["$defs"]["c
 SHA256 = "f" * 64
 KEY_HEX = "f" * 32  # a media key's 16 bytes in hex, as the claim grant's media_key.key_hex writes them
 CODECS = "c" * 32 + "," + "c" * 31
-RENDITIONS = ["2160p", "1440p", "1080p", "720p", "480p", "360p", "240p"]
+RENDITIONS = ["2160p", "1440p", "1080p", "720p", "540p", "360p", "240p"]
 
 
 def escaped_text(length: int) -> str:
