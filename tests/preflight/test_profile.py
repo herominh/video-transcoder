@@ -488,3 +488,23 @@ def test_encode_profile_when_the_thumbnail_is_taken_just_before_the_end_of_the_s
 
     # Assert
     assert encode.thumbnail_at_per_mille == 999
+
+
+@pytest.mark.parametrize(
+    "crf",
+    [0, 52, -1, True, "23", 23.0],
+    ids=["lossless 0", "above 51", "negative", "a bool", "text", "a float"],
+)
+def test_encode_profile_when_the_crf_is_not_an_int_from_1_to_51_should_raise(crf: Any) -> None:
+    # Arrange / Act / Assert
+    with pytest.raises(ValueError):
+        _encode(crf=crf)
+
+
+@pytest.mark.parametrize("crf", [1, 23, 51, None])
+def test_encode_profile_when_the_crf_is_none_or_an_int_from_1_to_51_should_be_accepted(crf: int | None) -> None:
+    # Arrange / Act
+    encode = _encode(crf=crf)
+
+    # Assert
+    assert encode.crf == crf
