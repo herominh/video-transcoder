@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from fractions import Fraction
 
 KIB = 1024
@@ -117,6 +117,9 @@ MILLI_PER_UNIT = 1000
 # mjpeg's -q:v scale: 2 is its best quality, 31 its worst.
 MJPEG_QUALITY_MIN = 2
 MJPEG_QUALITY_MAX = 31
+# x264's constant rate factor: 0 is lossless, which a capped quality-based encode never asks for.
+CRF_MIN = 1
+CRF_MAX = 51
 
 
 def _require_member(name: str, value: object, allowed: frozenset[str]) -> None:
@@ -186,6 +189,9 @@ class EncodeProfile:
     # last frame and leave the job without a thumbnail. The pilot's 10 % keeps far from that end...
     thumbnail_at_per_mille: int
     thumbnail_at_max_ms: int  # ...but never later than this
+    # None: every rendition at its rung's fixed bitrate. An int: quality-based at that constant rate
+    # factor, capped, with the rung's video_bitrate as the ceiling and its video_bufsize as the buffer.
+    crf: int | None = None
 
     def __post_init__(self) -> None:
         _require_positive_int_fields(self)
@@ -218,6 +224,8 @@ class EncodeProfile:
             raise ValueError(f"thumbnail_quality must be from {MJPEG_QUALITY_MIN} to {MJPEG_QUALITY_MAX}")
         if self.thumbnail_at_per_mille >= MILLI_PER_UNIT:
             raise ValueError(f"thumbnail_at_per_mille must be below {MILLI_PER_UNIT}")
+        if self.crf is not None and (not _is_strict_int(self.crf) or not CRF_MIN <= self.crf <= CRF_MAX):
+            raise ValueError(f"crf must be None or an int from {CRF_MIN} to {CRF_MAX}, got {self.crf!r}")
 
     @property
     def max_frame_rate_milli(self) -> int:
@@ -378,21 +386,52 @@ PILOT_PROFILE = MediaProfile(
 )
 
 
+# The quality levels: each a profile equal to the pilot's but encoded at this constant rate factor,
+# capped at the pilot's ladder bitrates, with x264's "fast" preset. The Hub picks one by naming its
+# profile in the dispatch.
+QUALITY_LEVELS = (21, 22, 23, 25)
+QUALITY_PROFILE_VERSION = 1
+QUALITY_ENCODER_PRESET = "fast"
+
+
+def _quality_profile(crf: int) -> MediaProfile:
+    return replace(
+        PILOT_PROFILE,
+        profile_id=f"{PILOT_PROFILE.profile_id}-crf{crf}",
+        version=QUALITY_PROFILE_VERSION,
+        encode=replace(PILOT_PROFILE.encode, encoder_preset=QUALITY_ENCODER_PRESET, crf=crf),
+    )
+
+
+QUALITY_PROFILES: tuple[MediaProfile, ...] = tuple(_quality_profile(level) for level in QUALITY_LEVELS)
+
+# Fields added after a profile was pinned, by section, each left out of the canonical form while it
+# holds this value, its absent one.
+_FIELDS_ADDED_AFTER_PINNING: tuple[tuple[str, str, object], ...] = (("encode", "crf", None),)
+
+
 def profile_digest(profile: MediaProfile) -> str:
     """The profile's SHA-256 (lowercase hex): the `sha256` a dispatch names beside its id and version.
 
     It is taken over the profile's canonical JSON: every field, nested values included, as an object
     with its keys sorted, compact, in ASCII. Any changed field therefore changes the digest: a changed
-    profile is a new revision, whatever its id and version say.
+    profile is a new revision, whatever its id and version say. A field added after a profile was
+    pinned is left out of the canonical form while it holds its absent value, so every profile defined
+    before the field existed keeps its digest; a present value is part of the profile's identity.
     """
     if not isinstance(profile, MediaProfile):
         raise TypeError("profile must be a MediaProfile")
-    canonical = json.dumps(asdict(profile), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    canonical_form = asdict(profile)
+    for section, name, absent in _FIELDS_ADDED_AFTER_PINNING:
+        if canonical_form[section][name] is absent:
+            del canonical_form[section][name]
+    canonical = json.dumps(canonical_form, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
-# Every profile revision this worker can run a job with.
-SUPPORTED_PROFILES: tuple[MediaProfile, ...] = (PILOT_PROFILE,)
+# Every profile revision this worker can run a job with: the pilot at its fixed bitrates, then the
+# quality levels.
+SUPPORTED_PROFILES: tuple[MediaProfile, ...] = (PILOT_PROFILE, *QUALITY_PROFILES)
 
 
 def supported_profile(profile_id: str, version: int, sha256: str) -> MediaProfile | None:

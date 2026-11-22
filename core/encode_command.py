@@ -182,6 +182,22 @@ def input_arguments(source: EncodeSource, profile: MediaProfile) -> list[str]:
     ]
 
 
+def _rate_control_arguments(plan: RenditionPlan, profile: MediaProfile) -> list[str]:
+    """The rung's fixed bitrate, or, for a quality level, its constant rate factor capped at that bitrate."""
+    crf = profile.encode.crf
+    if crf is None:
+        return [
+            "-b:v", str(plan.video_bitrate),
+            "-maxrate", str(plan.video_maxrate),
+            "-bufsize", str(plan.video_bufsize),
+        ]
+    return [
+        "-crf", str(crf),
+        "-maxrate", str(plan.video_bitrate),
+        "-bufsize", str(plan.video_bufsize),
+    ]
+
+
 def rendition_argv(
     executable: str,
     source: EncodeSource,
@@ -225,9 +241,7 @@ def rendition_argv(
         "-profile:v", encode.h264_profile,
         "-level:v", plan.level.name,
         "-pix_fmt", encode.pixel_format,
-        "-b:v", str(plan.video_bitrate),
-        "-maxrate", str(plan.video_maxrate),
-        "-bufsize", str(plan.video_bufsize),
+        *_rate_control_arguments(plan, profile),
         "-g", gop,
         "-keyint_min", gop,
         "-sc_threshold", "0",

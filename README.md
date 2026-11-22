@@ -135,3 +135,5 @@ The development adapter uses the presets in `core/config.py`:
 | 240p | 426×240 | 300k | 48k |
 
 Quality selection caps at source resolution — a 540p source will never be upscaled to 720p.
+
+Contract v2 encodes by the media profile the dispatch names (`core/profile.py`, by id, version and digest). Profile `pilot-h264-sdr` version 2 encodes each rung at the fixed bitrate above with x264's `medium` preset. Four quality levels, `pilot-h264-sdr-crf21`, `-crf22`, `-crf23` and `-crf25` (each version 1), encode with x264's constant rate factor 21, 22, 23 or 25 and the `fast` preset, capped at the same rung's bitrate (`-maxrate` the rung's video bitrate, `-bufsize` its buffer).

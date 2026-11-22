@@ -39,7 +39,7 @@ from core.encode import (
 )
 from core.encode_command import EncodeSource, decoder_pixel_limit
 from core.failure import WorkerFailure
-from core.profile import GIB, PILOT_PROFILE, MediaProfile
+from core.profile import GIB, PILOT_PROFILE, QUALITY_PROFILES, MediaProfile
 from core.renditions import RenditionPlan, plan_renditions
 from core.source_facts import SourceFacts, VideoStreamFacts
 from tests.encode.conftest import (
@@ -332,6 +332,24 @@ def test_encode_rendition_when_not_encrypting_should_write_plain_transport_strea
     for segment in _segment_paths(job, output):
         assert segment.read_bytes()[0] == TS_SYNC_BYTE
     assert list(job.work_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("encrypting", [False, True])
+@pytest.mark.parametrize("level", QUALITY_PROFILES, ids=lambda profile: profile.profile_id)
+def test_encode_rendition_when_the_profile_is_a_quality_level_should_write_a_verified_rendition(
+    encode_media: EncodeMedia, tmp_path: Path, level: MediaProfile, encrypting: bool
+) -> None:
+    # Arrange: a shipped level as the worker holds it (its capped constant rate factor and its own
+    # preset), which the installed ffmpeg must accept and the stage's own verification must pass.
+    job = _job(tmp_path, encode_media.landscape, profile=level)
+
+    # Act
+    output = job.run(media_key=MEDIA_KEY if encrypting else None)
+
+    # Assert
+    assert output.name == SMALLEST_RENDITION
+    assert output.encrypted is encrypting
+    assert len(_segment_paths(job, output)) >= 1
 
 
 def test_encode_rendition_when_the_admitted_duration_is_shorter_than_the_stream_should_cut_the_output_at_it(
