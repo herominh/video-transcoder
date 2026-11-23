@@ -8,7 +8,10 @@ reads nothing from the environment (`trust_env=False`: no proxy, no netrc, no ot
 and follows no redirect: `allow_redirects=False` on every call, and a session whose `get_redirect_target()` names
 none, so that requests does not even read a 3xx's body to release its connection (it does that for a 3xx with a
 `Location` when it does not follow it). A 3xx comes back to the job as the answer it is, its body unread. A PUT is
-sent with `stream=True`, so that its answer's body is never read: the job reads its status and its ETag and closes it.
+sent with `stream=True`, so that its answer's body is never read: the job reads its status and its ETag and closes it,
+or, for an answer whose head declares an empty body (`declares_empty_body()`), may hand it to
+`release_if_declared_empty()`, which completes it without reading a byte and puts its connection back in the session's
+pool for the next request (the encode's 2.2.0 upload does that for a stored object's 200; the acquire never does).
 
 Every request carries the job's stop line, and the session's watchdog holds every request to it. The session's
 connections (a connection class of this module's own, kept by the pools of the session's adapter) give the watchdog
@@ -48,14 +51,17 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import weakref
+from http.client import HTTPException
 from typing import Any, Iterator, Mapping, Protocol
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
-from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
+from urllib3.exceptions import ConnectTimeoutError, HTTPError, NameResolutionError, NewConnectionError
+from urllib3.response import HTTPResponse as PooledResponse
 from urllib3.util.connection import _set_socket_options, allowed_gai_family
 
 from core.net.clock import DeadlineReached, StopLine
@@ -76,6 +82,10 @@ _WATCHDOG_SLACK_S = 0.05
 _WATCHDOG_AFTER_S = 0.01
 # A connect's time-out when no request has named a stop line yet (every request of the job names one).
 _NO_STOP_LINE_CONNECT_S = 10.0
+# The one value of an answer's Content-Length (surrounding whitespace aside) that declares an empty body.
+_EMPTY_BODY_LENGTH = "0"
+# The most release_if_declared_empty() asks the library for: http.client clips it to the declared length, 0.
+_COMPLETING_READ_BYTES = 1
 
 
 class HttpResponse(Protocol):
@@ -467,3 +477,82 @@ def close_quietly(response: HttpResponse) -> None:
         response.close()
     except TRANSFER_ERRORS:
         return
+
+
+def declares_empty_body(headers: Mapping[str, str]) -> bool:
+    """Whether an answer's head declares an empty body: a Content-Length whose value is 0, spaces and tabs around it
+    aside, and no Transfer-Encoding at all. A header the answer repeats reads as its values joined by a comma (requests
+    joins them), so a repeated Content-Length never declares one, and neither does a missing, malformed or negative
+    one."""
+    if headers.get("Transfer-Encoding") is not None:
+        return False
+    declared = headers.get("Content-Length")
+    return isinstance(declared, str) and declared.strip(" \t") == _EMPTY_BODY_LENGTH
+
+
+def release_if_declared_empty(response: HttpResponse) -> bool:
+    """Complete an answer whose head declares an empty body (declares_empty_body()) and put its connection back in its
+    session's pool, for the session's next request; whether that was done. False, with nothing done, for any other
+    answer, for one that is not a real session's (a test's fake), for one that no longer holds its connection, and for
+    one that ends its connection (`Connection: close`, or an HTTP/1.0 answer without keep-alive: http.client has let go
+    of the connection's socket, `sock` is None, as soon as it read such a head); False too when the completion did not
+    end the answer. In each case its caller closes it, which closes its connection, or, for one that ended it, closes
+    the socket the answer still reads from.
+
+    The completion reads no byte that was not declared and cannot block. It asks urllib3 for at most one byte, without
+    decoding (HTTPResponse.read(1, decode_content=False)), and http.client clips that read to what is left of the
+    declared length, 0: the read is one of zero bytes from the connection's buffered reader, which returns at once
+    without a call to the socket. Having reached the declared end, http.client lets go of its reader, and urllib3,
+    seeing its answer closed, hands the connection back to its pool; release_conn() does so here too, explicitly (a
+    second call does nothing). It never raises: an error of the library (none is expected of a read of zero bytes) is
+    dropped, its text could quote the URL, and its finished frames are cleared, since urllib3 keeps a failed read's
+    error in a reference cycle with them, which would hold the answer, and through it its request's body, until a
+    cyclic collection."""
+    if not declares_empty_body(response.headers):
+        return False
+    pooled = getattr(response, "raw", None)
+    if (
+        not isinstance(pooled, PooledResponse)
+        or pooled.connection is None
+        or pooled.connection.sock is None
+        or pooled.chunked
+        or pooled.length_remaining != 0
+    ):
+        return False
+    failed = False
+    read = b""
+    try:
+        read = pooled.read(_COMPLETING_READ_BYTES, decode_content=False)
+    except (HTTPError, HTTPException, *TRANSFER_ERRORS) as error:
+        clear_frames_of(error)
+        failed = True
+    if failed or read or not pooled.isclosed():
+        return False
+    pooled.release_conn()
+    return pooled.connection is None
+
+
+def clear_frames_of(error: BaseException) -> None:
+    """Clear the frames the tracebacks of `error` and of every error it is chained to hold (a frame still running is
+    left as it is). Not to be deleted: urllib3 (the 2.8.0 that requirements.txt pins) keeps a failed request's error in
+    a reference cycle with its finished frames, in two places: on a request that got no answer, the local `new_e` of
+    HTTPConnectionPool.urlopen (the error is raised again through Retry.increment); on an answer body cut short, its
+    `_error_catcher` context manager, whose contextlib `__exit__` frame keeps the error thrown into it. A finished frame
+    holds the one that called it, so without this a failed request's whole stack, the body of a PUT included (up to
+    64 MiB), would live on until a cyclic collection, as the release tests of tests/job/test_url_upload.py show, one
+    for each place (a PUT given up with no answer, a refusal whose error body breaks off); release_if_declared_empty()
+    clears a failed completion's in the same way. Nothing of the error is kept or logged, and no error of this cleanup
+    escapes: the outcome is the caller's."""
+    seen: set[int] = set()
+    links: list[BaseException] = [error]
+    while links:
+        link = links.pop()
+        if id(link) in seen:
+            continue
+        seen.add(id(link))
+        try:
+            if link.__traceback__ is not None:
+                traceback.clear_frames(link.__traceback__)
+        except Exception:  # noqa: BLE001 - a cleanup that fails changes nothing the request's outcome decided
+            pass
+        links.extend(chained for chained in (link.__cause__, link.__context__) if chained is not None)

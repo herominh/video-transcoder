@@ -1,8 +1,10 @@
 """The shared session (core/net/transport.py RequestsSession), which the encode's protocol 2.2.0 path and the Drive
 acquire both use, against a server of the test's own on the loopback address: it follows no redirect
-and reads no redirect's body, reads no proxy from the environment, never reads a PUT's answer body, sends a
-BoundedBody whole with its length or stops it at the stop line, and its watchdog ends at the stop line a request that
-a trickling or silent server would hold far longer, a TLS handshake whose server never answers included, and lets no
+and reads no redirect's body, reads no proxy from the environment, never reads a PUT's answer body (an answer
+declaring an empty body is completed without a byte read and its connection kept for the next request, and only such
+a one, release_if_declared_empty(), and not one that ends its connection), sends a BoundedBody whole with its length
+or stops it at the stop line, and its watchdog ends at the stop line a request that a trickling or silent server would
+hold far longer, a TLS handshake whose server never answers included, and lets no
 connection whose name resolution or TCP connect straddled the stop line go on, so that a caller ends within a moment
 of it (tests/acquire/test_transport.py drives a whole acquire through this server, handing it the Drive file its
 Google routes serve; tests/drive_import/test_transport.py holds the acquire's store PUT against it). The server speaks
@@ -35,8 +37,18 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
 from core.net.clock import DeadlineReached, StopLine
-from core.net.transport import TRANSFER_ERRORS, BoundedBody, RequestsSession, read_small_answer
+from requests.structures import CaseInsensitiveDict
+
+from core.net.transport import (
+    TRANSFER_ERRORS,
+    BoundedBody,
+    RequestsSession,
+    declares_empty_body,
+    read_small_answer,
+    release_if_declared_empty,
+)
 from tests.support.fake_clock import FakeClock
+from tests.support.fake_response import FakeResponse
 from tests.support.sizes import MIB
 
 TIMEOUT = (5.0, 5.0)
@@ -67,11 +79,14 @@ HANDED_OVER = [
 
 @dataclass
 class _Seen:
-    """What the loopback server was asked: each request's method, path and headers, and the bodies it read."""
+    """What the loopback server was asked: each request's method, path and headers, and the bodies it read; the client's
+    port of each PUT (one per connection), and the client's port of each connection whose handling ended."""
 
     requests: list[tuple[str, str, dict[str, str]]] = field(default_factory=list)
     bodies: list[bytes] = field(default_factory=list)
     stop: threading.Event = field(default_factory=threading.Event)
+    put_ports: list[int] = field(default_factory=list)
+    ended_ports: list[int] = field(default_factory=list)
 
 
 def _handler_for(seen: _Seen) -> type[BaseHTTPRequestHandler]:
@@ -80,6 +95,13 @@ def _handler_for(seen: _Seen) -> type[BaseHTTPRequestHandler]:
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - the standard library's name
             return
+
+        def handle(self) -> None:
+            # The connection's requests, one after the other, until the client closes it.
+            try:
+                super().handle()
+            finally:
+                seen.ended_ports.append(self.client_address[1])
 
         def _answer(self, status: int, headers: dict[str, str], body: bytes = b"") -> None:
             self.send_response(status)
@@ -150,6 +172,7 @@ def _handler_for(seen: _Seen) -> type[BaseHTTPRequestHandler]:
 
         def do_PUT(self) -> None:  # noqa: N802 - the standard library's name
             seen.requests.append(("PUT", self.path, dict(self.headers)))
+            seen.put_ports.append(self.client_address[1])
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
             seen.bodies.append(body)
@@ -159,6 +182,13 @@ def _handler_for(seen: _Seen) -> type[BaseHTTPRequestHandler]:
                 self._answer(307, {"Location": f"http://127.0.0.1:{self.server.server_port}/target"})
             elif self.path == "/hold":
                 self._hold()
+            elif self.path == "/empty-connection-close":
+                self.close_connection = True
+                self._answer(200, {"ETag": ETAG, "Connection": "close"})
+            elif self.path == "/empty-http-1.0":
+                self.protocol_version = "HTTP/1.0"
+                self.close_connection = True
+                self._answer(200, {"ETag": ETAG})
             elif self.path == "/a-long-answer":
                 self.send_response(200)
                 self.send_header("ETag", ETAG)
@@ -944,3 +974,149 @@ def test_abandon_when_a_watchdog_is_armed_should_let_its_timer_go():
     # Assert: the session's timer was armed, and the cut let it go
     assert timers_before != []
     assert [thread for thread in timers_before if thread.is_alive()] == []
+
+
+# --- an answer that declares an empty body: completed, its connection kept (the encode's 2.2.0 upload, TD-200) --------
+
+# How long completing an answer may take at most: it reads nothing from the socket, so it returns at once.
+RELEASED_WITHIN_S = 0.5
+
+
+@pytest.mark.parametrize(
+    ("headers", "declares"),
+    [
+        pytest.param({"Content-Length": "0"}, True, id="zero"),
+        pytest.param({"content-length": " 0\t"}, True, id="zero-with-spaces-any-case"),
+        pytest.param({"Content-Length": "5"}, False, id="five"),
+        pytest.param({}, False, id="no-length"),
+        pytest.param({"Content-Length": "zero"}, False, id="malformed"),
+        pytest.param({"Content-Length": "-0"}, False, id="signed"),
+        pytest.param({"Content-Length": "00"}, False, id="zero-twice-over"),
+        pytest.param({"Content-Length": "0, 0"}, False, id="repeated"),
+        pytest.param({"Content-Length": "0", "Transfer-Encoding": "chunked"}, False, id="beside-chunked"),
+        pytest.param({"Content-Length": "0", "Transfer-Encoding": ""}, False, id="beside-an-empty-transfer-encoding"),
+    ],
+)
+def test_declares_empty_body_when_given_a_head_should_say_whether_it_declares_an_empty_body(headers, declares):
+    # Act
+    declared = declares_empty_body(CaseInsensitiveDict(headers))
+
+    # Assert
+    assert declared is declares
+
+
+def _put_and_release(made: RequestsSession, url: str) -> tuple[int, bool, float]:
+    """One PUT through `made`, then its answer completed when it declares an empty body; its status, whether its
+    connection was kept, and the seconds the completion took. An answer not completed is closed."""
+    response = made.put(
+        url, BoundedBody(PAYLOAD, _far_stop_line()), {"Content-Length": str(len(PAYLOAD))}, TIMEOUT,
+        stop_line=_far_stop_line(),
+    )
+    started = time.monotonic()
+    kept = release_if_declared_empty(response)
+    elapsed_s = time.monotonic() - started
+    if not kept:
+        response.close()
+    return response.status_code, kept, elapsed_s
+
+
+def test_release_when_puts_are_answered_with_an_empty_body_should_carry_them_on_one_connection(tls, server_tls):
+    # Arrange: a session of one connection, as a lane of the upload has; every PUT is answered 200 declaring an empty
+    # body (and the connection kept open by the server).
+    made = RequestsSession(ca_bundle=str(tls.certificate), connections=1)
+    try:
+        with _loopback_server(tls=server_tls) as (base, seen):
+            # Act
+            outcomes = [_put_and_release(made, base + "/part") for _ in range(3)]
+            put_ports = list(seen.put_ports)
+            made.close()
+            closed = _eventually(lambda: put_ports[0] in seen.ended_ports)
+    finally:
+        made.close()
+
+    # Assert: each answer completed at once and its connection kept; the three PUTs went on one connection, which the
+    # session's close closed.
+    assert [(status, kept) for status, kept, _ in outcomes] == [(200, True)] * 3
+    assert all(elapsed_s < RELEASED_WITHIN_S for _, _, elapsed_s in outcomes)
+    assert len(put_ports) == 3 and len(set(put_ports)) == 1
+    assert closed
+
+
+def test_release_when_a_puts_answer_declares_a_body_that_never_comes_should_leave_it_unread_at_once(tls, server_tls):
+    # Arrange: the first PUT's answer declares a long body and the server sends none of it; the second is answered 200
+    # declaring an empty body.
+    made = RequestsSession(ca_bundle=str(tls.certificate), connections=1)
+    try:
+        with _loopback_server(tls=server_tls) as (base, seen):
+            # Act
+            long_answer = _put_and_release(made, base + "/a-long-answer")
+            empty_answer = _put_and_release(made, base + "/part")
+            put_ports = list(seen.put_ports)
+            made.close()
+    finally:
+        made.close()
+
+    # Assert: the long answer was not completed and returned at once (no byte of its body waited for); closed, it took
+    # its connection with it, so the next PUT went on a new one.
+    assert long_answer[:2] == (200, False) and long_answer[2] < RELEASED_WITHIN_S
+    assert empty_answer[:2] == (200, True)
+    assert len(put_ports) == 2 and put_ports[0] != put_ports[1]
+
+
+@pytest.mark.parametrize("path", ["/empty-connection-close", "/empty-http-1.0"], ids=["connection-close", "http-1.0"])
+def test_release_when_an_empty_answer_ends_its_connection_should_keep_nothing_and_let_the_next_put_connect_anew(
+    tls, server_tls, path
+):
+    # Arrange: the first PUT's 200 declares an empty body and ends its connection; the second is answered 200 declaring
+    # an empty body on a connection kept open.
+    made = RequestsSession(ca_bundle=str(tls.certificate), connections=1)
+    try:
+        with _loopback_server(tls=server_tls) as (base, seen):
+            # Act: an answer not kept is closed by _put_and_release, which must raise nothing
+            ending = _put_and_release(made, base + path)
+            next_one = _put_and_release(made, base + "/part")
+            put_ports = list(seen.put_ports)
+            made.close()
+    finally:
+        made.close()
+
+    # Assert: the ending answer was not kept (nothing read, at once), and the next PUT went on a new connection.
+    assert ending[:2] == (200, False) and ending[2] < RELEASED_WITHIN_S
+    assert next_one[:2] == (200, True)
+    assert len(put_ports) == 2 and put_ports[0] != put_ports[1]
+
+
+def test_release_when_the_answer_is_not_a_real_sessions_should_do_nothing():
+    # Arrange: a test's fake answer that declares an empty body
+    response = FakeResponse(200, {"Content-Length": "0"})
+
+    # Act
+    kept = release_if_declared_empty(response)
+
+    # Assert: nothing kept, nothing closed: its caller closes it
+    assert kept is False
+    assert response.closed is False
+
+
+@pytest.mark.parametrize("ending", ["abandon", "close"])
+def test_session_when_cut_or_closed_with_a_connection_idle_in_its_pool_should_close_that_connection(
+    tls, server_tls, ending
+):
+    # Arrange: one PUT answered with an empty body, its connection back in the session's pool and idle
+    made = RequestsSession(ca_bundle=str(tls.certificate), connections=1)
+    try:
+        with _loopback_server(tls=server_tls) as (base, seen):
+            _, kept, _ = _put_and_release(made, base + "/part")
+            (port,) = seen.put_ports
+            idle = port not in seen.ended_ports
+
+            # Act
+            getattr(made, ending)()
+            closed = _eventually(lambda: port in seen.ended_ports, within_s=CUT_ENDED_WITHIN_S)
+    finally:
+        made.close()
+
+    # Assert: the idle connection was open until the session ended, and closed by its end
+    assert kept and idle
+    assert closed
+
