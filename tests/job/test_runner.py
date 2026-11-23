@@ -370,7 +370,9 @@ class Harness:
     the stand-in stages, and the Hub's side to judge what comes back.
 
     The execution's start began when the harness's clock read zero and its claim took no time, so the
-    dispatch's whole wall time is left until a test advances that clock before it runs."""
+    dispatch's whole wall time is left until a test advances that clock before it runs. Its renditions are
+    encoded one at a time unless a test asks for `parallel`, which leaves the scratch disk's free space as it
+    is."""
 
     def __init__(
         self,
@@ -384,6 +386,7 @@ class Harness:
         profile: MediaProfile = PILOT_PROFILE,
         settings: WorkerSettings = SETTINGS,
         seconds_per_post: float = 0.0,
+        parallel: bool = False,
     ) -> None:
         self.scratch_root = tmp_path / "scratch"
         self.scratch_root.mkdir()
@@ -416,6 +419,10 @@ class Harness:
             ffmpeg_version=ffmpeg_version,
         )
         monkeypatch.setattr(storage_module, "DOWNLOAD_CHUNK_BYTES", DOWNLOAD_CHUNK_BYTES)
+        if not parallel:
+            # The scratch disk reads as full, so the renditions are encoded one at a time: these tests check
+            # that path, and tests/job/test_runner_parallel.py the other.
+            monkeypatch.setattr(runner_module, "scratch_free_bytes", lambda directory: 0)
 
     def _draw_id(self) -> str:
         self.ids_drawn += 1
