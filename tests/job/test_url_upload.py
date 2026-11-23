@@ -2,7 +2,8 @@
 PUTs run at once, what each PUT carries, the batches, the retries, the refusals, the stop at the first failure and at
 the deadline, and the stored result. The Hub and the store are fakes; no network but for the last section's store on
 the loopback address, which each lane's real session (core/net/transport.py RequestsSession) PUTs to, to show that a
-PUT given up is closed with its lane's session (the Hub's register row TD-196)."""
+PUT given up is closed with its lane's session (the Hub's register row TD-196) and that a lane's PUTs share one
+connection when each 200 declares an empty body, and only then (TD-200)."""
 
 from __future__ import annotations
 
@@ -702,13 +703,16 @@ ERROR_BODY_SENT_BYTES = 10
 
 @dataclass
 class _Connection:
-    """One connection the loopback store accepted, and when it saw the client close it."""
+    """One connection the loopback store accepted, and when it first saw it end: the client closed it, or the store did
+    as its plan said."""
 
     number: int
     closed: threading.Event = field(default_factory=threading.Event)
     closed_at: float | None = None
 
     def close_seen(self) -> None:
+        if self.closed.is_set():
+            return
         self.closed_at = time.monotonic()
         self.closed.set()
 
@@ -744,6 +748,40 @@ class _RefusalBrokenOff:
     them come and the connection closes, so that reading the body for its error code ends with a transfer error."""
 
 
+@dataclass(frozen=True)
+class _SuccessWithHead:
+    """A 200 whose head carries `header_lines`, then nothing more until the client closes the connection: whatever
+    body the head declares is withheld, so that a client reading any of it would wait until the PUT's ceiling."""
+
+    header_lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _AnsweredThenClosed:
+    """A 200 that declares an empty body (and says nothing of closing), after which the store closes the connection:
+    a kept connection the store let go of while it sat idle."""
+
+
+@dataclass(frozen=True)
+class _EmptyStatus:
+    """An answer of `status` that declares an empty body, on a connection the store keeps open."""
+
+    status: int
+
+
+@dataclass(frozen=True)
+class _EmptyEndingItsConnection:
+    """A 200 that declares an empty body and ends its connection: `Connection: close`, or an HTTP/1.0 answer."""
+
+    http_1_0: bool
+
+
+@dataclass(frozen=True)
+class _ClosedUnanswered:
+    """The PUT read whole, then the connection closed with no answer: what a client meets that sent its PUT on a kept
+    connection just as the store closed it."""
+
+
 class _Lane(RequestsSession):
     """A lane's real session (one connection, as the runner's upload_session() makes it) whose PUTs go to the loopback
     store, the granted URL's path kept; it notes the thread each PUT runs on and when it was cut."""
@@ -752,6 +790,7 @@ class _Lane(RequestsSession):
         super().__init__(connections=1)
         self._store = store
         self.cut_at: float | None = None
+        self.closed_at: float | None = None
         self.puts: list[tuple[str, threading.Thread, float]] = []
 
     def put(self, url: str, data: Any, headers: Mapping[str, str], timeout: tuple[float, float], *,
@@ -766,11 +805,17 @@ class _Lane(RequestsSession):
         self.cut_at = time.monotonic()
         super().abandon()
 
+    def close(self) -> None:
+        if self.closed_at is None:
+            self.closed_at = time.monotonic()
+        super().close()
+
 
 class _LoopbackStore:
     """A store on the loopback address. `plan` maps an object's path to what its next PUTs get: a _Trickle, a _Silent,
-    a _RefusalBrokenOff, or a callable run before the 200; every other PUT is answered 200 at once, with an empty
-    body."""
+    a _RefusalBrokenOff, a _SuccessWithHead, an _AnsweredThenClosed, an _EmptyStatus, an _EmptyEndingItsConnection, a
+    _ClosedUnanswered, or a callable run before the 200; every other PUT is answered 200 at once, declaring an empty
+    body, on a connection the store keeps open."""
 
     def __init__(self, prefix_path: str) -> None:
         self.prefix_path = prefix_path
@@ -818,6 +863,13 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
                 self.accepted = _Connection(len(store.connections) + 1)
                 store.connections.append(self.accepted)
 
+        def handle(self) -> None:
+            # The connection's requests, one after the other, until the client closes it (or the store does).
+            try:
+                super().handle()
+            finally:
+                self.accepted.close_seen()
+
         def do_PUT(self) -> None:  # noqa: N802 - the standard library's name
             length = int(self.headers.get("Content-Length", "0"))
             body = self.rfile.read(length)
@@ -837,6 +889,20 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
             if isinstance(behaviour, _RefusalBrokenOff):
                 self._refuse_and_break_off()
                 return
+            if isinstance(behaviour, _SuccessWithHead):
+                self._succeed_withholding_the_body(behaviour, path)
+                return
+            if isinstance(behaviour, _ClosedUnanswered):
+                self.close_connection = True
+                return
+            if isinstance(behaviour, _EmptyStatus):
+                self.send_response(behaviour.status)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if isinstance(behaviour, _EmptyEndingItsConnection):
+                self._answer_empty_and_end_the_connection(behaviour, path)
+                return
             if callable(behaviour):
                 behaviour()
             self.send_response(200)
@@ -844,6 +910,28 @@ def _store_handler(store: _LoopbackStore) -> type[BaseHTTPRequestHandler]:
             self.end_headers()
             with store.lock:
                 store.answered.append(path)
+            if isinstance(behaviour, _AnsweredThenClosed):
+                self.close_connection = True
+
+        def _answer_empty_and_end_the_connection(self, answer: _EmptyEndingItsConnection, path: str) -> None:
+            self.close_connection = True
+            if answer.http_1_0:
+                self.protocol_version = "HTTP/1.0"
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            if not answer.http_1_0:
+                self.send_header("Connection", "close")
+            self.end_headers()
+            with store.lock:
+                store.answered.append(path)
+
+        def _succeed_withholding_the_body(self, success: _SuccessWithHead, path: str) -> None:
+            self.close_connection = True
+            head = "HTTP/1.1 200 OK\r\n" + "".join(f"{line}\r\n" for line in success.header_lines) + "\r\n"
+            self.wfile.write(head.encode("ascii"))
+            with store.lock:
+                store.answered.append(path)
+            self._stay_silent()
 
         def _trickle(self, trickle: _Trickle) -> None:
             self.close_connection = True
@@ -892,6 +980,8 @@ class _StoreServer(ThreadingHTTPServer):
     """The standard library's server without its look-up of the host's name (server_bind asks socket.getfqdn())."""
 
     daemon_threads = True
+    # Twelve lanes connect at once: a listen backlog that takes them all, so that none waits on a connect retried.
+    request_queue_size = 64
 
     def server_bind(self) -> None:
         socketserver.TCPServer.server_bind(self)
@@ -1083,23 +1173,313 @@ def test_result_when_its_put_is_given_up_should_close_its_connection_and_raise_a
     assert lane.cut_at is not None
 
 
-def test_upload_when_one_lane_puts_two_objects_in_turn_should_open_a_connection_for_each_put_and_keep_the_lanes_session(
-    tmp_path
+def _all_bytes(setup: _Setup) -> int:
+    return setup.generation.manifest.total_bytes + len(MANIFEST_BYTES)
+
+
+def test_upload_when_one_lanes_200s_declare_an_empty_body_should_carry_its_puts_in_turn_on_one_connection(
+    tmp_path, monkeypatch
 ):
-    # Arrange: one lane; every PUT is answered 200 at once (its answer is closed unread, which closes its connection).
+    # Arrange: one lane; every PUT is answered 200 declaring an empty body. The bytes each PUT of the thumbnail is read
+    # into are noted (the list's reference is the only one the test keeps), and their reference count is taken when the
+    # playlist's file is read, once the thumbnail's PUT thread has ended and its connection sits in the lane's pool. The
+    # cyclic collector is off, so that a reference cycle keeping the body would show.
     setup = _Setup(tmp_path, segments=0)
+    read_bodies: list[bytes] = []
+    counted_while_kept: list[int] = []
+    alone = [bytes(bytearray(len(b"the thumbnail")))]
+    held_by_a_list_alone = sys.getrefcount(alone[0])
+    bytes_of = url_upload._bytes_of
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        with _loopback_store(setup) as store:
+            def noting_bytes_of(item):
+                if item.upload.relative_path == "v360/playlist.m3u8":
+                    wait_until(lambda: not store.put_thread_of("thumbnail.jpg").is_alive(), within_s=CUT_SEEN_WITHIN_S)
+                    counted_while_kept.append(sys.getrefcount(read_bodies[0]))
+                data = bytes_of(item)
+                if item.upload.relative_path == "thumbnail.jpg":
+                    read_bodies.append(data)
+                return data
+
+            monkeypatch.setattr(url_upload, "_bytes_of", noting_bytes_of)
+            # Act
+            uploaded = _upload_to(store, setup, parallelism=1)
+            arrivals = list(store.arrivals)
+            connections = list(store.connections)
+            lanes = list(store.lanes)
+            closed_at_the_end = connections[0].closed.wait(CUT_SEEN_WITHIN_S)
+    finally:
+        if collecting:
+            gc.enable()
+    # Assert: the three objects went one after the other through the lane's one session and its one connection, which
+    # the client closed once the upload ended; the kept connection held nothing of the thumbnail's body.
+    assert uploaded == _all_bytes(setup)
+    assert [arrival.path for arrival in arrivals] == ["thumbnail.jpg", "v360/playlist.m3u8", MANIFEST_NAME]
+    assert len(connections) == 1 and all(arrival.connection is connections[0] for arrival in arrivals)
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+    assert closed_at_the_end
+    assert counted_while_kept == [held_by_a_list_alone]
+
+
+# Heads of a 200 that does not declare an empty body: each is closed unread, its connection with it.
+SUCCESSES_WITHOUT_AN_EMPTY_BODY = [
+    pytest.param(("Content-Length: 5",), id="a-body-of-five-bytes"),
+    pytest.param(("Transfer-Encoding: chunked",), id="chunked"),
+    pytest.param((), id="no-length"),
+    pytest.param(("Content-Length: five",), id="malformed-length"),
+    pytest.param(("Content-Length: -1",), id="negative-length"),
+    pytest.param(("Content-Length: 0", "Content-Length: 0"), id="repeated-zero-length"),
+    pytest.param(("Content-Length: 0", "Transfer-Encoding: chunked"), id="zero-length-beside-chunked"),
+]
+
+
+@pytest.mark.parametrize("header_lines", SUCCESSES_WITHOUT_AN_EMPTY_BODY)
+def test_upload_when_a_200_does_not_declare_an_empty_body_should_store_each_object_unread_on_a_connection_of_its_own(
+    tmp_path, monkeypatch, header_lines
+):
+    # Arrange: one lane; every PUT is answered 200 with that head and then nothing, until the client closes the
+    # connection: a body it declares never comes, so a client reading any of it would wait for the PUT's ceiling, 10 s.
+    setup = _Setup(tmp_path, segments=0)
+    monkeypatch.setattr(url_upload, "_request_ceiling_s", lambda size: LONG_CEILING_S)
+    before = storage_module.abandoned_requests()
+    paths = [artifact.path for artifact in setup.generation.artifacts] + [MANIFEST_NAME]
+    with _loopback_store(setup) as store:
+        for path in paths:
+            store.plan[path] = [_SuccessWithHead(header_lines)]
+        # Act
+        started = time.monotonic()
+        uploaded = _upload_to(store, setup, parallelism=1)
+        elapsed_s = time.monotonic() - started
+        arrivals = list(store.arrivals)
+        connections = list(store.connections)
+        closed = all(connection.closed.wait(CUT_SEEN_WITHIN_S) for connection in connections)
+        lanes = list(store.lanes)
+    # Assert: every object stored, no body waited for, each PUT on a connection of its own that the client closed, and
+    # nothing given up.
+    assert uploaded == _all_bytes(setup)
+    assert [arrival.path for arrival in arrivals] == paths
+    assert len(connections) == len(paths)
+    assert len({id(arrival.connection) for arrival in arrivals}) == len(paths)
+    assert closed
+    assert elapsed_s < LONG_CEILING_S
+    assert storage_module.abandoned_requests() == before
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+
+
+def test_upload_when_twelve_lanes_put_a_few_dozen_objects_should_open_one_connection_per_lane(tmp_path):
+    # Arrange: 48 artifacts and the manifest, twelve lanes; every PUT is answered 200 declaring an empty body.
+    setup = _Setup(tmp_path, segments=46)
+    objects = len(setup.generation.artifacts) + 1
     with _loopback_store(setup) as store:
         # Act
-        _upload_to(store, setup, parallelism=1)
+        uploaded = _upload_to(store, setup, parallelism=url_upload.UPLOAD_PARALLELISM)
+        arrivals = list(store.arrivals)
+        connections = list(store.connections)
+        lanes = list(store.lanes)
+        closed = all(connection.closed.wait(CUT_SEEN_WITHIN_S) for connection in connections)
+    # Assert: as many connections as lanes, far fewer than objects, each closed by the client at the upload's end.
+    assert uploaded == _all_bytes(setup)
+    assert len(arrivals) == objects
+    assert 1 < len(lanes) <= url_upload.UPLOAD_PARALLELISM
+    assert len(connections) == len(lanes) < objects
+    assert all(lane.cut_at is None for lane in lanes)
+    assert closed
+
+
+def test_upload_when_the_store_closes_a_kept_connection_after_its_200_should_store_the_next_object_by_one_retry_at_most(
+    tmp_path
+):
+    # Arrange: one lane; the thumbnail's 200 declares an empty body, and then the store closes that connection.
+    setup = _Setup(tmp_path, segments=0)
+    before = storage_module.abandoned_requests()
+    with _loopback_store(setup) as store:
+        store.plan["thumbnail.jpg"] = [_AnsweredThenClosed()]
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
+        (thumbnail,) = store.arrivals_of("thumbnail.jpg")
+        playlist_puts = store.arrivals_of("v360/playlist.m3u8")
+        answered = list(store.answered)
+        lanes = list(store.lanes)
+    # Assert: the playlist stored once, at most one retry (urllib3 mostly sees the closed connection before using it),
+    # its last PUT on a new connection; no stall, no cut.
+    assert uploaded == _all_bytes(setup)
+    assert answered.count("v360/playlist.m3u8") == 1
+    assert 1 <= len(playlist_puts) <= 2
+    assert playlist_puts[-1].connection is not thumbnail.connection
+    assert sum(setup.waits.seconds) <= storage_module.UPLOAD_RETRY_WAITS_S[0] + 1e-9
+    assert storage_module.abandoned_requests() == before
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+
+
+def test_upload_when_a_kept_connection_closes_as_a_put_goes_out_should_retry_once_on_a_new_connection_not_as_a_stall(
+    tmp_path
+):
+    # Arrange: one lane; the thumbnail's 200 declares an empty body, so its connection is kept; the playlist's first
+    # PUT, on that connection, is read whole and the store then closes the connection without an answer.
+    setup = _Setup(tmp_path, segments=0)
+    before = storage_module.abandoned_requests()
+    with _loopback_store(setup) as store:
+        store.plan["v360/playlist.m3u8"] = [_ClosedUnanswered()]
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
+        (thumbnail,) = store.arrivals_of("thumbnail.jpg")
+        first, retried = store.arrivals_of("v360/playlist.m3u8")
+        (manifest,) = store.arrivals_of(MANIFEST_NAME)
+        answered = list(store.answered)
+        lanes = list(store.lanes)
+    # Assert: the failed PUT was the kept connection's; it was tried again once, after the object's first wait, on a new
+    # connection of the same session, and stored; nothing was given up or cut.
+    assert uploaded == _all_bytes(setup)
+    assert first.connection is thumbnail.connection
+    assert retried.connection is not first.connection and manifest.connection is retried.connection
+    assert answered.count("v360/playlist.m3u8") == 1
+    assert 0 < sum(setup.waits.seconds) <= storage_module.UPLOAD_RETRY_WAITS_S[0] + 1e-9
+    assert storage_module.abandoned_requests() == before
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+
+
+def test_upload_when_a_lane_is_cut_after_an_earlier_put_kept_its_connection_should_close_every_socket_and_go_on_anew(
+    tmp_path, monkeypatch
+):
+    # Arrange: one lane; the thumbnail's 200 declares an empty body, so its connection stays in the lane's pool; the
+    # playlist's first answer, on that connection, never completes, and a PUT of the playlist may take 0.3 s.
+    setup = _Setup(tmp_path, segments=0)
+    _short_ceiling_for(setup, monkeypatch, "v360/playlist.m3u8")
+    before = storage_module.abandoned_requests()
+    with _loopback_store(setup) as store:
+        store.plan["v360/playlist.m3u8"] = [_Trickle()]
+        # Only the give-up at the ceiling may end the withheld answer, never the read time-out.
+        store.read_timeout_s = LONG_CEILING_S
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
+        (thumbnail,) = store.arrivals_of("thumbnail.jpg")
+        given_up, retried = store.arrivals_of("v360/playlist.m3u8")
+        (manifest,) = store.arrivals_of(MANIFEST_NAME)
+        kept_closed = thumbnail.connection.closed.wait(CUT_SEEN_WITHIN_S)
+        cut_lane = store.lane_of("thumbnail.jpg")
+        given_up_thread_ended = _ended(cut_lane.puts[1][1])
+        open_sockets = [sock for sock in list(cut_lane._sockets._sockets) if sock.fileno() != -1]
+        lanes = list(store.lanes)
+        connections = list(store.connections)
+    # Assert: the kept connection carried the PUT given up and was closed with the cut lane, which keeps no open socket;
+    # the retry went through a fresh session on a new connection, which the manifest then shared.
+    assert uploaded == _all_bytes(setup)
+    assert given_up.connection is thumbnail.connection
+    assert kept_closed and given_up_thread_ended
+    assert open_sockets == []
+    assert len(lanes) == 2 and lanes[0] is cut_lane and cut_lane.cut_at is not None and lanes[1].cut_at is None
+    retried_at = next(at for path, _, at in lanes[1].puts if path == "v360/playlist.m3u8")
+    assert cut_lane.cut_at < retried_at
+    assert retried.connection is not thumbnail.connection and manifest.connection is retried.connection
+    assert len(connections) == 2
+    assert storage_module.abandoned_requests() - before == 1
+
+
+@pytest.mark.parametrize("status", [503, 403])
+def test_upload_when_a_refusal_declares_an_empty_body_should_not_keep_its_connection(tmp_path, status):
+    # Arrange: one lane; the thumbnail's first PUT is answered with that status, declaring an empty body, on a
+    # connection the store keeps open (a 503 is tried again, a 403 asked for again); every other PUT 200.
+    setup = _Setup(tmp_path, segments=0)
+    with _loopback_store(setup) as store:
+        store.plan["thumbnail.jpg"] = [_EmptyStatus(status)]
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
+        arrivals = list(store.arrivals)
+        refused = arrivals[0]
+        refused_closed = refused.connection.closed.wait(CUT_SEEN_WITHIN_S)
+        lanes = list(store.lanes)
+    # Assert: the refused PUT's connection was closed by the client and the lane's next PUT went on a new one.
+    assert uploaded == _all_bytes(setup)
+    assert refused.path == "thumbnail.jpg"
+    assert refused_closed
+    assert arrivals[1].connection is not refused.connection
+    assert store.answered.count("thumbnail.jpg") == 1
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+
+
+@pytest.mark.parametrize("http_1_0", [False, True], ids=["connection-close", "http-1.0"])
+def test_upload_when_a_200_declares_an_empty_body_but_ends_its_connection_should_store_it_and_go_on_anew(
+    tmp_path, http_1_0
+):
+    # Arrange: one lane; the thumbnail's 200 declares an empty body and ends its connection.
+    setup = _Setup(tmp_path, segments=0)
+    before = storage_module.abandoned_requests()
+    with _loopback_store(setup) as store:
+        store.plan["thumbnail.jpg"] = [_EmptyEndingItsConnection(http_1_0)]
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
         (thumbnail,) = store.arrivals_of("thumbnail.jpg")
         (playlist,) = store.arrivals_of("v360/playlist.m3u8")
         lanes = list(store.lanes)
-    # Assert: the two objects went one after the other through the lane's one session, each on a connection of its own.
-    assert thumbnail.at < playlist.at
-    assert store.answered[:2] == ["thumbnail.jpg", "v360/playlist.m3u8"]
-    assert len(lanes) == 1 and lanes[0].cut_at is None
-    assert [put[0] for put in lanes[0].puts] == ["thumbnail.jpg", "v360/playlist.m3u8", MANIFEST_NAME]
+    # Assert: stored at once, the next PUT on a new connection of the same session, nothing tried again or given up.
+    assert uploaded == _all_bytes(setup)
     assert playlist.connection is not thumbnail.connection
+    assert setup.waits.seconds == []
+    assert storage_module.abandoned_requests() == before
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+
+
+def _idle_before_the_playlist(setup: _Setup, monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """The lane's kept connection sits idle `seconds` on the execution's clock (the capability client's monotonic(),
+    which the lanes read) after the thumbnail's PUT: the clock is moved on as the playlist's file is read."""
+    bytes_of = url_upload._bytes_of
+
+    def idling_bytes_of(item):
+        if item.upload.relative_path == "v360/playlist.m3u8":
+            setup.clock.advance(seconds)
+        return bytes_of(item)
+
+    monkeypatch.setattr(url_upload, "_bytes_of", idling_bytes_of)
+
+
+def test_upload_when_a_kept_connection_sat_idle_within_the_limit_should_carry_the_next_put(tmp_path, monkeypatch):
+    # Arrange: one lane; every 200 declares an empty body; the kept connection sits idle 1 s short of the limit.
+    setup = _Setup(tmp_path, segments=0)
+    _idle_before_the_playlist(setup, monkeypatch, url_upload.KEPT_IDLE_MAX_S - 1)
+    before = storage_module.abandoned_requests()
+    with _loopback_store(setup) as store:
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
+        arrivals = list(store.arrivals)
+        connections = list(store.connections)
+        lanes = list(store.lanes)
+    # Assert: one session, one connection for every PUT.
+    assert uploaded == _all_bytes(setup)
+    assert len(connections) == 1 and all(arrival.connection is connections[0] for arrival in arrivals)
+    assert len(lanes) == 1 and lanes[0].cut_at is None
+    assert storage_module.abandoned_requests() == before
+
+
+def test_upload_when_a_kept_connection_sat_idle_past_the_limit_should_close_its_session_and_go_on_a_fresh_one(
+    tmp_path, monkeypatch
+):
+    # Arrange: one lane; every 200 declares an empty body; the kept connection sits idle 1 s past the limit.
+    setup = _Setup(tmp_path, segments=0)
+    _idle_before_the_playlist(setup, monkeypatch, url_upload.KEPT_IDLE_MAX_S + 1)
+    before = storage_module.abandoned_requests()
+    with _loopback_store(setup) as store:
+        # Act
+        uploaded = _upload_to(store, setup, parallelism=1)
+        (thumbnail,) = store.arrivals_of("thumbnail.jpg")
+        (playlist,) = store.arrivals_of("v360/playlist.m3u8")
+        (manifest,) = store.arrivals_of(MANIFEST_NAME)
+        idle_closed = thumbnail.connection.closed.wait(CUT_SEEN_WITHIN_S)
+        lanes = list(store.lanes)
+    # Assert: the idle session was closed, not cut, before the playlist's PUT, which went on a new connection of a fresh
+    # session (the manifest then sharing it); each object PUT once, nothing tried again, given up or counted.
+    assert uploaded == _all_bytes(setup)
+    assert len(lanes) == 2
+    idle_lane, fresh_lane = lanes
+    assert idle_lane.cut_at is None and idle_lane.closed_at is not None
+    assert [path for path, _, _ in idle_lane.puts] == ["thumbnail.jpg"]
+    assert idle_lane.closed_at < fresh_lane.puts[0][2]
+    assert idle_closed
+    assert playlist.connection is not thumbnail.connection and manifest.connection is playlist.connection
+    assert fresh_lane.cut_at is None
+    assert setup.waits.seconds == []
+    assert storage_module.abandoned_requests() == before
 
 
 def test_upload_when_a_refusals_error_body_breaks_off_should_keep_no_reference_to_that_puts_body(tmp_path, monkeypatch):
