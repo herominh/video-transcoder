@@ -20,7 +20,8 @@ The stages, in order (the `stage` of a progress message and of a failed result; 
                   then the plan: the renditions and the room they may take, so that a source that
                   cannot be planned or does not fit fails before it is downloaded
     downloading   the whole source into the scratch directory
-    transcoding   the planned renditions, one at a time, within their output allowance
+    transcoding   the planned renditions, in parallel (three at most) where each can be given its own room
+                  up front, one at a time otherwise, within their output allowance
     finalizing    the thumbnail, the master playlist, the manifest, the manifest's self-check, and
                   the self-check of the completed result, built once for it and dropped: a result the
                   worker's own validator would refuse is found before anything is uploaded
@@ -82,14 +83,17 @@ so does an execution whose reading of the time left lay too far back to be count
 
 from __future__ import annotations
 
+import contextvars
 import errno
 import logging
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -135,6 +139,7 @@ from .config import JobSettings
 from .ffmpeg_version import installed_ffmpeg_version
 from .heartbeat import Heartbeat
 from .progress import ProgressReporter
+from .reservation import encode_mode, rendition_reservation, scratch_free_bytes
 from .scratch import hold_scratch_lock, release_scratch_lock, scratch_prefix
 from .storage import (
     DISK_FULL_ERRNOS,
@@ -187,6 +192,11 @@ URL_SESSION_CONNECTIONS = 4
 UPLOAD_SESSION_CONNECTIONS = 1
 # The class and the code of the failure that the source was no longer the recorded object (core/source_reader.py).
 SOURCE_CHANGED = ("source_integrity_mismatch", "source_changed")
+# The name every thread of a parallel encode starts with (one thread per rendition at a time).
+RENDITION_THREAD_PREFIX = "vh-rendition"
+# The most renditions encoded at once: each ffmpeg takes memory of its own, and a process the kernel kills for
+# want of it is a retryable encoder_crashed that every retry meets again. The run measured on 32 vCPU encoded 3.
+MAX_PARALLEL_RENDITIONS = 3
 
 UNSUPPORTED_PROFILE = Failure(
     "configuration_error", "unsupported_profile", False,
@@ -287,6 +297,33 @@ def _stack_report(error: BaseException) -> str:
         links.append(f"{type(link).__name__}\n{''.join(traceback.format_tb(link.__traceback__))}")
         link = _chained_to(link)
     return "chained to ".join(links).rstrip("\n")
+
+
+def _is_scratch_full(error: BaseException) -> bool:
+    return isinstance(error, WorkerFailure) and (error.failure.error_class, error.failure.code) == (
+        SCRATCH_FULL.error_class,
+        SCRATCH_FULL.code,
+    )
+
+
+def _parallel_ending(failures: Sequence[BaseException]) -> tuple[BaseException | None, list[str]]:
+    """What ends a parallel transcoding stage, of the failures its renditions recorded in order, and the stack
+    report of every bug (anything but a WorkerFailure) that is not that ending, so that none goes unlogged.
+
+    A full scratch disk first: it explains the others, and a sibling's removal can have freed the space for a
+    moment, so that another rendition's free-disk check missed it. Otherwise the first failure recorded, whatever
+    its kind: a later one may be what its stop caused, and a bug recorded after a final failure must not turn it
+    into a retried one that would fail the same way. None when nothing failed.
+    """
+    if not failures:
+        return None, []
+    ending = next((failure for failure in failures if _is_scratch_full(failure)), failures[0])
+    bug_reports = [
+        _stack_report(failure)
+        for failure in failures
+        if failure is not ending and not isinstance(failure, WorkerFailure)
+    ]
+    return ending, bug_reports
 
 
 def _is_passing_shortage(error: Exception) -> bool:
@@ -873,37 +910,148 @@ class _Execution:
 
     def _transcode(self, scratch: _Scratch, plan: _Plan, profile: MediaProfile) -> _Encoded:
         self._enter(STAGE_TRANSCODING)
-        renditions: list[RenditionOutput] = []
         # From the stage's first step on: whatever fails once the stage has begun, before the first
         # encode included, the key is dropped as the stage ends.
         try:
             source = EncodeSource.from_facts(scratch.source_path, plan.facts, profile)
-            allowance = plan.allowance
-            # One at a time, never in parallel: on the shared scratch disk a failed sibling's removal could
-            # free the space a rendition's free-disk check relies on. Each takes what the earlier ones left.
-            for planned in plan.renditions:
-                output = encode_rendition(
-                    source,
-                    planned,
-                    profile=profile,
-                    output_root=scratch.output_root,
-                    work_dir=scratch.work_dir,
-                    media_key=self._grant.media_key,
-                    allowance=allowance,
-                    deadline=self._deadline,
-                )
-                allowance = allowance.after(output)
-                renditions.append(output)
-                self._progress.rendition_done()
+            # In parallel only where every rendition can be given its own room up front, within the job's
+            # allowance and the scratch disk's free space (core/job/reservation.py): its output monitor then
+            # stops it at that room, so no rendition takes space another one reserved, and no rendition's
+            # free-disk check depends on a failed sibling's removal. Otherwise one at a time, each taking
+            # what the earlier ones left.
+            reservations = tuple(
+                rendition_reservation(planned, profile, source.duration_ms) for planned in plan.renditions
+            )
+            mode = encode_mode(reservations, plan.allowance, scratch_free_bytes(scratch.output_root))
+            logger.info("execution %s: renditions %s", self._grant.identity.execution_id, mode.reason)
+            if mode.parallel:
+                renditions = self._encoded_in_parallel(source, plan, profile, scratch, reservations)
+            else:
+                renditions = self._encoded_in_turn(source, plan, profile, scratch)
         finally:
             # Every encode and its own checks are done, or the stage failed: nothing needs the key again.
+            # In parallel, every rendition's thread has ended by now, so no ffmpeg still needs the key.
             self._grant.drop_media_key()
         return _Encoded(
             source=source,
             largest_plan=plan.renditions[0],
-            renditions=tuple(renditions),
+            renditions=renditions,
             manifest_max_bytes=plan.manifest_max_bytes,
         )
+
+    def _encoded_in_turn(
+        self, source: EncodeSource, plan: _Plan, profile: MediaProfile, scratch: _Scratch
+    ) -> tuple[RenditionOutput, ...]:
+        """The renditions one at a time, in plan order, each within what the earlier ones left."""
+        renditions: list[RenditionOutput] = []
+        allowance = plan.allowance
+        for planned in plan.renditions:
+            output = encode_rendition(
+                source,
+                planned,
+                profile=profile,
+                output_root=scratch.output_root,
+                work_dir=scratch.work_dir,
+                media_key=self._grant.media_key,
+                allowance=allowance,
+                deadline=self._deadline,
+            )
+            allowance = allowance.after(output)
+            renditions.append(output)
+            self._progress.rendition_done()
+        return tuple(renditions)
+
+    def _encoded_in_parallel(
+        self,
+        source: EncodeSource,
+        plan: _Plan,
+        profile: MediaProfile,
+        scratch: _Scratch,
+        reservations: tuple[OutputAllowance, ...],
+    ) -> tuple[RenditionOutput, ...]:
+        """The renditions at once, MAX_PARALLEL_RENDITIONS at most, each within its own reservation; returned in
+        plan order.
+
+        Each thread runs in a copy of this thread's context, so the stop checks this thread runs inside (a
+        2.2.0 execution's lost authority, core/bounded_process.py stopped_when()) stop its ffmpeg as they
+        would here; and inside one more: a sibling's failure. A rendition still waiting for a thread when a
+        sibling has failed, or the authority was lost, never starts. The first failure stops the others, and
+        ends the stage once every thread has ended (_parallel_ending): a failure the stop caused is recorded
+        after the one that set it, so it is never the first. Progress is reported from this thread, as each
+        rendition ends. What this thread itself raises (an interrupt, a thread that could not be started)
+        stops the renditions and propagates once they have ended.
+        """
+        media_key = self._grant.media_key
+        sibling_failed = threading.Event()
+        failures_lock = threading.Lock()
+        # Every failure, in the order it was recorded.
+        failures: list[BaseException] = []
+
+        def encoded(planned: RenditionPlan, reservation: OutputAllowance) -> RenditionOutput | None:
+            # A rendition that waited for a thread starts no ffmpeg once the stage is ending: a sibling's
+            # failure is already recorded, and a lost authority is recorded here, as the failure it is.
+            if sibling_failed.is_set():
+                return None
+            try:
+                if self._capabilities is not None:
+                    self._capabilities.raise_if_lost()
+                with stopped_when(sibling_failed.is_set):
+                    return encode_rendition(
+                        source,
+                        planned,
+                        profile=profile,
+                        output_root=scratch.output_root,
+                        work_dir=scratch.work_dir,
+                        media_key=media_key,
+                        allowance=reservation,
+                        deadline=self._deadline,
+                    )
+            except BaseException as error:  # noqa: BLE001 - recorded, and raised on the job's thread
+                with failures_lock:
+                    failures.append(error)
+                # Set once the failure is recorded: a failure the stop causes is recorded after it.
+                sibling_failed.set()
+                return None
+
+        outputs: list[RenditionOutput | None] = [None] * len(plan.renditions)
+        workers = min(len(plan.renditions), MAX_PARALLEL_RENDITIONS)
+        pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix=RENDITION_THREAD_PREFIX)
+        try:
+            try:
+                # One copy of this thread's context for each rendition: a context runs in one thread at a time.
+                pending = {
+                    pool.submit(contextvars.copy_context().run, encoded, planned, reservation): index
+                    for index, (planned, reservation) in enumerate(zip(plan.renditions, reservations))
+                }
+                for future in as_completed(pending):
+                    output = future.result()
+                    outputs[pending[future]] = output
+                    if output is not None:
+                        self._progress.rendition_done()
+            except BaseException:
+                # This thread itself was interrupted: no rendition goes on past the stage, and none starts.
+                sibling_failed.set()
+                raise
+            finally:
+                pool.shutdown(wait=True)
+            ending, unraised_bugs = _parallel_ending(failures)
+        finally:
+            # Let go of every recorded failure on every way out: each one's stack holds an encode's frame,
+            # which holds the media key.
+            failures.clear()
+        execution_id = self._grant.identity.execution_id
+        for bug_report in unraised_bugs:
+            # Logged here, where no `except` block is open (see _ending); the bug that ends the stage, if one
+            # does, is logged by _ending.
+            logger.error("execution %s: a rendition ended on an unexpected %s", execution_id, bug_report)
+        if ending is not None:
+            try:
+                raise ending
+            finally:
+                del ending
+        if any(output is None for output in outputs):
+            raise RuntimeError("a rendition neither ended with an output nor recorded a failure")
+        return tuple(output for output in outputs if output is not None)
 
     def _finalize(
         self, scratch: _Scratch, encoded: _Encoded, profile: MediaProfile, encoder: Encoder

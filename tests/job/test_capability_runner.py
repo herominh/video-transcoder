@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import threading
 import time
@@ -21,7 +22,7 @@ from core.job import runner as runner_module
 from core.job import storage as storage_module
 from core.job.heartbeat import HEARTBEAT_INTERVAL_S, THREAD_NAME
 from core.job.runner import JobRunner
-from core.profile import PILOT_PROFILE, profile_digest
+from core.profile import GIB, PILOT_PROFILE, profile_digest
 from core.protocol import pipeline
 from core.protocol.outbox import SealedMessage
 from core.protocol.transport import HttpAnswer, TransportFailed
@@ -49,6 +50,8 @@ RESULT_NAME = "result.json"
 STAGES = ["probing", "downloading", "transcoding", "finalizing", "uploading"]
 # A run whose stored result is not granted still reports within this many real seconds.
 STOPPED_WITHIN_S = 5.0
+# A scratch disk with room for every rendition's reservation, so that they are encoded in parallel.
+ROOMY_DISK_BYTES = 100 * GIB
 ENCODER_STOPPED = Failure("encoder_failed", "stand_in_encode_stopped", True, "the stand-in encode was stopped")
 
 
@@ -154,10 +157,12 @@ def test_run_when_the_hub_refuses_a_stage_should_fail_authority_refused_at_that_
 
 @pytest.mark.skipif(os.name != "posix", reason="bounded processes run under POSIX process groups")
 def test_run_when_the_lease_is_lost_during_an_encode_should_stop_it_and_fail_with_the_hubs_code_at_its_stage(
-    harness, monkeypatch
+    harness, monkeypatch, caplog
 ):
     # Arrange: the stand-in encode runs a long process; while it runs, 120 s pass on the Hub's clock and the
-    # heartbeat that follows is refused, which stops the process through the stop check.
+    # heartbeat that follows is refused, which stops the process through the stop check. The renditions are
+    # encoded in parallel, whatever this host's disk holds: a lost authority's failure must win there too.
+    monkeypatch.setattr(runner_module, "scratch_free_bytes", lambda directory: ROOMY_DISK_BYTES)
     stand_in = harness.stages.encode_rendition
     keys_seen: list[bytes | None] = []
 
@@ -172,9 +177,11 @@ def test_run_when_the_lease_is_lost_during_an_encode_should_stop_it_and_fail_wit
         return stand_in(*args, **named)
 
     monkeypatch.setattr(runner_module, "encode_rendition", encode_that_runs)
+    caplog.set_level(logging.INFO, logger=runner_module.__name__)
     # Act
     result = harness.result()
     # Assert
+    assert any("renditions parallel:" in record.getMessage() for record in caplog.records)
     error = result["error"]
     assert (error["class"], error["code"], error["retryable"], error["stage"]) == (
         "authority_refused", "lease_expired", False, "transcoding")

@@ -30,8 +30,9 @@ import pytest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from core import profile as profile_module
+from core.job import runner as runner_module
 from core.job.runner import JobRunner
-from core.profile import LadderRung, profile_digest
+from core.profile import GIB, LadderRung, profile_digest
 from core.protocol import pipeline
 from core.protocol.handler import ClaimedExecution
 from core.protocol.outbox import SealedMessage
@@ -77,6 +78,7 @@ JPEG_START = b"\xff\xd8"
 # states for the ffmpeg where the installed one's must not take any of that time.
 WALL_TIME_LEFT_S = 0.5
 STATED_FFMPEG_VERSION = "7.1-stated"
+ROOMY_DISK_BYTES = 100 * GIB
 
 
 @dataclass(frozen=True)
@@ -156,6 +158,8 @@ def _run_job(root: Path, media: Path, *, encrypted: bool, stored_etag: str = SOU
     )
     with pytest.MonkeyPatch.context() as patched, _everything_logged() as lines:
         patched.setattr(profile_module, "SUPPORTED_PROFILES", (PROFILE,))
+        # Room for every rendition's reservation, whatever this host's disk holds: the renditions run in parallel.
+        patched.setattr(runner_module, "scratch_free_bytes", lambda directory: ROOMY_DISK_BYTES)
         sealed = runner.run(claimed, runtime_of(transport, clock))
     return _Run(
         claimed=claimed, sealed=sealed, s3=s3, clock=clock, transport=transport, scratch_root=scratch_root,
@@ -191,6 +195,18 @@ def test_job_when_run_end_to_end_should_return_a_completed_result_the_hub_accept
     assert result["encoder"]["image_digest"] == IMAGE_DIGEST
     assert result["encoder"]["preset"] == "ultrafast"
     assert "diagnostics" not in result
+
+
+def test_job_when_run_end_to_end_with_room_for_every_reservation_should_encode_the_renditions_in_parallel(
+    run: _Run,
+) -> None:
+    # Act
+    result = run.result
+
+    # Assert: the real ffmpeg encoded both renditions at once, and the generation is whole
+    assert result["message_kind"] == COMPLETED_KIND
+    assert f"renditions parallel: {len(REQUESTED)} renditions" in run.logged
+    assert [rendition["name"] for rendition in run.manifest["renditions"]] == REQUESTED
 
 
 def test_job_when_run_end_to_end_should_put_every_object_under_the_granted_prefix_then_the_manifest_and_result(
